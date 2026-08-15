@@ -8,13 +8,13 @@ The target is configurable (`$200` by default). There is no guarantee of earning
 
 ## Why this stack
 
-**Runner: Hermes Agent.** Hermes runs natively on Windows 10/11, has local terminal/browser tools, checkpoints, provider fallbacks, cron, non-interactive execution, and up to 500 tool-calling turns per run. ATM does not depend on one infinite chat: if a Hermes run exits or a provider rate-limits, `src/atm.py` persists state and starts another run.
+**Runner: Hermes Agent.** Hermes runs natively on Windows 10/11, has local terminal/browser tools, checkpoints, provider fallbacks, cron, non-interactive execution, and bounded tool-calling sessions. ATM does not depend on one infinite chat: if a Hermes run exits or a provider rate-limits, `src/atm.py` persists state and starts another run.
 
-**$0 worker path: Qwen OAuth.** Hermes can authenticate to the consumer Qwen Portal by browser OAuth with no API key. ATM uses `qwen3-coder-plus` for WORK/SUBMIT by default.
+**$0 worker path: Qwen OAuth.** Hermes can authenticate to Qwen by browser OAuth with no API key. ATM uses `qwen3-coder-plus` for WORK/SUBMIT by default.
 
-**$0 GLM fallback/scout: GLM-4.7-Flash.** Z.ai's official pricing currently lists `GLM-4.7-Flash` and `GLM-4.5-Flash` as free input/output API models. It still requires a Z.ai account + API key. ATM uses GLM-4.7-Flash for cheap discovery/checking when a key is present.
+**$0 GLM fallback/scout: GLM-4.7-Flash.** Z.ai's official pricing currently lists `GLM-4.7-Flash` and `GLM-4.5-Flash` as free input/output API models. It still requires a Z.ai account + API key. ATM uses GLM-4.7-Flash for discovery/checking when a key is present.
 
-**GLM-5.2 is not the permanent $0 API path.** Z.ai currently sells GLM-5.2 through paid API/Coding Plan quotas. A five-day ZCode trial exists for new users, but ATM does not depend on a temporary trial.
+**GLM-5.2 is not the permanent $0 API path.** ATM does not depend on temporary trials or paid coding-plan quotas.
 
 ## Exact links
 
@@ -22,18 +22,18 @@ The target is configurable (`$200` by default). There is no guarantee of earning
 - Hermes latest releases: https://github.com/NousResearch/hermes-agent/releases/latest
 - Hermes Windows installer script: https://hermes-agent.nousresearch.com/install.ps1
 - Hermes docs: https://hermes-agent.nousresearch.com/docs/
-- Qwen account / OAuth login: https://chat.qwen.ai/
+- Qwen: https://chat.qwen.ai/
 - Z.ai API keys: https://z.ai/manage-apikey/apikey-list
-- Z.ai free-model pricing: https://docs.z.ai/guides/overview/pricing
+- Z.ai pricing: https://docs.z.ai/guides/overview/pricing
 - GitHub CLI: https://github.com/cli/cli/releases/latest
 - This repo: https://github.com/simonkey888/ATM-Agent-Teller-Machine
 
 ## Windows quick start
 
-Open PowerShell:
+Development branch:
 
 ```powershell
-git clone https://github.com/simonkey888/ATM-Agent-Teller-Machine.git
+git clone -b agent/atm-v1 https://github.com/simonkey888/ATM-Agent-Teller-Machine.git
 cd ATM-Agent-Teller-Machine
 powershell -ExecutionPolicy Bypass -File .\scripts\install-atm.ps1
 ```
@@ -45,17 +45,22 @@ gh auth login
 hermes model
 ```
 
-In `hermes model`, choose **Qwen OAuth (Portal)** and model **qwen3-coder-plus**.
+In `hermes model`, choose **Qwen -> Qwen CLI OAuth -> qwen3-coder-plus**.
 
-Optional but recommended second $0 rail: create a Z.ai API key at:
+Optional second $0 rail: create a Z.ai API key at:
 
 https://z.ai/manage-apikey/apikey-list
 
-Then save it to Hermes, not this repository:
+Hermes on Windows stores its secrets at `%LOCALAPPDATA%\hermes\.env`. Open it with:
 
 ```powershell
-New-Item -ItemType Directory -Force "$HOME\.hermes" | Out-Null
-Add-Content "$HOME\.hermes\.env" 'GLM_API_KEY=PASTE_KEY_HERE'
+notepad "$env:LOCALAPPDATA\hermes\.env"
+```
+
+Add:
+
+```text
+GLM_API_KEY=PASTE_KEY_HERE
 ```
 
 Run the doctor:
@@ -103,7 +108,6 @@ Important defaults:
 - auto-claim: enabled for reversible $0 claims
 - auto-PR: enabled
 - provider fallback: Qwen OAuth <-> free Z.ai GLM-4.7-Flash
-- Hermes max turns/run: 500
 - persistent restart loop: enabled
 
 `config/atm.json` is ignored by git so local changes remain local.
