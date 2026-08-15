@@ -20,13 +20,11 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     Write-Host "GitHub CLI already installed."
 }
 
-$HermesEnv = Join-Path (Join-Path $env:LOCALAPPDATA "hermes") ".env"
-
 Write-Host ""
 Write-Host "ONE-TIME HUMAN ONBOARDING" -ForegroundColor Yellow
 Write-Host "1) gh auth login"
-Write-Host "2) hermes model -> Qwen -> Qwen CLI OAuth -> qwen3-coder-plus"
-Write-Host "3) Optional GLM free fallback key: https://z.ai/manage-apikey/apikey-list"
-Write-Host "4) Add GLM_API_KEY to $HermesEnv"
+Write-Host "2) hermes model -> OpenAI -> ChatGPT or Codex Subscription"
+Write-Host "   Sign in with your ChatGPT account; no API key copy/paste is required."
+Write-Host "3) Z.AI fallback is optional and disabled by default."
 Write-Host ""
 Write-Host "Then run: .\scripts\doctor.ps1"
