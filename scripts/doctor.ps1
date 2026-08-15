@@ -7,7 +7,14 @@ Write-Host "ATM doctor" -ForegroundColor Cyan
 if (Get-Command hermes -ErrorAction SilentlyContinue) {
     Write-Host "[OK] hermes: $((Get-Command hermes).Source)"
     hermes --version
-    hermes doctor
+    $doctorOut = (& hermes doctor 2>&1 | Out-String)
+    Write-Host $doctorOut
+    if ($doctorOut -match 'OpenAI Codex auth \(not logged in\)') {
+        Write-Host "[ACTION] authenticate Codex in Hermes: hermes model -> OpenAI -> ChatGPT or Codex Subscription" -ForegroundColor Yellow
+        $ok = $false
+    } else {
+        Write-Host "[OK] no unauthenticated OpenAI Codex warning detected"
+    }
 } else {
     Write-Host "[FAIL] hermes missing" -ForegroundColor Red
     $ok = $false
@@ -30,17 +37,9 @@ $HermesEnv = Join-Path $HermesHome ".env"
 if (Test-Path $HermesEnv) {
     $hasGlm = Select-String -Path $HermesEnv -Pattern '^GLM_API_KEY=.+' -Quiet
     if ($hasGlm) {
-        Write-Host "[OK] GLM_API_KEY present in $HermesEnv (value not printed)"
-    } else {
-        Write-Host "[INFO] No GLM_API_KEY in $HermesEnv. ATM can still use Qwen OAuth."
+        Write-Host "[INFO] GLM_API_KEY present in $HermesEnv, but Z.AI fallback is disabled by default."
     }
-} else {
-    Write-Host "[INFO] Hermes env file not found at $HermesEnv. ATM can still use Qwen OAuth."
 }
-
-Write-Host ""
-Write-Host "Qwen OAuth cannot be safely inferred from a secret dump."
-Write-Host "If not already done: hermes model -> Qwen -> Qwen CLI OAuth -> qwen3-coder-plus"
 
 if ($ok) {
     Write-Host "Core local prerequisites look ready." -ForegroundColor Green
