@@ -25,21 +25,22 @@ if (Get-Command gh -ErrorAction SilentlyContinue) {
     $ok = $false
 }
 
-$HermesEnv = Join-Path $HOME ".hermes\.env"
+$HermesHome = Join-Path $env:LOCALAPPDATA "hermes"
+$HermesEnv = Join-Path $HermesHome ".env"
 if (Test-Path $HermesEnv) {
     $hasGlm = Select-String -Path $HermesEnv -Pattern '^GLM_API_KEY=.+' -Quiet
     if ($hasGlm) {
-        Write-Host "[OK] GLM_API_KEY present in ~/.hermes/.env (value not printed)"
+        Write-Host "[OK] GLM_API_KEY present in $HermesEnv (value not printed)"
     } else {
-        Write-Host "[INFO] No GLM_API_KEY. ATM can still use Qwen OAuth."
+        Write-Host "[INFO] No GLM_API_KEY in $HermesEnv. ATM can still use Qwen OAuth."
     }
 } else {
-    Write-Host "[INFO] ~/.hermes/.env absent. ATM can still use Qwen OAuth."
+    Write-Host "[INFO] Hermes env file not found at $HermesEnv. ATM can still use Qwen OAuth."
 }
 
 Write-Host ""
 Write-Host "Qwen OAuth cannot be safely inferred from a secret dump."
-Write-Host "If not already done: hermes model -> Qwen OAuth (Portal) -> qwen3-coder-plus"
+Write-Host "If not already done: hermes model -> Qwen -> Qwen CLI OAuth -> qwen3-coder-plus"
 
 if ($ok) {
     Write-Host "Core local prerequisites look ready." -ForegroundColor Green
