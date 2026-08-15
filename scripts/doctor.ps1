@@ -7,14 +7,6 @@ Write-Host "ATM doctor" -ForegroundColor Cyan
 if (Get-Command hermes -ErrorAction SilentlyContinue) {
     Write-Host "[OK] hermes: $((Get-Command hermes).Source)"
     hermes --version
-    $doctorOut = (& hermes doctor 2>&1 | Out-String)
-    Write-Host $doctorOut
-    if ($doctorOut -match 'OpenAI Codex auth \(not logged in\)') {
-        Write-Host "[ACTION] authenticate Codex in Hermes: hermes model -> OpenAI -> ChatGPT or Codex Subscription" -ForegroundColor Yellow
-        $ok = $false
-    } else {
-        Write-Host "[OK] no unauthenticated OpenAI Codex warning detected"
-    }
 } else {
     Write-Host "[FAIL] hermes missing" -ForegroundColor Red
     $ok = $false
@@ -32,17 +24,22 @@ if (Get-Command gh -ErrorAction SilentlyContinue) {
     $ok = $false
 }
 
-$HermesHome = Join-Path $env:LOCALAPPDATA "hermes"
-$HermesEnv = Join-Path $HermesHome ".env"
+$HermesEnv = Join-Path (Join-Path $env:LOCALAPPDATA "hermes") ".env"
 if (Test-Path $HermesEnv) {
-    $hasGlm = Select-String -Path $HermesEnv -Pattern '^GLM_API_KEY=.+' -Quiet
-    if ($hasGlm) {
-        Write-Host "[INFO] GLM_API_KEY present in $HermesEnv, but Z.AI fallback is disabled by default."
+    $hasGoogle = Select-String -Path $HermesEnv -Pattern '^GOOGLE_API_KEY=.+' -Quiet
+    if ($hasGoogle) {
+        Write-Host "[OK] GOOGLE_API_KEY present in $HermesEnv (value not printed)"
+    } else {
+        Write-Host "[FAIL] GOOGLE_API_KEY missing in $HermesEnv" -ForegroundColor Red
+        $ok = $false
     }
+} else {
+    Write-Host "[FAIL] Hermes env file not found at $HermesEnv" -ForegroundColor Red
+    $ok = $false
 }
 
 if ($ok) {
-    Write-Host "Core local prerequisites look ready." -ForegroundColor Green
+    Write-Host "Core local prerequisites look ready for Gemini." -ForegroundColor Green
     exit 0
 }
 exit 1
