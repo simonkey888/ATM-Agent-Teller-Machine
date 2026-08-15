@@ -10,6 +10,8 @@
 
 Hermes' Windows installer provisions its own Python/uv, Node and portable Git when needed.
 
+Hermes Windows data/config lives under `%LOCALAPPDATA%\hermes` (for example `C:\Users\<you>\AppData\Local\hermes`).
+
 ## 1. Install ATM repo
 
 If Git is already available:
@@ -19,9 +21,11 @@ git clone https://github.com/simonkey888/ATM-Agent-Teller-Machine.git
 cd ATM-Agent-Teller-Machine
 ```
 
-If not, run the ATM installer first after downloading the repo ZIP from:
+During ATM v1 development use branch `agent/atm-v1`:
 
-https://github.com/simonkey888/ATM-Agent-Teller-Machine/archive/refs/heads/main.zip
+```powershell
+git switch agent/atm-v1
+```
 
 ## 2. Install Hermes + GitHub CLI
 
@@ -54,7 +58,8 @@ hermes model
 
 Select:
 
-- provider: `Qwen OAuth (Portal)`
+- provider family: `Qwen`
+- auth path: `Qwen CLI OAuth`
 - model: `qwen3-coder-plus`
 
 The browser opens. Log in and approve OAuth.
@@ -65,11 +70,10 @@ Create key:
 
 https://z.ai/manage-apikey/apikey-list
 
-Then:
+Then open Hermes' real Windows env file:
 
 ```powershell
-New-Item -ItemType Directory -Force "$HOME\.hermes" | Out-Null
-notepad "$HOME\.hermes\.env"
+notepad "$env:LOCALAPPDATA\hermes\.env"
 ```
 
 Add:
@@ -80,7 +84,7 @@ GLM_API_KEY=YOUR_KEY
 
 Do not put the key in this repo.
 
-Z.ai currently lists GLM-4.7-Flash as free input/output. Check the current pricing before running:
+Z.ai currently lists GLM-4.7-Flash as free input/output. Check current pricing before running:
 
 https://docs.z.ai/guides/overview/pricing
 
@@ -114,4 +118,4 @@ ATM persists state, so closing/restarting the supervisor does not reset the miss
 
 Ctrl+C.
 
-There is intentionally no service auto-install in v1. Run interactively until the first real bounty completes; only then should it be promoted to a Windows Scheduled Task/service.
+There is intentionally no ATM service auto-install in v1. Run interactively until the first real bounty completes; only then should it be promoted to a Windows Scheduled Task/service.
