@@ -9,82 +9,46 @@
   "allow_auto_pr": true,
   "provider": {
     "primary": {
-      "provider": "qwen-oauth",
-      "model": "qwen3-coder-plus"
+      "provider": "openai-codex"
     },
     "fallbacks": [
       {
         "provider": "zai",
-        "model": "GLM-4.7-Flash",
-        "requires_env": "GLM_API_KEY"
+        "model": "glm-4.7-flash",
+        "requires_env": "GLM_API_KEY",
+        "enabled": false
       }
     ]
   },
   "providers_by_phase": {
     "DISCOVER": [
       {
-        "provider": "zai",
-        "model": "GLM-4.7-Flash",
-        "requires_env": "GLM_API_KEY"
-      },
-      {
-        "provider": "qwen-oauth",
-        "model": "qwen3-coder-plus"
+        "provider": "openai-codex"
       }
     ],
     "CLAIM": [
       {
-        "provider": "zai",
-        "model": "GLM-4.7-Flash",
-        "requires_env": "GLM_API_KEY"
-      },
-      {
-        "provider": "qwen-oauth",
-        "model": "qwen3-coder-plus"
+        "provider": "openai-codex"
       }
     ],
     "WORK": [
       {
-        "provider": "qwen-oauth",
-        "model": "qwen3-coder-plus"
-      },
-      {
-        "provider": "zai",
-        "model": "GLM-4.7-Flash",
-        "requires_env": "GLM_API_KEY"
+        "provider": "openai-codex"
       }
     ],
     "CHECK": [
       {
-        "provider": "zai",
-        "model": "GLM-4.7-Flash",
-        "requires_env": "GLM_API_KEY"
-      },
-      {
-        "provider": "qwen-oauth",
-        "model": "qwen3-coder-plus"
+        "provider": "openai-codex"
       }
     ],
     "SUBMIT": [
       {
-        "provider": "qwen-oauth",
-        "model": "qwen3-coder-plus"
-      },
-      {
-        "provider": "zai",
-        "model": "GLM-4.7-Flash",
-        "requires_env": "GLM_API_KEY"
+        "provider": "openai-codex"
       }
     ],
     "MONITOR": [
       {
-        "provider": "zai",
-        "model": "GLM-4.7-Flash",
-        "requires_env": "GLM_API_KEY"
-      },
-      {
-        "provider": "qwen-oauth",
-        "model": "qwen3-coder-plus"
+        "provider": "openai-codex"
       }
     ]
   },
