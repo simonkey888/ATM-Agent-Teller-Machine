@@ -9,46 +9,53 @@
   "allow_auto_pr": true,
   "provider": {
     "primary": {
-      "provider": "openai-codex"
+      "provider": "gemini",
+      "model": "gemini-3.5-flash",
+      "requires_env": "GOOGLE_API_KEY"
     },
-    "fallbacks": [
-      {
-        "provider": "zai",
-        "model": "glm-4.7-flash",
-        "requires_env": "GLM_API_KEY",
-        "enabled": false
-      }
-    ]
+    "fallbacks": []
   },
   "providers_by_phase": {
     "DISCOVER": [
       {
-        "provider": "openai-codex"
+        "provider": "gemini",
+        "model": "gemini-3.5-flash",
+        "requires_env": "GOOGLE_API_KEY"
       }
     ],
     "CLAIM": [
       {
-        "provider": "openai-codex"
+        "provider": "gemini",
+        "model": "gemini-3.5-flash",
+        "requires_env": "GOOGLE_API_KEY"
       }
     ],
     "WORK": [
       {
-        "provider": "openai-codex"
+        "provider": "gemini",
+        "model": "gemini-3.5-flash",
+        "requires_env": "GOOGLE_API_KEY"
       }
     ],
     "CHECK": [
       {
-        "provider": "openai-codex"
+        "provider": "gemini",
+        "model": "gemini-3.5-flash",
+        "requires_env": "GOOGLE_API_KEY"
       }
     ],
     "SUBMIT": [
       {
-        "provider": "openai-codex"
+        "provider": "gemini",
+        "model": "gemini-3.5-flash",
+        "requires_env": "GOOGLE_API_KEY"
       }
     ],
     "MONITOR": [
       {
-        "provider": "openai-codex"
+        "provider": "gemini",
+        "model": "gemini-3.5-flash",
+        "requires_env": "GOOGLE_API_KEY"
       }
     ]
   },
