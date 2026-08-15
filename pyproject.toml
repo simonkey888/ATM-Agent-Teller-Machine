@@ -1,0 +1,9 @@
+[project]
+name = "atm-agent-teller-machine"
+version = "0.1.0"
+description = "Persistent local supervisor for autonomous software bounty work"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

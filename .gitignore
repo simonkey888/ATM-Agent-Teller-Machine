@@ -1,0 +1,7 @@
+.atm/
+config/atm.json
+.env
+*.log
+__pycache__/
+.pytest_cache/
+.venv/

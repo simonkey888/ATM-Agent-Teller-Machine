@@ -1,0 +1,115 @@
+{
+  "target_paid_usd": 200,
+  "min_reward_usd": 100,
+  "ideal_reward_usd": 200,
+  "max_task_hours": 12,
+  "max_competition": 8,
+  "dry_run": false,
+  "allow_auto_claim": true,
+  "allow_auto_pr": true,
+  "provider": {
+    "primary": {
+      "provider": "qwen-oauth",
+      "model": "qwen3-coder-plus"
+    },
+    "fallbacks": [
+      {
+        "provider": "zai",
+        "model": "GLM-4.7-Flash",
+        "requires_env": "GLM_API_KEY"
+      }
+    ]
+  },
+  "providers_by_phase": {
+    "DISCOVER": [
+      {
+        "provider": "zai",
+        "model": "GLM-4.7-Flash",
+        "requires_env": "GLM_API_KEY"
+      },
+      {
+        "provider": "qwen-oauth",
+        "model": "qwen3-coder-plus"
+      }
+    ],
+    "CLAIM": [
+      {
+        "provider": "zai",
+        "model": "GLM-4.7-Flash",
+        "requires_env": "GLM_API_KEY"
+      },
+      {
+        "provider": "qwen-oauth",
+        "model": "qwen3-coder-plus"
+      }
+    ],
+    "WORK": [
+      {
+        "provider": "qwen-oauth",
+        "model": "qwen3-coder-plus"
+      },
+      {
+        "provider": "zai",
+        "model": "GLM-4.7-Flash",
+        "requires_env": "GLM_API_KEY"
+      }
+    ],
+    "CHECK": [
+      {
+        "provider": "zai",
+        "model": "GLM-4.7-Flash",
+        "requires_env": "GLM_API_KEY"
+      },
+      {
+        "provider": "qwen-oauth",
+        "model": "qwen3-coder-plus"
+      }
+    ],
+    "SUBMIT": [
+      {
+        "provider": "qwen-oauth",
+        "model": "qwen3-coder-plus"
+      },
+      {
+        "provider": "zai",
+        "model": "GLM-4.7-Flash",
+        "requires_env": "GLM_API_KEY"
+      }
+    ],
+    "MONITOR": [
+      {
+        "provider": "zai",
+        "model": "GLM-4.7-Flash",
+        "requires_env": "GLM_API_KEY"
+      },
+      {
+        "provider": "qwen-oauth",
+        "model": "qwen3-coder-plus"
+      }
+    ]
+  },
+  "hermes": {
+    "max_turns": 500,
+    "process_timeout_seconds": 7200
+  },
+  "loop": {
+    "failure_backoff_seconds": 30,
+    "max_failure_backoff_seconds": 1800,
+    "phase_delay_seconds": {
+      "DISCOVER": 30,
+      "CLAIM": 5,
+      "WORK": 5,
+      "CHECK": 5,
+      "SUBMIT": 5,
+      "MONITOR": 600
+    }
+  },
+  "sources": [
+    "GitHub issues labelled bounty/reward",
+    "Opire",
+    "Algora",
+    "AgentPact",
+    "TaskMarket",
+    "0xSCADA and other explicitly agent-friendly bounty protocols"
+  ]
+}
