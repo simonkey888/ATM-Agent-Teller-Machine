@@ -1,4 +1,5 @@
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
@@ -6,6 +7,7 @@ MODULE = Path(__file__).resolve().parents[1] / "src" / "atm.py"
 spec = importlib.util.spec_from_file_location("atm", MODULE)
 atm = importlib.util.module_from_spec(spec)
 assert spec and spec.loader
+sys.modules[spec.name] = atm
 spec.loader.exec_module(atm)
 
 
