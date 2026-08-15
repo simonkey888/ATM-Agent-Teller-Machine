@@ -132,6 +132,13 @@ def extract_json(text: str) -> dict[str, Any]:
     raise ValueError("Could not extract a JSON object from Hermes output")
 
 
+def hermes_env_path() -> Path:
+    local_appdata = os.getenv("LOCALAPPDATA")
+    if local_appdata:
+        return Path(local_appdata) / "hermes" / ".env"
+    return Path.home() / ".hermes" / ".env"
+
+
 @dataclass(frozen=True)
 class Provider:
     provider: str
@@ -153,10 +160,10 @@ class Provider:
             return self.enabled
         if os.getenv(self.requires_env):
             return True
-        hermes_env = Path.home() / ".hermes" / ".env"
-        if hermes_env.exists():
+        env_file = hermes_env_path()
+        if env_file.exists():
             prefix = self.requires_env + "="
-            for line in hermes_env.read_text(encoding="utf-8", errors="ignore").splitlines():
+            for line in env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
                 if line.strip().startswith(prefix):
                     return bool(line.split("=", 1)[1].strip())
         return False
