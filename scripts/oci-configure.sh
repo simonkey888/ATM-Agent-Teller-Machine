@@ -14,10 +14,22 @@ for _ in $(seq 1 90); do "${SSH[@]}" 'test -f /var/lib/atm/cloud-init-ready' >/d
 [ "$("${SSH[@]}" 'git -C /opt/atm rev-parse HEAD')" = "$SHA" ] || fail REMOTE_SHA_MISMATCH
 "${SSH[@]}" 'test -x /var/lib/atm/.local/bin/hermes' || fail HERMES_NOT_INSTALLED
 
-read -rsp 'GitHub classic PAT with public_repo scope (control + isolated publisher; not echoed): ' GH; echo
+# Resume-safe secret sourcing. Prefer an already-configured OCI host, then
+# existing local environment/gh auth, and only then ask once in Cloud Shell.
+GH="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+if [ -z "$GH" ]; then
+  GH="$("${SSH[@]}" 'sudo sh -c '\''[ -f /etc/atm/control.env ] || exit 0; set -a; . /etc/atm/control.env >/dev/null 2>&1; printf %s "${GITHUB_TOKEN:-}"'\''' 2>/dev/null || true)"
+fi
+if [ -z "$GH" ] && command -v gh >/dev/null 2>&1; then GH="$(gh auth token 2>/dev/null || true)"; fi
+if [ -z "$GH" ]; then read -rsp 'GitHub classic PAT with public_repo scope (control + isolated publisher; not echoed): ' GH; echo; fi
 [ -n "$GH" ] || fail GITHUB_TOKEN_EMPTY
 [ "$(curl -fsS -H "Authorization: Bearer $GH" https://api.github.com/user|jq -r .login)" = simonkey888 ] || fail GITHUB_TOKEN_INVALID
-read -rsp 'GOOGLE_API_KEY for Hermes (not echoed): ' MODELKEY; echo
+
+MODELKEY="${GOOGLE_API_KEY:-}"
+if [ -z "$MODELKEY" ]; then
+  MODELKEY="$("${SSH[@]}" 'sudo sh -c '\''[ -f /etc/atm/runtime.env ] || exit 0; set -a; . /etc/atm/runtime.env >/dev/null 2>&1; printf %s "${GOOGLE_API_KEY:-}"'\''' 2>/dev/null || true)"
+fi
+if [ -z "$MODELKEY" ]; then read -rsp 'GOOGLE_API_KEY for Hermes (not echoed): ' MODELKEY; echo; fi
 [ -n "$MODELKEY" ] || fail MODEL_KEY_EMPTY
 PAYOUT="${ATM_BASE_WALLET_ADDRESS:-}"
 [[ "$PAYOUT" =~ ^0x[0-9a-fA-F]{40}$ ]] || fail ATM_BASE_WALLET_ADDRESS_INVALID
@@ -54,9 +66,9 @@ ID="order002c-oci-doctor-$SHA"; post DOCTOR "$ID" '{"target_host":"OCI"}'>/dev/n
 
 WIN="$(curl -fsS -H "Authorization: Bearer $GH" "https://api.github.com/repos/$REPO/issues/$CONTROL/comments?per_page=100"|jq -r --arg id "$STOPID" '.[]|select(.body|startswith("ATM_RESULT_V1"))|select(.body|contains("COMMAND_ID="+$id+"\n"))|.body'|tail -n1)"
 if [ -z "$WIN" ]; then
-  cleanup
-  echo "{\"status\":\"CUTOVER_BLOCKED_WINDOWS_STOP_UNPROVEN\",\"instance_ocid\":\"$INSTANCE_ID\",\"source_sha\":\"$SHA\",\"controller_systemd\":\"ACTIVE\",\"publisher_systemd\":\"ACTIVE\",\"supervisor_systemd\":\"STOPPED\",\"observatory_issue\":$OBS,\"secrets_printed\":false}"
-  fail WINDOWS_STOP_UNPROVEN_OCI_SUPERVISOR_NOT_STARTED 30
+  echo "{\"status\":\"CUTOVER_WAITING_WINDOWS_STOP_GITHUB_CONTINUATION\",\"instance_ocid\":\"$INSTANCE_ID\",\"source_sha\":\"$SHA\",\"controller_systemd\":\"ACTIVE\",\"publisher_systemd\":\"ACTIVE\",\"supervisor_systemd\":\"STOPPED\",\"control_issue\":$CONTROL,\"observatory_issue\":$OBS,\"ssh_ingress_after_bootstrap\":\"NONE\",\"secrets_printed\":false}"
+  echo ORDER_002C_BOOTSTRAP_STATUS=WAITING_WINDOWS_STOP_GITHUB_CONTINUATION
+  exit 0
 fi
 
 ID="order002c-oci-runonce-$SHA"; post RUN_ONCE "$ID" '{"target_host":"OCI"}'>/dev/null; waitres "$ID" || fail RUN_ONCE_E2E
