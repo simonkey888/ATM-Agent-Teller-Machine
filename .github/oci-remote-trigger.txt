@@ -1,7 +1,7 @@
-bootstrap=2026-08-16T22:50:00Z
+bootstrap=2026-08-16T22:55:00Z
 probe_run=31975900518
 probe_result=success
-retry=6
+retry=7
 secret_bundle=owner_corrected
-compute_inventory_fallback=count_then_scalar_sums
+compute_inventory=oci_python_sdk
 mode=zero_spend_a1_only
