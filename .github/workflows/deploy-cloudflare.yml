@@ -58,23 +58,26 @@ jobs:
           EXPECTED_SHA: ${{ github.sha }}
         run: |
           python - <<'PY'
-          import json, os, time, urllib.request, urllib.parse
+          import json, os, subprocess, time, urllib.parse
           base = "https://atm.simondalmasso44.workers.dev/health"
           expected = os.environ["EXPECTED_SHA"]
           last = None
-          # workers.dev can lag a successful deploy by several minutes. Every
-          # probe is cache-busted and must return the exact triggering SHA.
-          for attempt in range(120):
+          # Use curl with a normal explicit UA: workers.dev can reject the default
+          # Python urllib user-agent even while the public endpoint is healthy.
+          for attempt in range(60):
               url = base + "?" + urllib.parse.urlencode({"sha": expected, "attempt": attempt})
               try:
-                  req = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
-                  with urllib.request.urlopen(req, timeout=15) as r:
-                      last = json.loads(r.read().decode())
+                  raw = subprocess.check_output(
+                      ["curl", "-fsS", "--max-time", "15", "-A", "ATM-CI-Exact-SHA/1.0", "-H", "Cache-Control: no-cache", url],
+                      text=True,
+                      timeout=20,
+                  )
+                  last = json.loads(raw)
                   if last.get("ok") is True and last.get("git_sha") == expected:
                       print(json.dumps(last, sort_keys=True))
                       raise SystemExit(0)
               except Exception as exc:
                   last = {"error": str(exc)}
-              time.sleep(5)
+              time.sleep(3)
           raise SystemExit(f"Cloudflare exact-SHA smoke failed: {last}")
           PY
