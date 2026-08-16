@@ -1,45 +1,22 @@
-$ErrorActionPreference = "Continue"
+$ErrorActionPreference = "Stop"
+$Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+Set-Location $Root
 
-$ok = $true
+Write-Host "ATM doctor — deterministic/read-only" -ForegroundColor Cyan
 
-Write-Host "ATM doctor" -ForegroundColor Cyan
+if (-not (Get-Command hermes -ErrorAction SilentlyContinue)) { throw "Hermes missing" }
+if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { throw "GitHub CLI missing" }
 
-if (Get-Command hermes -ErrorAction SilentlyContinue) {
-    Write-Host "[OK] hermes: $((Get-Command hermes).Source)"
-    hermes --version
-} else {
-    Write-Host "[FAIL] hermes missing" -ForegroundColor Red
-    $ok = $false
+hermes --version
+gh --version
+
+if (Get-Command uv -ErrorAction SilentlyContinue) {
+    & uv run --python 3.11 python .\src\doctor.py
+    exit $LASTEXITCODE
 }
-
-if (Get-Command gh -ErrorAction SilentlyContinue) {
-    Write-Host "[OK] gh: $((Get-Command gh).Source)"
-    gh auth status
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[ACTION] run: gh auth login" -ForegroundColor Yellow
-        $ok = $false
-    }
-} else {
-    Write-Host "[FAIL] GitHub CLI missing" -ForegroundColor Red
-    $ok = $false
+if (Get-Command py -ErrorAction SilentlyContinue) {
+    & py -3 .\src\doctor.py
+    exit $LASTEXITCODE
 }
-
-$HermesEnv = Join-Path (Join-Path $env:LOCALAPPDATA "hermes") ".env"
-if (Test-Path $HermesEnv) {
-    $hasGoogle = Select-String -Path $HermesEnv -Pattern '^GOOGLE_API_KEY=.+' -Quiet
-    if ($hasGoogle) {
-        Write-Host "[OK] GOOGLE_API_KEY present in $HermesEnv (value not printed)"
-    } else {
-        Write-Host "[FAIL] GOOGLE_API_KEY missing in $HermesEnv" -ForegroundColor Red
-        $ok = $false
-    }
-} else {
-    Write-Host "[FAIL] Hermes env file not found at $HermesEnv" -ForegroundColor Red
-    $ok = $false
-}
-
-if ($ok) {
-    Write-Host "Core local prerequisites look ready for Gemini." -ForegroundColor Green
-    exit 0
-}
-exit 1
+python .\src\doctor.py
+exit $LASTEXITCODE

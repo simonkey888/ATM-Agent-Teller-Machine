@@ -1,7 +1,7 @@
-.atm/
-config/atm.json
-.env
-*.log
-__pycache__/
-.pytest_cache/
 .venv/
+__pycache__/
+*.pyc
+config/atm.json
+.atm/
+.env
+*.local

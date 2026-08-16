@@ -11,20 +11,19 @@ if (-not (Get-Command hermes -ErrorAction SilentlyContinue)) {
 
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     if (Get-Command winget -ErrorAction SilentlyContinue) {
-        Write-Host "Installing GitHub CLI with winget..."
         winget install --id GitHub.cli -e --source winget
     } else {
-        Write-Host "GitHub CLI is required. Download: https://github.com/cli/cli/releases/latest" -ForegroundColor Yellow
+        throw "GitHub CLI missing and winget unavailable"
     }
-} else {
-    Write-Host "GitHub CLI already installed."
 }
 
 Write-Host ""
 Write-Host "ONE-TIME HUMAN ONBOARDING" -ForegroundColor Yellow
 Write-Host "1) gh auth login"
-Write-Host "2) hermes model -> OpenAI -> ChatGPT or Codex Subscription"
-Write-Host "   Sign in with your ChatGPT account; no API key copy/paste is required."
-Write-Host "3) Z.AI fallback is optional and disabled by default."
+Write-Host "2) hermes setup -> Google AI Studio / Gemini"
+Write-Host "3) Store GOOGLE_API_KEY only in Hermes local env"
+Write-Host "4) Optional WorkProtocol rail: register agent once; store WORKPROTOCOL_API_KEY + WORKPROTOCOL_AGENT_ID locally"
+Write-Host "5) Set only your PUBLIC payout recipient in config\atm.json"
 Write-Host ""
+Write-Host "Never provide wallet private keys or seed phrases to ATM."
 Write-Host "Then run: .\scripts\doctor.ps1"

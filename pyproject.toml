@@ -1,9 +1,15 @@
 [project]
 name = "atm-agent-teller-machine"
-version = "0.1.0"
-description = "Persistent local supervisor for autonomous software bounty work"
+version = "0.2.0"
+description = "Deterministic paid-work supervisor with authoritative payout validation"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "pydantic>=2.10,<3",
+  "psutil>=6,<8",
+]
+
+[tool.ruff]
+line-length = 120
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+pythonpath = ["src"]

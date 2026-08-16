@@ -1,145 +1,104 @@
 # ATM — Agent Teller Machine
 
-A local, persistent bounty-work supervisor. The goal is not to "make money by prompting"; it is to keep a coding agent on a deterministic loop:
+ATM is a deterministic supervisor for pursuing externally funded software work. Its mission is not to report activity; it is to reach a configurable amount of **externally verified, withdrawable value**.
 
-`DISCOVER -> VERIFY/CLAIM -> WORK -> CHECK -> SUBMIT -> MONITOR -> DISCOVER`
+`DISCOVER -> VERIFY -> CLAIM -> WORK -> CHECK -> SUBMIT -> MONITOR -> PAYMENT_VERIFY`
 
-The target is configurable (`$200` by default). There is no guarantee of earnings. The machine only counts `PAID_USD` when a payout is independently confirmed.
+Default target: `REALIZED_WITHDRAWABLE_USD >= 200`.
 
-## Why this stack
+## Economic truth
 
-**Runner: Hermes Agent.** Hermes runs natively on Windows 10/11, has local terminal/browser tools, checkpoints, provider fallbacks, cron, non-interactive execution, and bounded tool-calling sessions. ATM does not depend on one infinite chat: if a Hermes run exits or a provider rate-limits, `src/atm.py` persists state and starts another run.
+The LLM cannot write realized revenue. `paid_usd`, `accepted_usd`, `claimed_usd` and equivalent model fields are rejected.
 
-**$0 worker path: Qwen OAuth.** Hermes can authenticate to Qwen by browser OAuth with no API key. ATM uses `qwen3-coder-plus` for WORK/SUBMIT by default.
+Validated money lives only in:
 
-**$0 GLM fallback/scout: GLM-4.7-Flash.** Z.ai's official pricing currently lists `GLM-4.7-Flash` and `GLM-4.5-Flash` as free input/output API models. It still requires a Z.ai account + API key. ATM uses GLM-4.7-Flash for discovery/checking when a key is present.
+`/.atm/validated-payment-proofs.jsonl`
 
-**GLM-5.2 is not the permanent $0 API path.** ATM does not depend on temporary trials or paid coding-plan quotas.
+Each proof is append-only and includes platform, payout/tx id, unique event id, amount/currency, recipient public identifier, terminal status, timestamp, authoritative source, evidence hash and normalized USD. Base/USDC adapters additionally verify the settlement transaction receipt and USDC transfer to the expected recipient.
 
-## Exact links
+Escrow funding, pending balances, merged PRs, screenshots, HTML and model narration never count toward the target.
 
-- Hermes Agent repo: https://github.com/NousResearch/hermes-agent
-- Hermes latest releases: https://github.com/NousResearch/hermes-agent/releases/latest
-- Hermes Windows installer script: https://hermes-agent.nousresearch.com/install.ps1
-- Hermes docs: https://hermes-agent.nousresearch.com/docs/
-- Qwen: https://chat.qwen.ai/
-- Z.ai API keys: https://z.ai/manage-apikey/apikey-list
-- Z.ai pricing: https://docs.z.ai/guides/overview/pricing
-- GitHub CLI: https://github.com/cli/cli/releases/latest
-- This repo: https://github.com/simonkey888/ATM-Agent-Teller-Machine
+## Current rails
 
-## Windows quick start
+### WorkProtocol — primary deterministic rail
 
-Development branch:
+Public discovery uses `GET /api/jobs`. VERIFY requires the job to remain open and exposes explicit per-job escrow/funding evidence before ATM will claim. Claim/delivery use the official authenticated API after one-time agent registration.
 
-```powershell
-git clone -b agent/atm-v1 https://github.com/simonkey888/ATM-Agent-Teller-Machine.git
-cd ATM-Agent-Teller-Machine
-powershell -ExecutionPolicy Bypass -File .\scripts\install-atm.ps1
-```
+Payment verification distinguishes `escrowTxHash` from `settlementTxHash`, then verifies the settlement on Base before crediting the ledger.
 
-Then complete the one-time human onboarding:
+Required one-time local secrets/ids when enabling writes:
 
-```powershell
-gh auth login
-hermes model
-```
+- `WORKPROTOCOL_API_KEY`
+- `WORKPROTOCOL_AGENT_ID`
+- public payout recipient in `config/atm.json`
 
-In `hermes model`, choose **Qwen -> Qwen CLI OAuth -> qwen3-coder-plus**.
+### Taskmarket — deterministic discovery/payment, signature-gated writes
 
-Optional second $0 rail: create a Z.ai API key at:
+Discovery excludes `stakeRequired=true`. Payment uses canonical `awards[]`, net `workerPayment`, `settlementTxHash`, and Base receipt verification.
 
-https://z.ai/manage-apikey/apikey-list
+Taskmarket claim/submission requires EIP-191 wallet signatures. ATM never stores private keys, so write actions fail closed into a human/external-signer gate.
 
-Hermes on Windows stores its secrets at `%LOCALAPPDATA%\hermes\.env`. Open it with:
+### Algora / Opire / MoltJobs
 
-```powershell
-notepad "$env:LOCALAPPDATA\hermes\.env"
-```
+Present as WATCH_ONLY until an authoritative lifecycle/payment contract is configured and verified. A board listing is not payout truth.
 
-Add:
+## Provider
 
-```text
-GLM_API_KEY=PASTE_KEY_HERE
-```
+Current committed primary is the already-tested Hermes Gemini route:
 
-Run the doctor:
+- provider: `gemini`
+- model: `gemini-3.5-flash`
+- credential: `GOOGLE_API_KEY` in Hermes' local env
+
+429/quota errors are classified and open a circuit breaker rather than being hammered every cycle.
+
+## Windows
+
+From the repository root:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\doctor.ps1
-```
-
-Start ATM:
-
-```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\run-atm.ps1
 ```
 
-Status:
+Status does not start a second runtime:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\run-atm.ps1 -Status
 ```
 
-## One-time things the human may need to do
+`run-atm.ps1` is protected by a PID + process-start-time singleton lock. A second live instance fails closed. Stale locks are quarantined.
 
-ATM intentionally refuses to invent an identity or financial authority. You may need to do these once for whichever bounty rails you enable:
+`-Reset` resets runtime state only. It deliberately does **not** erase the payment ledger.
 
-1. GitHub login / token.
-2. Create marketplace accounts.
-3. Add a public payout address or Stripe/PayPal details.
-4. Complete KYC/MFA/CAPTCHA if the platform genuinely requires it.
-5. Accept marketplace terms.
+## Doctor
 
-After that, ATM is designed to handle reversible $0 actions itself: discovery, claim comments, cloning, coding, testing, PRs, review fixes and monitoring.
+The doctor is read-only and checks:
 
-ATM never stores private keys and must not sign financial transactions.
+- Hermes/version;
+- GitHub auth and repo read;
+- primary credential presence without printing it;
+- writable state filesystem;
+- singleton status;
+- WorkProtocol/Taskmarket read-only health;
+- one-shot provider inference;
+- strict JSON output;
+- Hermes terminal tool;
+- Hermes web tool.
 
-## Configure
+It never claims, submits, signs, pays, or changes payout settings.
 
-On first run, `config/atm.example.json` is copied to `config/atm.json`.
+## Tests
 
-Important defaults:
+```powershell
+$env:PYTHONPATH="src"
+python -m unittest discover -s tests -v
+```
 
-- target: `$200 paid`
-- minimum bounty: `$100`
-- ideal bounty: `$200+`
-- max estimated work: `12h`
-- auto-claim: enabled for reversible $0 claims
-- auto-PR: enabled
-- provider fallback: Qwen OAuth <-> free Z.ai GLM-4.7-Flash
-- persistent restart loop: enabled
+Coverage includes model-money rejection, duplicate settlements, escrow/pending rejection, recipient mismatch, restart replay, FX provenance, WorkProtocol settlement-vs-escrow separation, Taskmarket net award settlement, singleton recovery, provider 429 classification, corrupt-state quarantine, v1 monetary-state discard, and prompt-injection/context-exfiltration regressions.
 
-`config/atm.json` is ignored by git so local changes remain local.
+## Security
 
-## State
+All bounty-controlled repositories and instructions are untrusted. ATM rejects work that asks for hidden prompts, conversation context, secrets, credential files, environment dumps, private keys or other protected context. The payment validator runs outside bounty workspaces.
 
-Runtime state lives under `.atm/`:
-
-- `.atm/state.json`
-- `.atm/logs/`
-
-Each Hermes call is a bounded worker invocation. The Python supervisor owns the long-running loop, so a model context reset does not erase the mission.
-
-## Safety boundary
-
-Autonomous:
-- public research;
-- GitHub/API reads;
-- reversible claim comments;
-- local git operations;
-- code/test/build;
-- push/PR/update PR;
-- responding to review feedback.
-
-Human gate:
-- KYC;
-- CAPTCHA/MFA;
-- account identity creation when unavoidable;
-- wallet creation/funding;
-- financial signatures;
-- purchases/subscriptions;
-- private-key handling;
-- irreversible financial/legal commitments.
-
-See `AGENTS.md` for the operating contract.
+See `AGENTS.md` and `docs/GATES.md`.

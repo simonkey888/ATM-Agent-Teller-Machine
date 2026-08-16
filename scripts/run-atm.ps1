@@ -22,15 +22,12 @@ if (Get-Command uv -ErrorAction SilentlyContinue) {
     & uv run --python 3.11 python @argsList
     exit $LASTEXITCODE
 }
-
 if (Get-Command py -ErrorAction SilentlyContinue) {
     & py -3 @argsList
     exit $LASTEXITCODE
 }
-
 if (Get-Command python -ErrorAction SilentlyContinue) {
     & python @argsList
     exit $LASTEXITCODE
 }
-
-throw "Python/uv not found. Re-run scripts\install-atm.ps1 (Hermes installs uv/Python)."
+throw "Python/uv not found"

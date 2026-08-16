@@ -1,64 +1,52 @@
 {
   "target_paid_usd": 200,
-  "min_reward_usd": 100,
+  "min_reward_usd": 50,
   "ideal_reward_usd": 200,
   "max_task_hours": 12,
   "max_competition": 8,
   "dry_run": false,
   "allow_auto_claim": true,
   "allow_auto_pr": true,
+  "payment_recipient_public_identifier": "",
   "provider": {
     "primary": {
       "provider": "gemini",
       "model": "gemini-3.5-flash",
-      "requires_env": "GOOGLE_API_KEY"
+      "requires_env": "GOOGLE_API_KEY",
+      "enabled": true
     },
     "fallbacks": []
   },
-  "providers_by_phase": {
-    "DISCOVER": [
-      {
-        "provider": "gemini",
-        "model": "gemini-3.5-flash",
-        "requires_env": "GOOGLE_API_KEY"
-      }
-    ],
-    "CLAIM": [
-      {
-        "provider": "gemini",
-        "model": "gemini-3.5-flash",
-        "requires_env": "GOOGLE_API_KEY"
-      }
-    ],
-    "WORK": [
-      {
-        "provider": "gemini",
-        "model": "gemini-3.5-flash",
-        "requires_env": "GOOGLE_API_KEY"
-      }
-    ],
-    "CHECK": [
-      {
-        "provider": "gemini",
-        "model": "gemini-3.5-flash",
-        "requires_env": "GOOGLE_API_KEY"
-      }
-    ],
-    "SUBMIT": [
-      {
-        "provider": "gemini",
-        "model": "gemini-3.5-flash",
-        "requires_env": "GOOGLE_API_KEY"
-      }
-    ],
-    "MONITOR": [
-      {
-        "provider": "gemini",
-        "model": "gemini-3.5-flash",
-        "requires_env": "GOOGLE_API_KEY"
-      }
-    ]
+  "provider_runtime": {
+    "default_429_circuit_seconds": 900
   },
+  "opportunity_adapters": {
+    "workprotocol": {
+      "enabled": true,
+      "base_url": "https://workprotocol.ai"
+    },
+    "taskmarket": {
+      "enabled": true,
+      "base_url": "https://api.taskmarket.dev"
+    },
+    "algora": {
+      "enabled": false,
+      "payout_api_template": null
+    },
+    "opire": {
+      "enabled": false
+    },
+    "moltjobs": {
+      "enabled": false
+    }
+  },
+  "discovery_order": [
+    "workprotocol",
+    "taskmarket",
+    "algora",
+    "opire",
+    "moltjobs"
+  ],
   "hermes": {
     "max_turns": 500,
     "process_timeout_seconds": 7200
@@ -67,20 +55,14 @@
     "failure_backoff_seconds": 30,
     "max_failure_backoff_seconds": 1800,
     "phase_delay_seconds": {
-      "DISCOVER": 30,
-      "CLAIM": 5,
-      "WORK": 5,
-      "CHECK": 5,
-      "SUBMIT": 5,
-      "MONITOR": 600
+      "DISCOVER": 60,
+      "VERIFY": 2,
+      "CLAIM": 2,
+      "WORK": 2,
+      "CHECK": 2,
+      "SUBMIT": 2,
+      "MONITOR": 300,
+      "PAYMENT_VERIFY": 30
     }
-  },
-  "sources": [
-    "GitHub issues labelled bounty/reward",
-    "Opire",
-    "Algora",
-    "AgentPact",
-    "TaskMarket",
-    "0xSCADA and other explicitly agent-friendly bounty protocols"
-  ]
+  }
 }
