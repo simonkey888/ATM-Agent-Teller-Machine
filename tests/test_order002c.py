@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -73,6 +75,18 @@ class OciStaticContractTests(unittest.TestCase):
         self.assertIn("ALWAYS_FREE_OBJECT_STORAGE_HEADROOM_EXCEEDED", self.provision)
         self.assertNotIn("VM.Standard.E", self.all_boot)
         self.assertNotIn("Pay As You Go", self.all_boot)
+
+    def test_empty_compute_inventory_reduces_to_zero_zero(self):
+        jq = shutil.which("jq")
+        if not jq:
+            self.skipTest("jq not installed on this runner")
+        expr = '(.data // []) as $rows | [$rows[]? | select(.shape=="VM.Standard.A1.Flex" and (."lifecycle-state"!="TERMINATED")) | (."shape-config" // {})] as $a1 | [((($a1 | map(.ocpus // 0) | add) // 0)), ((($a1 | map(."memory-in-gbs" // 0) | add) // 0))] | @tsv'
+        cp = subprocess.run([jq, "-er", expr], input='{"data":[]}', text=True, capture_output=True, check=False)
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertEqual(cp.stdout.strip(), "0\t0")
+        self.assertIn("COMPUTE_INVENTORY_AMBIGUOUS", self.provision)
+        self.assertIn("BLOCK_VOLUME_INVENTORY_AMBIGUOUS", self.provision)
+        self.assertNotIn("|| echo '{\"data\":[]}'", self.provision)
 
     def test_inventory_spans_accessible_compartments(self):
         self.assertIn("--compartment-id-in-subtree true --access-level ACCESSIBLE", self.provision)
