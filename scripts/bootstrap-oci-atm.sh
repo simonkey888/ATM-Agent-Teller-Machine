@@ -23,7 +23,7 @@ cleanup(){
 }
 trap cleanup EXIT INT TERM
 RAW="https://raw.githubusercontent.com/$REPO/$SHA"
-for f in oci-provision.sh oci-configure.sh; do curl -fsSL "$RAW/scripts/$f" -o "$D/$f"; chmod 700 "$D/$f"; done
+for f in oci-provision.sh oci-provision-runner.sh oci-normalize-bv.py oci-configure.sh; do curl -fsSL "$RAW/scripts/$f" -o "$D/$f"; chmod 700 "$D/$f"; done
 export ATM_SOURCE_SHA="$SHA" ATM_BASE_WALLET_ADDRESS="$PAYOUT" ATM_BOOT_DIR="$D" ATM_REPO="$REPO" ATM_RAW_BASE="$RAW"
-"$D/oci-provision.sh" "$D/infra.env"
+"$D/oci-provision-runner.sh" "$D/infra.env"
 "$D/oci-configure.sh" "$D/infra.env"
