@@ -12,8 +12,15 @@ class MobileOciBootstrapContractTests(unittest.TestCase):
 
     def test_one_hidden_credential_action(self):
         self.assertEqual(self.mobile.count("read -rsp '"), 1)
-        self.assertIn("PAT|GOOGLE_API_KEY", self.mobile)
-        self.assertIn("unset BUNDLE", self.mobile)
+        self.assertIn("WALLET|GitHubPAT|GOOGLE_API_KEY", self.mobile)
+        self.assertIn("unset BUNDLE REST", self.mobile)
+
+    def test_fresh_cloud_shell_pre_auth_is_required_before_secret_entry(self):
+        self.assertIn('command -v oci', self.mobile)
+        self.assertIn('OCI_CLI_AUTH:-', self.mobile)
+        self.assertIn('instance_obo_user', self.mobile)
+        self.assertIn('oci iam region-subscription list --all', self.mobile)
+        self.assertLess(self.mobile.index('oci iam region-subscription list --all'), self.mobile.index("read -rsp '"))
 
     def test_credentials_are_not_put_on_command_line_or_exported(self):
         self.assertIn("umask 077", self.mobile)
@@ -31,6 +38,7 @@ class MobileOciBootstrapContractTests(unittest.TestCase):
     def test_mobile_wrapper_keeps_exact_sha_and_wallet_binding(self):
         self.assertIn("ATM_SOURCE_SHA_MUST_BE_EXACT_40HEX", self.mobile)
         self.assertIn("ATM_BASE_WALLET_ADDRESS_MUST_BE_CANONICAL_PUBLIC_BASE_ADDRESS", self.mobile)
+        self.assertIn('PAYOUT="${BUNDLE%%|*}"', self.mobile)
         self.assertIn('RAW="https://raw.githubusercontent.com/$REPO/$SHA"', self.mobile)
         self.assertIn('ATM_BASE_WALLET_ADDRESS="$PAYOUT" ATM_SOURCE_SHA="$SHA" bash <(curl -fsSL "$RAW/scripts/bootstrap-oci-atm.sh")', self.mobile)
 
