@@ -66,6 +66,14 @@ CSIP="$(curl -4fsS --max-time 10 https://api.ipify.org)" || fail CLOUD_SHELL_EGR
 EG='[{"destination":"0.0.0.0/0","protocol":"all","isStateless":false}]'; IN="[{\"source\":\"$CSIP/32\",\"protocol\":\"6\",\"isStateless\":false,\"tcpOptions\":{\"destinationPortRange\":{\"min\":22,\"max\":22}}}]"
 SL="$(o network security-list list --compartment-id "$COMP" --vcn-id "$VCN" --all --query 'data[?"display-name"==`atm-security`].id|[0]' --raw-output)"
 if [ -z "$SL" ] || [ "$SL" = null ]; then SL="$(o network security-list create --compartment-id "$COMP" --vcn-id "$VCN" --display-name atm-security --egress-security-rules "$EG" --ingress-security-rules "$IN" --wait-for-state AVAILABLE --query data.id --raw-output)"; else o network security-list update --security-list-id "$SL" --egress-security-rules "$EG" --ingress-security-rules "$IN" --force >/dev/null; fi
+# Write enough metadata immediately so the parent bootstrap EXIT trap can close
+# temporary SSH ingress if any subsequent provisioning step fails.
+cat >"$OUT" <<EOF
+REGION='$REGION'
+SECURITY_LIST_ID='$SL'
+EGRESS_JSON='$EG'
+EOF
+chmod 600 "$OUT"
 SUB="$(o network subnet list --compartment-id "$COMP" --vcn-id "$VCN" --all --query 'data[?"display-name"==`atm-subnet`].id|[0]' --raw-output)"
 [ -n "$SUB" ] && [ "$SUB" != null ] || SUB="$(o network subnet create --compartment-id "$COMP" --vcn-id "$VCN" --cidr-block 10.77.1.0/24 --display-name atm-subnet --dns-label atm --route-table-id "$RT" --security-list-ids "[\"$SL\"]" --prohibit-public-ip-on-vnic false --wait-for-state AVAILABLE --query data.id --raw-output)"
 
@@ -73,8 +81,8 @@ mkdir -p "$HOME/.atm"; chmod 700 "$HOME/.atm"; KEY="$HOME/.atm/oci-atm-ed25519"
 [ -f "$KEY" ] || ssh-keygen -q -t ed25519 -N '' -f "$KEY" -C atm-oci-breakglass
 chmod 600 "$KEY"; chmod 644 "$KEY.pub"
 
-# Always Free Object Storage is 20 GB combined. Inventory all subscribed regions
-# and accessible compartments; any unreadable region/compartment is ambiguity => fail closed.
+# Always Free Object Storage is 20 GB combined. Inventory all subscribed regions,
+# compartments, and object versions; unreadable inventory is ambiguity => fail closed.
 NS="$(o os ns get --query data --raw-output)" || fail OBJECT_STORAGE_DENIED
 OBJECT_BYTES=0
 for r in "${SUBSCRIBED_REGIONS[@]}"; do
@@ -82,7 +90,7 @@ for r in "${SUBSCRIBED_REGIONS[@]}"; do
     buckets="$(oci os bucket list --region "$r" --namespace-name "$NS" --compartment-id "$c" --all 2>/dev/null)" || fail OBJECT_STORAGE_INVENTORY_AMBIGUOUS
     while IFS= read -r bucket; do
       [ -n "$bucket" ] || continue
-      bytes="$(oci os object list --region "$r" --namespace-name "$NS" --bucket-name "$bucket" --all --fields name,size 2>/dev/null | jq '[.data[].size // 0]|add//0')" || fail OBJECT_STORAGE_OBJECT_INVENTORY_AMBIGUOUS
+      bytes="$(oci os object list-object-versions --region "$r" --namespace-name "$NS" --bucket-name "$bucket" --all --fields name,size 2>/dev/null | jq '[.data[].size // 0]|add//0')" || fail OBJECT_STORAGE_OBJECT_INVENTORY_AMBIGUOUS
       [[ "$bytes" =~ ^[0-9]+$ ]] || fail OBJECT_STORAGE_SIZE_INVALID
       OBJECT_BYTES=$((OBJECT_BYTES + bytes))
     done < <(jq -r '.data[].name' <<<"$buckets")
