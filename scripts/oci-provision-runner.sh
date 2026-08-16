@@ -4,6 +4,29 @@ set +x
 
 D="${ATM_BOOT_DIR:?}"
 REAL_OCI="$(command -v oci)"
+REAL_SSH_KEYGEN="$(command -v ssh-keygen)"
+
+# OCI Cloud Shell can run with a FIPS crypto policy that rejects Ed25519 key
+# generation. The provisioner asks for a local break-glass key only; preserve
+# the same private/public paths but translate that exact request to RSA-3072,
+# which OCI Linux platform images support and FIPS-capable OpenSSH accepts.
+ssh-keygen() {
+  local -a argv=("$@") out=()
+  local i transformed=0
+  for ((i=0; i<${#argv[@]}; i++)); do
+    if [ "${argv[$i]}" = "-t" ] && [ $((i+1)) -lt ${#argv[@]} ] && [ "${argv[$((i+1))]}" = "ed25519" ]; then
+      out+=("-t" "rsa" "-b" "3072")
+      i=$((i+1))
+      transformed=1
+    else
+      out+=("${argv[$i]}")
+    fi
+  done
+  if [ "$transformed" -eq 1 ]; then
+    echo 'OCI_BREAKGLASS_KEY_ALGORITHM=RSA3072 reason=FIPS_COMPATIBILITY'
+  fi
+  "$REAL_SSH_KEYGEN" "${out[@]}"
+}
 
 oci() {
   if [ "${1:-}" = "bv" ] && [ "${3:-}" = "list" ] && { [ "${2:-}" = "boot-volume" ] || [ "${2:-}" = "volume" ]; }; then
@@ -74,6 +97,6 @@ oci() {
   "$REAL_OCI" "$@"
 }
 
-export REAL_OCI
-export -f oci
+export REAL_OCI REAL_SSH_KEYGEN
+export -f oci ssh-keygen
 exec "$D/oci-provision.sh" "$@"
