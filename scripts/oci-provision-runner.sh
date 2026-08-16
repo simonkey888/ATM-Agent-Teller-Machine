@@ -29,6 +29,20 @@ ssh-keygen() {
 }
 
 oci() {
+  # Current OCI CLI returns list-object-versions as {data:{items:[...]}}.
+  # The provisioner consumes the ordinary list shape {data:[...]}; normalize
+  # this command only so storage accounting is deterministic across CLI shapes.
+  if [ "${1:-}" = "os" ] && [ "${2:-}" = "object" ] && [ "${3:-}" = "list-object-versions" ]; then
+    local out rc
+    set +e
+    out="$("$REAL_OCI" "$@")"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || return "$rc"
+    jq -e 'if ((.data // null) | type) == "object" then {data:(.data.items // [])} elif ((.data // null) | type) == "array" then . else error("OBJECT_VERSION_INVENTORY_SHAPE_INVALID") end' <<<"$out"
+    return $?
+  fi
+
   if [ "${1:-}" = "bv" ] && [ "${3:-}" = "list" ] && { [ "${2:-}" = "boot-volume" ] || [ "${2:-}" = "volume" ]; }; then
     # Do not enumerate Block Volume objects here. For ORDER-002C we only need
     # authoritative combined boot+block usage to enforce the 200-GB free cap.
