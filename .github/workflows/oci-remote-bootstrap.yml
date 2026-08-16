@@ -1,0 +1,130 @@
+name: OCI Remote Bootstrap
+
+on:
+  push:
+    branches: [agent/atm-v1]
+    paths: [.github/oci-remote-trigger.txt]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atm-oci-remote-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      OCI_CONFIG_SECRET: ${{ secrets.OCI_CONFIG }}
+      OCI_PRIVATE_KEY_PEM: ${{ secrets.OCI_PRIVATE_KEY_PEM }}
+      ATM_REMOTE_BUNDLE: ${{ secrets.ATM_AGENT_TELLER_MACHINE }}
+      ATM_SOURCE_SHA: ${{ github.sha }}
+      OCI_CLI_CONFIG_FILE: ${{ github.workspace }}/.oci/config
+      OCI_CLI_PROFILE: ATM_REMOTE
+      OCI_CLI_AUTH: api_key
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+
+      - name: Require encrypted repository secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "$OCI_CONFIG_SECRET" || { echo 'OCI_REMOTE_SECRET_MISSING=OCI_CONFIG'; exit 2; }
+          test -n "$OCI_PRIVATE_KEY_PEM" || { echo 'OCI_REMOTE_SECRET_MISSING=OCI_PRIVATE_KEY_PEM'; exit 2; }
+          test -n "$ATM_REMOTE_BUNDLE" || { echo 'OCI_REMOTE_SECRET_MISSING=ATM_AGENT_TELLER_MACHINE'; exit 2; }
+          case "$ATM_REMOTE_BUNDLE" in *'|'*'|'*) ;; *) echo 'OCI_REMOTE_SECRET_INVALID=ATM_AGENT_TELLER_MACHINE_FORMAT'; exit 2;; esac
+
+      - name: Install OCI CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check oci-cli
+          oci --version
+
+      - name: Materialize temporary OCI API profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          umask 077
+          mkdir -p "$(dirname "$OCI_CLI_CONFIG_FILE")"
+          KEY_FILE="$(dirname "$OCI_CLI_CONFIG_FILE")/oci_api_key.pem"
+          RAW_FILE="$(dirname "$OCI_CLI_CONFIG_FILE")/config.raw"
+          printf '%s\n' "$OCI_PRIVATE_KEY_PEM" > "$KEY_FILE"
+          printf '%s\n' "$OCI_CONFIG_SECRET" > "$RAW_FILE"
+          export KEY_FILE RAW_FILE
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          src=Path(os.environ['RAW_FILE'])
+          dst=Path(os.environ['OCI_CLI_CONFIG_FILE'])
+          key=Path(os.environ['KEY_FILE'])
+          lines=src.read_text().splitlines()
+          out=[]
+          saw_default=False
+          saw_key=False
+          for line in lines:
+              stripped=line.strip()
+              if stripped == '[DEFAULT]':
+                  out.append('[ATM_REMOTE]')
+                  saw_default=True
+              elif line.lstrip().startswith('key_file='):
+                  out.append(f'key_file={key}')
+                  saw_key=True
+              else:
+                  out.append(line)
+          if not saw_default:
+              raise SystemExit('OCI_CONFIG_MISSING_DEFAULT_PROFILE')
+          if not saw_key:
+              raise SystemExit('OCI_CONFIG_MISSING_KEY_FILE_TODO')
+          dst.write_text('\n'.join(out)+'\n')
+          src.unlink()
+          PY
+          chmod 600 "$OCI_CLI_CONFIG_FILE" "$KEY_FILE"
+
+      - name: Validate OCI API authentication read-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          oci iam region-subscription list --config-file "$OCI_CLI_CONFIG_FILE" --profile "$OCI_CLI_PROFILE" --output json > "$RUNNER_TEMP/oci-regions.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          p=Path(os.environ['RUNNER_TEMP'])/'oci-regions.json'
+          rows=json.loads(p.read_text()).get('data',[])
+          if not isinstance(rows,list) or not rows:
+              raise SystemExit('OCI_REMOTE_AUTH_EMPTY_REGION_LIST')
+          print(f'OCI_REMOTE_AUTH=PASS subscribed_regions={len(rows)}')
+          PY
+
+      - name: Execute exact-SHA zero-spend OCI bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          bash scripts/github-oci-bootstrap.sh
+
+      - name: Remote bootstrap checkpoint
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### OCI Remote Bootstrap'
+            echo
+            echo "- source_sha: \`${GITHUB_SHA}\`"
+            echo "- run_id: \`${GITHUB_RUN_ID}\`"
+            echo "- no_paid_fallback: true"
+            echo "- outgoing_spend: 0"
+            echo "- secrets_printed: false"
+          } >> "$GITHUB_STEP_SUMMARY"
