@@ -4,21 +4,26 @@ set +x
 
 REPO="simonkey888/ATM-Agent-Teller-Machine"
 SHA="${ATM_SOURCE_SHA:-}"
-PAYOUT="${ATM_BASE_WALLET_ADDRESS:-}"
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "ORDER_002C_BOOTSTRAP_STATUS=BLOCKED_REAL reason=ATM_SOURCE_SHA_MUST_BE_EXACT_40HEX" >&2; exit 2; }
-[[ "$PAYOUT" =~ ^0x[0-9a-fA-F]{40}$ ]] || { echo "ORDER_002C_BOOTSTRAP_STATUS=BLOCKED_REAL reason=ATM_BASE_WALLET_ADDRESS_MUST_BE_CANONICAL_PUBLIC_BASE_ADDRESS" >&2; exit 2; }
 
-# One unavoidable secure action only. The bundle is read by the running process,
-# never placed on the command line/history, written to a 0600 tempfile, then removed.
-read -rsp 'Paste GitHub PAT|GOOGLE_API_KEY once (not echoed): ' BUNDLE
+command -v oci >/dev/null 2>&1 || { echo "ORDER_002C_BOOTSTRAP_STATUS=BLOCKED_REAL reason=OCI_CLI_NOT_FOUND_USE_ORACLE_CLOUD_SHELL" >&2; exit 2; }
+[ "${OCI_CLI_AUTH:-}" = "instance_obo_user" ] || { echo "ORDER_002C_BOOTSTRAP_STATUS=BLOCKED_REAL reason=OCI_CLOUD_SHELL_PREAUTH_REQUIRED" >&2; exit 2; }
+oci iam region-subscription list --all >/dev/null 2>&1 || { echo "ORDER_002C_BOOTSTRAP_STATUS=BLOCKED_REAL reason=OCI_CLOUD_SHELL_PREAUTH_FAILED" >&2; exit 2; }
+
+# Fresh-session one-shot: public payout + the two required secrets are entered
+# once via hidden stdin, never placed on the command line or shell history.
+read -rsp 'Paste WALLET|GitHubPAT|GOOGLE_API_KEY once (not echoed): ' BUNDLE
 echo
 case "$BUNDLE" in
-  *'|'*) ;;
-  *) echo "ORDER_002C_BOOTSTRAP_STATUS=BLOCKED_REAL reason=CREDENTIAL_BUNDLE_FORMAT_PAT_PIPE_GOOGLE_KEY" >&2; exit 2 ;;
+  *'|'*'|'*) ;;
+  *) echo "ORDER_002C_BOOTSTRAP_STATUS=BLOCKED_REAL reason=BUNDLE_FORMAT_WALLET_PIPE_PAT_PIPE_GOOGLE_KEY" >&2; exit 2 ;;
 esac
-GH_ONCE="${BUNDLE%%|*}"
-MODEL_ONCE="${BUNDLE#*|}"
-unset BUNDLE
+PAYOUT="${BUNDLE%%|*}"
+REST="${BUNDLE#*|}"
+GH_ONCE="${REST%%|*}"
+MODEL_ONCE="${REST#*|}"
+unset BUNDLE REST
+[[ "$PAYOUT" =~ ^0x[0-9a-fA-F]{40}$ ]] || { echo "ORDER_002C_BOOTSTRAP_STATUS=BLOCKED_REAL reason=ATM_BASE_WALLET_ADDRESS_MUST_BE_CANONICAL_PUBLIC_BASE_ADDRESS" >&2; exit 2; }
 [ -n "$GH_ONCE" ] || { echo "ORDER_002C_BOOTSTRAP_STATUS=BLOCKED_REAL reason=GITHUB_TOKEN_EMPTY" >&2; exit 2; }
 [ -n "$MODEL_ONCE" ] || { echo "ORDER_002C_BOOTSTRAP_STATUS=BLOCKED_REAL reason=MODEL_KEY_EMPTY" >&2; exit 2; }
 
