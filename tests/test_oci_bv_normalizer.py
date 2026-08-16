@@ -57,8 +57,12 @@ class OciBlockVolumeNormalizerTests(unittest.TestCase):
         self.assertIn('--output json', self.runner)
         self.assertIn('export -f oci ssh-keygen', self.runner)
 
-    def test_compute_inventory_falls_back_to_scalar_a1_sums(self):
-        self.assertIn('OCI_COMPUTE_INVENTORY=FALLBACK class=EMPTY_JSON_STDOUT mode=SCALAR_SUMS', self.runner)
+    def test_compute_inventory_confirms_zero_count_before_scalar_a1_sums(self):
+        self.assertIn('OCI_COMPUTE_INVENTORY=FALLBACK class=EMPTY_JSON_STDOUT mode=COUNT_THEN_SCALAR_SUMS', self.runner)
+        self.assertIn('length(data[?shape==`VM.Standard.A1.Flex`', self.runner)
+        self.assertIn('OCI_COMPUTE_INVENTORY=EMPTY_A1_CONFIRMED count=0', self.runner)
+        self.assertIn('SCALAR_COUNT_QUERY_FAILED', self.runner)
+        self.assertIn('SCALAR_COUNT_INVALID', self.runner)
         self.assertIn('sum(data[?shape==`VM.Standard.A1.Flex`', self.runner)
         self.assertIn('SCALAR_OCPU_QUERY_FAILED', self.runner)
         self.assertIn('SCALAR_MEMORY_QUERY_FAILED', self.runner)
