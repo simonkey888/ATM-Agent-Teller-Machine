@@ -62,7 +62,7 @@ class OciRemoteExecutorContractTests(unittest.TestCase):
         self.assertIn("oci.config.from_file", self.compute_sdk)
         self.assertIn("oci.core.ComputeClient", self.compute_sdk)
         self.assertIn("oci.pagination.list_call_get_all_results", self.compute_sdk)
-        self.assertIn('instance.shape', self.compute_sdk)
+        self.assertIn('getattr(instance, "shape", None)', self.compute_sdk)
         self.assertIn('"VM.Standard.A1.Flex"', self.compute_sdk)
         self.assertIn("TERMINATED", self.compute_sdk)
         self.assertIn("OCI_SDK_COMPUTE_INVENTORY=PASS", self.compute_sdk)
