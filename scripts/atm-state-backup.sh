@@ -25,6 +25,9 @@ case "$MODE" in
     if ! curl -fsS --retry 2 --retry-all-errors "$PAR_URL" -o "$ARCHIVE"; then
       echo 'ATM_STATE_RESTORE=SKIP reason=NO_REMOTE_STATE'; exit 0
     fi
+    if [ ! -s "$ARCHIVE" ] || ! tar -tzf "$ARCHIVE" >/dev/null 2>&1; then
+      echo 'ATM_STATE_RESTORE=SKIP reason=NO_VALID_REMOTE_ARCHIVE'; exit 0
+    fi
     while IFS= read -r entry; do
       allowed=0
       for f in "${FILES[@]}"; do [ "$entry" = "$f" ] && allowed=1 && break; done
