@@ -19,8 +19,8 @@ read -rsp 'GitHub classic PAT with public_repo scope (control + isolated publish
 [ "$(curl -fsS -H "Authorization: Bearer $GH" https://api.github.com/user|jq -r .login)" = simonkey888 ] || fail GITHUB_TOKEN_INVALID
 read -rsp 'GOOGLE_API_KEY for Hermes (not echoed): ' MODELKEY; echo
 [ -n "$MODELKEY" ] || fail MODEL_KEY_EMPTY
-read -rp 'Public Base-compatible payout address (0x..., public only): ' PAYOUT
-[[ "$PAYOUT" =~ ^0x[0-9a-fA-F]{40}$ ]] || fail PAYOUT_PUBLIC_INVALID
+PAYOUT="${ATM_BASE_WALLET_ADDRESS:-}"
+[[ "$PAYOUT" =~ ^0x[0-9a-fA-F]{40}$ ]] || fail ATM_BASE_WALLET_ADDRESS_INVALID
 
 post(){ local cmd="$1" id="$2" args="$3" body; body="ATM_CMD_V1
 COMMAND=$cmd
