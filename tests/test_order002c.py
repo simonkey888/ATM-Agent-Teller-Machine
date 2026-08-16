@@ -69,7 +69,7 @@ class OciStaticContractTests(unittest.TestCase):
         self.assertIn("--service-name compute-core --limit-name standard-a1-core-count", self.provision)
         self.assertIn("--service-name compute-memory --limit-name standard-a1-memory-count", self.provision)
         self.assertIn("OBJECT_FREE_LIMIT=$((20 * 1024 * 1024 * 1024))", self.provision)
-        self.assertIn("--fields name,size", self.provision)
+        self.assertIn("list-object-versions", self.provision)
         self.assertIn("ALWAYS_FREE_OBJECT_STORAGE_HEADROOM_EXCEEDED", self.provision)
         self.assertNotIn("VM.Standard.E", self.all_boot)
         self.assertNotIn("Pay As You Go", self.all_boot)
@@ -87,6 +87,15 @@ class OciStaticContractTests(unittest.TestCase):
         self.assertIn("read -rsp 'GOOGLE_API_KEY", self.configure)
         self.assertIn("chmod 600 /etc/atm/control.env", self.configure)
         self.assertIn("chmod 640 /etc/atm/runtime.env", self.configure)
+
+    def test_canonical_payout_address_is_environment_bound_and_public_only(self):
+        self.assertIn('PAYOUT="${ATM_BASE_WALLET_ADDRESS:-}"', self.bootstrap)
+        self.assertIn("ATM_BASE_WALLET_ADDRESS_MUST_BE_CANONICAL_PUBLIC_BASE_ADDRESS", self.bootstrap)
+        self.assertIn('PAYOUT="${ATM_BASE_WALLET_ADDRESS:-}"', self.configure)
+        self.assertIn('d["payment_recipient_public_identifier"]', self.configure)
+        self.assertNotIn("Public Base-compatible payout address", self.configure)
+        self.assertNotIn("seed phrase", self.all_boot.lower())
+        self.assertNotIn("private key", self.configure.lower())
 
     def test_systemd_separates_controller_and_supervisor(self):
         self.assertIn("ExecStart=/opt/atm/.venv/bin/python /opt/atm/src/atm_control_oci_entry.py", self.controller_unit)
