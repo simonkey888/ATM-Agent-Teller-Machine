@@ -11,7 +11,7 @@ WorkingDirectory=/opt/atm
 Environment=ATM_HOST_CLASS=OCI
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/etc/atm/control.env
-ExecStart=/opt/atm/.venv/bin/python /opt/atm/src/atm_control_oci.py
+ExecStart=/opt/atm/.venv/bin/python /opt/atm/src/atm_control_oci_entry.py
 Restart=always
 RestartSec=15s
 TimeoutStopSec=30s
