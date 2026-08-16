@@ -3,7 +3,7 @@ name: OCI Remote Probe
 on:
   push:
     branches: [agent/atm-v1]
-    paths: [.github/oci-remote-trigger.txt]
+    paths: [.github/oci-remote-probe-trigger.txt]
   workflow_dispatch:
 
 permissions:
