@@ -86,7 +86,7 @@ class OciStaticContractTests(unittest.TestCase):
         self.assertIn("chmod 640 /etc/atm/runtime.env", self.configure)
 
     def test_systemd_separates_controller_and_supervisor(self):
-        self.assertIn("ExecStart=/opt/atm/.venv/bin/python /opt/atm/src/atm_control_oci.py", self.controller_unit)
+        self.assertIn("ExecStart=/opt/atm/.venv/bin/python /opt/atm/src/atm_control_oci_entry.py", self.controller_unit)
         self.assertIn("Restart=always", self.controller_unit)
         self.assertIn("ExecStart=/opt/atm/.venv/bin/python /opt/atm/src/atm_v2_oci.py", self.supervisor_unit)
         self.assertIn("Restart=on-failure", self.supervisor_unit)
