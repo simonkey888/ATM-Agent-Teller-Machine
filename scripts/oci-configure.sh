@@ -65,6 +65,8 @@ ID="order002c-oci-status-$SHA"; post STATUS "$ID" '{"target_host":"OCI"}'>/dev/n
 ID="order002c-oci-doctor-$SHA"; post DOCTOR "$ID" '{"target_host":"OCI"}'>/dev/null; waitres "$ID" || fail DOCTOR_E2E
 
 WIN="$(curl -fsS -H "Authorization: Bearer $GH" "https://api.github.com/repos/$REPO/issues/$CONTROL/comments?per_page=100"|jq -r --arg id "$STOPID" '.[]|select(.body|startswith("ATM_RESULT_V1"))|select(.body|contains("COMMAND_ID="+$id+"\n"))|.body'|tail -n1)"
+# Legacy fail-closed condition WINDOWS_STOP_UNPROVEN_OCI_SUPERVISOR_NOT_STARTED
+# is now materialized as a safe terminal waiting state; no supervisor starts.
 if [ -z "$WIN" ]; then
   echo "{\"status\":\"CUTOVER_WAITING_WINDOWS_STOP_GITHUB_CONTINUATION\",\"instance_ocid\":\"$INSTANCE_ID\",\"source_sha\":\"$SHA\",\"controller_systemd\":\"ACTIVE\",\"publisher_systemd\":\"ACTIVE\",\"supervisor_systemd\":\"STOPPED\",\"control_issue\":$CONTROL,\"observatory_issue\":$OBS,\"ssh_ingress_after_bootstrap\":\"NONE\",\"secrets_printed\":false}"
   echo ORDER_002C_BOOTSTRAP_STATUS=WAITING_WINDOWS_STOP_GITHUB_CONTINUATION
