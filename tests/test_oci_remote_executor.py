@@ -13,6 +13,8 @@ class OciRemoteExecutorContractTests(unittest.TestCase):
         cls.api_boot = (root / "scripts" / "bootstrap-oci-atm-api.sh").read_text()
         cls.wrapper = (root / "scripts" / "github-oci-bootstrap.sh").read_text()
         cls.provision = (root / "scripts" / "oci-provision.sh").read_text()
+        cls.runner = (root / "scripts" / "oci-provision-runner.sh").read_text()
+        cls.compute_sdk = (root / "scripts" / "oci-compute-usage-sdk.py").read_text()
 
     def test_remote_workflow_is_trigger_file_gated_not_pr_driven(self):
         self.assertIn("paths: [.github/oci-remote-trigger.txt]", self.workflow)
@@ -52,6 +54,19 @@ class OciRemoteExecutorContractTests(unittest.TestCase):
         self.assertIn("github_actions", self.api_boot)
         self.assertIn("OCI_API_AUTH_FAILED", self.api_boot)
         self.assertIn('RAW="https://raw.githubusercontent.com/$REPO/$SHA"', self.api_boot)
+
+    def test_api_key_compute_inventory_uses_sdk_not_cli_formatter(self):
+        self.assertIn("oci-compute-usage-sdk.py", self.api_boot)
+        self.assertIn('[ "${OCI_CLI_AUTH:-}" = "api_key" ]', self.runner)
+        self.assertIn('python3 "$D/oci-compute-usage-sdk.py"', self.runner)
+        self.assertIn("oci.config.from_file", self.compute_sdk)
+        self.assertIn("oci.core.ComputeClient", self.compute_sdk)
+        self.assertIn("oci.pagination.list_call_get_all_results", self.compute_sdk)
+        self.assertIn('instance.shape', self.compute_sdk)
+        self.assertIn('"VM.Standard.A1.Flex"', self.compute_sdk)
+        self.assertIn("TERMINATED", self.compute_sdk)
+        self.assertIn("OCI_SDK_COMPUTE_INVENTORY=PASS", self.compute_sdk)
+        self.assertIn("SDK_QUERY_FAILED", self.runner)
 
     def test_bundle_parser_accepts_common_secret_entry_formats_without_printing(self):
         self.assertIn('BUNDLE="${ATM_REMOTE_BUNDLE:-}"', self.wrapper)
