@@ -104,6 +104,14 @@ class OciStaticContractTests(unittest.TestCase):
         self.assertNotIn("workspaces", self.backup)
         self.assertNotIn("logs/", self.backup)
 
+    def test_external_state_object_is_preserved_on_rerun(self):
+        self.assertIn("os object head", self.provision)
+        self.assertIn("OCI_STATE_OBJECT=PRESERVED_EXISTING", self.provision)
+        head_pos = self.provision.index("os object head")
+        put_pos = self.provision.index("os object put")
+        self.assertLess(head_pos, put_pos)
+        self.assertIn("NO_VALID_REMOTE_ARCHIVE", self.backup)
+
     def test_ssh_rule_is_break_glass_only_and_removed(self):
         self.assertIn("destinationPortRange", self.provision)
         self.assertIn("22", self.provision)
