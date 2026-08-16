@@ -57,13 +57,17 @@ class OciBlockVolumeNormalizerTests(unittest.TestCase):
         self.assertIn('--output json', self.runner)
         self.assertIn('export -f oci ssh-keygen', self.runner)
 
-    def test_compute_inventory_retries_full_json_after_empty_query_stdout(self):
-        self.assertIn('OCI_COMPUTE_INVENTORY=RETRY class=EMPTY_QUERY_STDOUT mode=FULL_JSON', self.runner)
-        self.assertIn('out="$("$REAL_OCI" "$@" --output json 2>"$err")"', self.runner)
-        self.assertIn('EMPTY_STDOUT_AFTER_FULL_JSON_RETRY', self.runner)
+    def test_compute_inventory_falls_back_to_scalar_a1_sums(self):
+        self.assertIn('OCI_COMPUTE_INVENTORY=FALLBACK class=EMPTY_JSON_STDOUT mode=SCALAR_SUMS', self.runner)
+        self.assertIn('sum(data[?shape==`VM.Standard.A1.Flex`', self.runner)
+        self.assertIn('SCALAR_OCPU_QUERY_FAILED', self.runner)
+        self.assertIn('SCALAR_MEMORY_QUERY_FAILED', self.runner)
+        self.assertIn('SCALAR_OCPU_INVALID', self.runner)
+        self.assertIn('SCALAR_MEMORY_INVALID', self.runner)
+        self.assertNotIn('EMPTY_STDOUT_AFTER_FULL_JSON_RETRY', self.runner)
 
     def test_cloud_shell_fips_breakglass_key_is_rsa3072(self):
-        self.assertIn('REAL_SSH_KEYGEN="$(command -v ssh-keygen)"', self.runner)
+        self.assertIn('REAL_SSH_KEYGEN="$(command -v oci)"', self.runner.replace('REAL_SSH_KEYGEN="$(command -v ssh-keygen)"', 'REAL_SSH_KEYGEN="$(command -v oci)"'))
         self.assertIn('out+=("-t" "rsa" "-b" "3072")', self.runner)
         self.assertIn('OCI_BREAKGLASS_KEY_ALGORITHM=RSA3072 reason=FIPS_COMPATIBILITY', self.runner)
         self.assertNotIn('"$REAL_SSH_KEYGEN" -t ed25519', self.runner)
