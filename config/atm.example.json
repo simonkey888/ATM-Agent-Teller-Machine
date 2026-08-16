@@ -1,7 +1,6 @@
 {
   "target_paid_usd": 200,
-  "min_reward_usd": 50,
-  "ideal_reward_usd": 200,
+  "min_reward_usd": 1,
   "max_task_hours": 12,
   "max_competition": 8,
   "dry_run": false,
