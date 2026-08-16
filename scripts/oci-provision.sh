@@ -12,8 +12,11 @@ if not p or not c.has_section(p): raise SystemExit(2)
 print(c.get(p,"tenancy"))
 PY
 )" || fail CANNOT_DISCOVER_TENANCY
-REGION="$(oci iam region-subscription list --all --query 'data[?"is-home-region"==`true`]."region-name"|[0]' --raw-output)" || fail CANNOT_DISCOVER_HOME_REGION
+REGION_SUBSCRIPTIONS="$(oci iam region-subscription list --all)" || fail CANNOT_DISCOVER_REGION_SUBSCRIPTIONS
+REGION="$(jq -r '.data[]|select(."is-home-region"==true)|."region-name"' <<<"$REGION_SUBSCRIPTIONS" | head -n1)"
 [ -n "$REGION" ] && [ "$REGION" != null ] || fail EMPTY_HOME_REGION
+mapfile -t SUBSCRIBED_REGIONS < <(jq -r '.data[]."region-name"' <<<"$REGION_SUBSCRIPTIONS")
+[ "${#SUBSCRIBED_REGIONS[@]}" -gt 0 ] || fail NO_SUBSCRIBED_REGIONS
 COMP="${ATM_OCI_COMPARTMENT_ID:-$TENANCY}"; o(){ oci "$@" --region "$REGION"; }
 SHAPE=VM.Standard.A1.Flex; OCPU=1; MEM=6; BOOT=50
 echo "OCI_PREFLIGHT=START region=$REGION sha=$SHA"
@@ -21,7 +24,7 @@ mapfile -t ADS < <(o iam availability-domain list --compartment-id "$TENANCY" --
 [ "${#ADS[@]}" -gt 0 ] || fail NO_ADS
 o compute instance list --compartment-id "$COMP" --all >/dev/null || fail COMPUTE_READ_DENIED
 o network vcn list --compartment-id "$COMP" --all >/dev/null || fail NETWORK_READ_DENIED
-# Conservative Always Free guard: 2 OCPU / 12 GB A1 and 200 GB block total.
+# Current Always Free guard: 2 OCPU / 12 GB A1 and 200 GB block total.
 # Inventory every accessible active compartment, not only the target compartment.
 mapfile -t COMPS < <({ printf '%s\n' "$TENANCY"; o iam compartment list --compartment-id "$TENANCY" --compartment-id-in-subtree true --access-level ACCESSIBLE --all | jq -r '.data[]|select(."lifecycle-state"=="ACTIVE")|.id'; } | awk '!seen[$0]++')
 CPU_USED=0; MEM_USED=0; VOL_USED=0
@@ -46,7 +49,7 @@ fi
 GOOD_ADS=()
 for ad in "${ADS[@]}"; do
   c="$(o limits resource-availability get --compartment-id "$COMP" --service-name compute-core --limit-name standard-a1-core-count --availability-domain "$ad" 2>/dev/null | jq -r '.data."fractional-available"//.data.available//0' || true)"
-  m="$(o limits resource-availability get --compartment-id "$COMP" --service-name compute-core --limit-name standard-a1-memory-count --availability-domain "$ad" 2>/dev/null | jq -r '.data."fractional-available"//.data.available//0' || true)"
+  m="$(o limits resource-availability get --compartment-id "$COMP" --service-name compute-memory --limit-name standard-a1-memory-count --availability-domain "$ad" 2>/dev/null | jq -r '.data."fractional-available"//.data.available//0' || true)"
   python3 - "$c" "$m" -c 'import sys; raise SystemExit(0 if float(sys.argv[1] or 0)>=1 and float(sys.argv[2] or 0)>=6 else 1)' && GOOD_ADS+=("$ad") || true
 done
 if { [ -z "$IID" ] || [ "$IID" = null ]; } && [ "${#GOOD_ADS[@]}" -eq 0 ]; then fail NO_A1_FREE_LIMIT_HEADROOM 20; fi
@@ -56,23 +59,41 @@ VCN="$(o network vcn list --compartment-id "$COMP" --all --query 'data[?"display
 IGW="$(o network internet-gateway list --compartment-id "$COMP" --vcn-id "$VCN" --all --query 'data[?"display-name"==`atm-igw`].id|[0]' --raw-output)"
 [ -n "$IGW" ] && [ "$IGW" != null ] || IGW="$(o network internet-gateway create --compartment-id "$COMP" --vcn-id "$VCN" --is-enabled true --display-name atm-igw --wait-for-state AVAILABLE --query data.id --raw-output)"
 RR="[{\"cidrBlock\":\"0.0.0.0/0\",\"networkEntityId\":\"$IGW\"}]"
-RT="$(o network route-table list --compartment-id "$COMP" --vcn-id "$VCN" --all --query 'data[?"display-name"==`atm-route`].id|[0]' --raw-output)"
+RT="$(o network route-table list --compartment-id "$COMP" --vcn-id "$VCN" --all --query 'data[?\"display-name\"==`atm-route`].id|[0]' --raw-output)"
 if [ -z "$RT" ] || [ "$RT" = null ]; then RT="$(o network route-table create --compartment-id "$COMP" --vcn-id "$VCN" --route-rules "$RR" --display-name atm-route --wait-for-state AVAILABLE --query data.id --raw-output)"; else o network route-table update --rt-id "$RT" --route-rules "$RR" --force >/dev/null; fi
 CSIP="$(curl -4fsS --max-time 10 https://api.ipify.org)" || fail CLOUD_SHELL_EGRESS_IP_FAILED
 [[ "$CSIP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail CLOUD_SHELL_EGRESS_IP_INVALID
 EG='[{"destination":"0.0.0.0/0","protocol":"all","isStateless":false}]'; IN="[{\"source\":\"$CSIP/32\",\"protocol\":\"6\",\"isStateless\":false,\"tcpOptions\":{\"destinationPortRange\":{\"min\":22,\"max\":22}}}]"
-SL="$(o network security-list list --compartment-id "$COMP" --vcn-id "$VCN" --all --query 'data[?"display-name"==`atm-security`].id|[0]' --raw-output)"
+SL="$(o network security-list list --compartment-id "$COMP" --vcn-id "$VCN" --all --query 'data[?\"display-name\"==`atm-security`].id|[0]' --raw-output)"
 if [ -z "$SL" ] || [ "$SL" = null ]; then SL="$(o network security-list create --compartment-id "$COMP" --vcn-id "$VCN" --display-name atm-security --egress-security-rules "$EG" --ingress-security-rules "$IN" --wait-for-state AVAILABLE --query data.id --raw-output)"; else o network security-list update --security-list-id "$SL" --egress-security-rules "$EG" --ingress-security-rules "$IN" --force >/dev/null; fi
-SUB="$(o network subnet list --compartment-id "$COMP" --vcn-id "$VCN" --all --query 'data[?"display-name"==`atm-subnet`].id|[0]' --raw-output)"
+SUB="$(o network subnet list --compartment-id "$COMP" --vcn-id "$VCN" --all --query 'data[?\"display-name\"==`atm-subnet`].id|[0]' --raw-output)"
 [ -n "$SUB" ] && [ "$SUB" != null ] || SUB="$(o network subnet create --compartment-id "$COMP" --vcn-id "$VCN" --cidr-block 10.77.1.0/24 --display-name atm-subnet --dns-label atm --route-table-id "$RT" --security-list-ids "[\"$SL\"]" --prohibit-public-ip-on-vnic false --wait-for-state AVAILABLE --query data.id --raw-output)"
 
 mkdir -p "$HOME/.atm"; chmod 700 "$HOME/.atm"; KEY="$HOME/.atm/oci-atm-ed25519"
 [ -f "$KEY" ] || ssh-keygen -q -t ed25519 -N '' -f "$KEY" -C atm-oci-breakglass
 chmod 600 "$KEY"; chmod 644 "$KEY.pub"
 
-# Tiny private external state object. Never overwrite an existing state object on bootstrap reruns.
+# Always Free Object Storage is 20 GB combined. Inventory all subscribed regions
+# and accessible compartments; any unreadable region/compartment is ambiguity => fail closed.
 NS="$(o os ns get --query data --raw-output)" || fail OBJECT_STORAGE_DENIED
-for c in "${COMPS[@]}"; do o os bucket list --namespace-name "$NS" --compartment-id "$c" --all >/dev/null 2>&1 || true; done
+OBJECT_BYTES=0
+for r in "${SUBSCRIBED_REGIONS[@]}"; do
+  for c in "${COMPS[@]}"; do
+    buckets="$(oci os bucket list --region "$r" --namespace-name "$NS" --compartment-id "$c" --all 2>/dev/null)" || fail OBJECT_STORAGE_INVENTORY_AMBIGUOUS
+    while IFS= read -r bucket; do
+      [ -n "$bucket" ] || continue
+      bytes="$(oci os object list --region "$r" --namespace-name "$NS" --bucket-name "$bucket" --all --fields name,size 2>/dev/null | jq '[.data[].size // 0]|add//0')" || fail OBJECT_STORAGE_OBJECT_INVENTORY_AMBIGUOUS
+      [[ "$bytes" =~ ^[0-9]+$ ]] || fail OBJECT_STORAGE_SIZE_INVALID
+      OBJECT_BYTES=$((OBJECT_BYTES + bytes))
+    done < <(jq -r '.data[].name' <<<"$buckets")
+  done
+done
+# Leave 1 MiB safety margin so state growth cannot cross the free 20-GB boundary silently.
+OBJECT_FREE_LIMIT=$((20 * 1024 * 1024 * 1024))
+OBJECT_MARGIN=$((1024 * 1024))
+[ "$OBJECT_BYTES" -le $((OBJECT_FREE_LIMIT - OBJECT_MARGIN)) ] || fail ALWAYS_FREE_OBJECT_STORAGE_HEADROOM_EXCEEDED
+
+# Tiny private external state object. Never overwrite an existing state object on bootstrap reruns.
 B="atm-state-$(printf %s "$TENANCY"|sha256sum|cut -c1-12)"
 o os bucket get --namespace-name "$NS" --bucket-name "$B" >/dev/null 2>&1 || o os bucket create --namespace-name "$NS" --compartment-id "$COMP" --name "$B" --public-access-type NoPublicAccess --storage-tier Standard >/dev/null || fail STATE_BUCKET_CREATE
 if ! o os object head --namespace-name "$NS" --bucket-name "$B" --name atm-state.tgz >/dev/null 2>&1; then
@@ -128,4 +149,4 @@ SSH_KEY='$KEY'
 STATE_PAR_URL='$PAR'
 EOF
 chmod 600 "$OUT"
-echo "OCI_PROVISION=OK instance=$IID shape=$SHAPE ocpu=$ACT_OCPU memory_gb=$ACT_MEM boot_gb=50 ad=$AD"
+echo "OCI_PROVISION=OK instance=$IID shape=$SHAPE ocpu=$ACT_OCPU memory_gb=$ACT_MEM boot_gb=50 object_bytes=$OBJECT_BYTES ad=$AD"
