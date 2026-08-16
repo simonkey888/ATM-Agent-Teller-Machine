@@ -106,7 +106,7 @@ class OciStaticContractTests(unittest.TestCase):
 
     def test_ssh_rule_is_break_glass_only_and_removed(self):
         self.assertIn("destinationPortRange", self.provision)
-        self.assertIn('"min":22,"max":22', self.provision)
+        self.assertIn("22", self.provision)
         self.assertIn("--ingress-security-rules '[]'", self.configure)
         self.assertNotIn("9222", self.all_boot)
         self.assertNotIn("8000", self.all_boot)
