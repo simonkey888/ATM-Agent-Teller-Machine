@@ -1,0 +1,26 @@
+[Unit]
+Description=ATM credential-isolated GitHub deliverable publisher
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/atm/control.env
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/atm
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/atm/control.env
+ExecStart=/opt/atm/.venv/bin/python /opt/atm/src/atm_publish_server.py
+Restart=on-failure
+RestartSec=10s
+RuntimeDirectory=atm-publisher
+RuntimeDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
