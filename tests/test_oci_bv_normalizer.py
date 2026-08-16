@@ -55,7 +55,13 @@ class OciBlockVolumeNormalizerTests(unittest.TestCase):
         self.assertIn("oci-normalize-bv.py", self.bootstrap)
         self.assertIn('"$D/oci-provision-runner.sh" "$D/infra.env"', self.bootstrap)
         self.assertIn('--output json', self.runner)
-        self.assertIn('export -f oci', self.runner)
+        self.assertIn('export -f oci ssh-keygen', self.runner)
+
+    def test_cloud_shell_fips_breakglass_key_is_rsa3072(self):
+        self.assertIn('REAL_SSH_KEYGEN="$(command -v ssh-keygen)"', self.runner)
+        self.assertIn('out+=("-t" "rsa" "-b" "3072")', self.runner)
+        self.assertIn('OCI_BREAKGLASS_KEY_ALGORITHM=RSA3072 reason=FIPS_COMPATIBILITY', self.runner)
+        self.assertNotIn('"$REAL_SSH_KEYGEN" -t ed25519', self.runner)
 
 
 if __name__ == "__main__":
