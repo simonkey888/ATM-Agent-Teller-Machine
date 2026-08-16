@@ -21,7 +21,7 @@ jobs:
       - name: Compile
         run: python -m compileall -q src tests
       - name: OCI shell syntax
-        run: bash -n scripts/bootstrap-oci-atm.sh scripts/oci-provision.sh scripts/oci-configure.sh scripts/atm-state-backup.sh deploy/oci/cloud-init.sh
+        run: bash -n scripts/bootstrap-oci-atm.sh scripts/bootstrap-oci-atm-api.sh scripts/github-oci-bootstrap.sh scripts/mobile-oci-bootstrap.sh scripts/oci-provision.sh scripts/oci-provision-runner.sh scripts/oci-configure.sh scripts/atm-state-backup.sh deploy/oci/cloud-init.sh
       - name: Unit and contract tests
         env:
           PYTHONPATH: src
