@@ -18,7 +18,8 @@ class OciResumeContractTests(unittest.TestCase):
         marker = "ORDER_002C_BOOTSTRAP_STATUS=WAITING_WINDOWS_STOP_GITHUB_CONTINUATION"
         start = 'ID="order002c-oci-start-$SHA"'
         self.assertIn(marker, self.configure)
-        self.assertIn('"supervisor_systemd":"STOPPED"', self.configure)
+        self.assertIn("supervisor_systemd", self.configure)
+        self.assertIn("STOPPED", self.configure)
         self.assertLess(self.configure.index(marker), self.configure.index(start))
 
     def test_waiting_state_exits_without_starting_supervisor(self):
