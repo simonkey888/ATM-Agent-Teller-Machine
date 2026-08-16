@@ -53,14 +53,21 @@ class OciRemoteExecutorContractTests(unittest.TestCase):
         self.assertIn("OCI_API_AUTH_FAILED", self.api_boot)
         self.assertIn('RAW="https://raw.githubusercontent.com/$REPO/$SHA"', self.api_boot)
 
-    def test_bundle_is_not_printed_and_is_removed_from_environment(self):
+    def test_bundle_parser_accepts_common_secret_entry_formats_without_printing(self):
         self.assertIn('BUNDLE="${ATM_REMOTE_BUNDLE:-}"', self.wrapper)
-        self.assertIn("unset BUNDLE REST ATM_REMOTE_BUNDLE", self.wrapper)
+        self.assertIn('raw.split("|")', self.wrapper)
+        self.assertIn('raw.startswith("{")', self.wrapper)
+        self.assertIn('raw.splitlines()', self.wrapper)
+        self.assertIn('"GITHUB_PAT"', self.wrapper)
+        self.assertIn('"GOOGLE_API_KEY"', self.wrapper)
+        self.assertIn("ATM_AGENT_TELLER_MACHINE_FORMAT_UNRESOLVED", self.wrapper)
+        self.assertIn("unset PARSED_FILE BUNDLE ATM_REMOTE_BUNDLE", self.wrapper)
         self.assertIn('ATM_BOOTSTRAP_CRED_FILE="$(mktemp)"', self.wrapper)
         self.assertIn("trap cleanup_secret EXIT INT TERM", self.wrapper)
         self.assertNotIn('echo "$BUNDLE"', self.wrapper)
         self.assertNotIn('echo "$ATM_REMOTE_BUNDLE"', self.wrapper)
         self.assertNotIn("set -x", self.wrapper)
+        self.assertNotIn("ATM_AGENT_TELLER_MACHINE_FORMAT", self.workflow)
 
     def test_remote_path_reuses_same_a1_zero_spend_provisioner(self):
         self.assertIn("oci-provision.sh", self.api_boot)
