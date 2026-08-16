@@ -1,6 +1,8 @@
 import importlib.util
 import sys
+import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 MODULE = Path(__file__).resolve().parents[1] / "src" / "atm.py"
@@ -19,30 +21,46 @@ class ATMTests(unittest.TestCase):
         value = atm.extract_json('x\n```json\n{"status":"PASS"}\n```')
         self.assertEqual(value["status"], "PASS")
 
-    def test_default_state(self):
-        state = atm.default_state()
-        self.assertEqual(state["phase"], "DISCOVER")
-        self.assertEqual(state["paid_usd"], 0)
+    def test_v2_default_state_has_no_model_money_counter(self):
+        state = atm.RuntimeState()
+        self.assertEqual(state.phase, atm.Phase.DISCOVER)
+        self.assertFalse(hasattr(state, "paid_usd"))
+        self.assertFalse(hasattr(state, "accepted_usd"))
+        self.assertFalse(hasattr(state, "claimed_usd"))
 
-    def test_discover_found_routes_to_claim(self):
-        state = atm.default_state()
-        atm.apply_result(
-            state,
-            "DISCOVER",
-            {"status": "FOUND", "active_opportunity": {"reward_usd": 200}},
+    def test_state_machine_contains_verify_and_payment_verify(self):
+        self.assertEqual(atm.Phase.VERIFY.value, "VERIFY")
+        self.assertEqual(atm.Phase.PAYMENT_VERIFY.value, "PAYMENT_VERIFY")
+
+    def test_deterministic_opportunity_ranking_penalizes_competition(self):
+        base = {
+            "source": "test",
+            "authoritative_url": "https://example.test/task",
+            "upstream_status": "open",
+            "expected_fees": Decimal("0"),
+        }
+        high_comp = atm.Opportunity(
+            canonical_opportunity_id="test:high",
+            reward_gross=Decimal("200"),
+            competition=7,
+            **base,
         )
-        self.assertEqual(state["phase"], "CLAIM")
+        low_comp = atm.Opportunity(
+            canonical_opportunity_id="test:low",
+            reward_gross=Decimal("100"),
+            competition=0,
+            **base,
+        )
+        selected = atm.choose_opportunity([high_comp, low_comp], max_competition=8)
+        self.assertEqual(selected.canonical_opportunity_id, "test:low")
 
-    def test_checker_failure_routes_to_work(self):
-        state = atm.default_state()
-        state["phase"] = "CHECK"
-        atm.apply_result(state, "CHECK", {"status": "FAIL"})
-        self.assertEqual(state["phase"], "WORK")
-
-    def test_paid_target(self):
-        state = atm.default_state()
-        state["paid_usd"] = 200
-        self.assertTrue(atm.should_stop({"target_paid_usd": 200}, state))
+    def test_status_derives_realized_value_from_empty_ledger(self):
+        with tempfile.TemporaryDirectory() as td:
+            ledger = atm.PaymentLedger(Path(td) / "validated-payment-proofs.jsonl")
+            state = atm.RuntimeState(target_paid_usd=Decimal("200"))
+            status = atm.status_payload(state, ledger)
+            self.assertEqual(status["realized_withdrawable_usd"], "0")
+            self.assertEqual(status["validated_payment_proof_count"], 0)
 
 
 if __name__ == "__main__":
