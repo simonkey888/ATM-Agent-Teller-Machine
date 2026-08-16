@@ -1,0 +1,31 @@
+[Unit]
+Description=ATM economic supervisor (OCI)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/atm/runtime.env
+
+[Service]
+Type=simple
+User=atm
+Group=atm
+WorkingDirectory=/opt/atm
+Environment=ATM_HOST_CLASS=OCI
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/var/lib/atm
+Environment=HERMES_HOME=/var/lib/atm/.hermes
+Environment=PATH=/var/lib/atm/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/etc/atm/runtime.env
+ExecStart=/opt/atm/.venv/bin/python /opt/atm/src/atm_v2_oci.py
+Restart=on-failure
+RestartSec=30s
+TimeoutStopSec=45s
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/atm
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
