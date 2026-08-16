@@ -75,6 +75,15 @@ class Opportunity(BaseModel):
     payment_method: str = "UNKNOWN"
     payout_latency: str = "UNKNOWN"
     payment_proof_method: str = "UNKNOWN"
+    expected_agent_hours: Decimal = Decimal("4")
+    expected_owner_minutes: Decimal = Decimal("0")
+    payout_latency_hours: Decimal = Decimal("24")
+    p_eligible: Decimal = Decimal("0.80")
+    p_claim: Decimal = Decimal("0.70")
+    p_complete: Decimal = Decimal("0.75")
+    p_accept: Decimal = Decimal("0.50")
+    p_pay: Decimal = Decimal("0.95")
+    p_withdrawable: Decimal = Decimal("0.98")
     external_state_hash: str | None = None
     claim_id: str | None = None
     submission_id: str | None = None
@@ -89,9 +98,50 @@ class Opportunity(BaseModel):
             raise ValueError("authoritative_url must use https")
         return value
 
+    @field_validator("p_eligible", "p_claim", "p_complete", "p_accept", "p_pay", "p_withdrawable")
+    @classmethod
+    def probability_in_unit_interval(cls, value: Decimal) -> Decimal:
+        if value < 0 or value > 1:
+            raise ValueError("probability must be between 0 and 1")
+        return value
+
+    @field_validator("expected_agent_hours")
+    @classmethod
+    def positive_agent_hours(cls, value: Decimal) -> Decimal:
+        if value <= 0:
+            raise ValueError("expected_agent_hours must be positive")
+        return value
+
+    @field_validator("expected_owner_minutes", "payout_latency_hours")
+    @classmethod
+    def nonnegative_time(cls, value: Decimal) -> Decimal:
+        if value < 0:
+            raise ValueError("time estimate cannot be negative")
+        return value
+
     @property
     def reward_net(self) -> Decimal:
         return max(Decimal("0"), self.reward_gross - self.expected_fees)
+
+    @property
+    def ev_realized(self) -> Decimal:
+        return (
+            self.reward_net
+            * self.p_eligible
+            * self.p_claim
+            * self.p_complete
+            * self.p_accept
+            * self.p_pay
+            * self.p_withdrawable
+        )
+
+    @property
+    def total_effort_hours(self) -> Decimal:
+        return self.expected_agent_hours + (self.expected_owner_minutes / Decimal("60"))
+
+    @property
+    def ev_per_effort_hour(self) -> Decimal:
+        return self.ev_realized / self.total_effort_hours
 
 
 class HumanGate(BaseModel):
