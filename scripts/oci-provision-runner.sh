@@ -31,12 +31,12 @@ oci() {
   # General compute inventory must not inherit Cloud Shell/user output/query
   # defaults. Prefer JSON normalization. Some OCI CLI/config combinations can
   # return rc=0 with empty stdout for list serialization; never interpret that
-  # as zero usage. Instead query A1 OCPU and memory as independent numeric
-  # scalars and synthesize the minimal inventory required by the free-tier gate.
+  # as zero usage. First count active A1 rows. Only an exact zero count may be
+  # reduced to zero usage; otherwise OCPU and memory sums must be numeric.
   # Display-name lookup remains direct OCI service truth because it recovers
   # the actual atm-oci instance OCID.
   if [ "${1:-}" = "compute" ] && [ "${2:-}" = "instance" ] && [ "${3:-}" = "list" ]; then
-    local has_display=0 arg out rc totals cpu mem err cpuq memq
+    local has_display=0 arg out rc totals cpu mem err count countq cpuq memq
     for arg in "$@"; do
       [ "$arg" = "--display-name" ] && has_display=1
     done
@@ -60,32 +60,53 @@ oci() {
         }
         IFS=$'\t' read -r cpu mem <<<"$totals"
       else
-        echo 'OCI_COMPUTE_INVENTORY=FALLBACK class=EMPTY_JSON_STDOUT mode=SCALAR_SUMS' >&2
+        echo 'OCI_COMPUTE_INVENTORY=FALLBACK class=EMPTY_JSON_STDOUT mode=COUNT_THEN_SCALAR_SUMS' >&2
+        countq='length(data[?shape==`VM.Standard.A1.Flex` && "lifecycle-state"!=`TERMINATED`])'
         cpuq='sum(data[?shape==`VM.Standard.A1.Flex` && "lifecycle-state"!=`TERMINATED`]."shape-config".ocpus)'
         memq='sum(data[?shape==`VM.Standard.A1.Flex` && "lifecycle-state"!=`TERMINATED`]."shape-config"."memory-in-gbs")'
+
         : >"$err"
         set +e
-        cpu="$("$REAL_OCI" "$@" --query "$cpuq" --raw-output 2>"$err")"; rc=$?
+        count="$("$REAL_OCI" "$@" --query "$countq" --raw-output 2>"$err")"; rc=$?
         set -e
         if [ "$rc" -ne 0 ]; then
           rm -f "$err"
-          echo 'OCI_COMPUTE_INVENTORY=FAIL class=SCALAR_OCPU_QUERY_FAILED' >&2
+          echo 'OCI_COMPUTE_INVENTORY=FAIL class=SCALAR_COUNT_QUERY_FAILED' >&2
           return "$rc"
         fi
-        : >"$err"
-        set +e
-        mem="$("$REAL_OCI" "$@" --query "$memq" --raw-output 2>"$err")"; rc=$?
-        set -e
-        if [ "$rc" -ne 0 ]; then
+        count="$(tr -d '[:space:]' <<<"$count")"
+        [[ "$count" =~ ^[0-9]+$ ]] || { rm -f "$err"; echo 'OCI_COMPUTE_INVENTORY=FAIL class=SCALAR_COUNT_INVALID' >&2; return 44; }
+
+        if [ "$count" -eq 0 ]; then
           rm -f "$err"
-          echo 'OCI_COMPUTE_INVENTORY=FAIL class=SCALAR_MEMORY_QUERY_FAILED' >&2
-          return "$rc"
+          cpu=0
+          mem=0
+          echo 'OCI_COMPUTE_INVENTORY=EMPTY_A1_CONFIRMED count=0'
+        else
+          : >"$err"
+          set +e
+          cpu="$("$REAL_OCI" "$@" --query "$cpuq" --raw-output 2>"$err")"; rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            rm -f "$err"
+            echo 'OCI_COMPUTE_INVENTORY=FAIL class=SCALAR_OCPU_QUERY_FAILED' >&2
+            return "$rc"
+          fi
+          : >"$err"
+          set +e
+          mem="$("$REAL_OCI" "$@" --query "$memq" --raw-output 2>"$err")"; rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            rm -f "$err"
+            echo 'OCI_COMPUTE_INVENTORY=FAIL class=SCALAR_MEMORY_QUERY_FAILED' >&2
+            return "$rc"
+          fi
+          rm -f "$err"
+          cpu="$(tr -d '[:space:]' <<<"$cpu")"
+          mem="$(tr -d '[:space:]' <<<"$mem")"
+          [[ "$cpu" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo 'OCI_COMPUTE_INVENTORY=FAIL class=SCALAR_OCPU_INVALID' >&2; return 44; }
+          [[ "$mem" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo 'OCI_COMPUTE_INVENTORY=FAIL class=SCALAR_MEMORY_INVALID' >&2; return 44; }
         fi
-        rm -f "$err"
-        cpu="$(tr -d '[:space:]' <<<"$cpu")"
-        mem="$(tr -d '[:space:]' <<<"$mem")"
-        [[ "$cpu" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo 'OCI_COMPUTE_INVENTORY=FAIL class=SCALAR_OCPU_INVALID' >&2; return 44; }
-        [[ "$mem" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo 'OCI_COMPUTE_INVENTORY=FAIL class=SCALAR_MEMORY_INVALID' >&2; return 44; }
       fi
 
       jq -nc --argjson cpu "$cpu" --argjson mem "$mem" '
