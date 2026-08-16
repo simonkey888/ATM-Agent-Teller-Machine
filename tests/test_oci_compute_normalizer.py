@@ -29,11 +29,16 @@ class OciComputeNormalizerTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0)
         self.assertEqual(p.stdout, "0\t0\n")
 
+    def test_direct_data_array_is_supported(self):
+        p = self.run_norm([])
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(p.stdout, "0\t0\n")
+
     def test_numeric_strings_and_scientific_notation_are_canonicalized(self):
-        p = self.run_norm({"data": [
+        p = self.run_norm([
             {"shape": "VM.Standard.A1.Flex", "lifecycle-state": "RUNNING", "shape-config": {"ocpus": "1E+0", "memory-in-gbs": "6.0"}},
             {"shape": "VM.Standard.A1.Flex", "lifecycle-state": "STOPPED", "shape-config": {"ocpus": 0.5, "memory-in-gbs": 3}},
-        ]})
+        ])
         self.assertEqual(p.returncode, 0)
         self.assertEqual(p.stdout, "1.5\t9\n")
 
@@ -57,9 +62,16 @@ class OciComputeNormalizerTests(unittest.TestCase):
         ]})
         self.assertNotEqual(p.returncode, 0)
 
-    def test_runner_normalizes_general_compute_list_but_preserves_display_lookup(self):
+    def test_missing_data_envelope_fails_closed(self):
+        p = self.run_norm({"items": []})
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("DATA_FIELD_MISSING", p.stderr)
+
+    def test_runner_forces_json_data_query_and_preserves_display_lookup(self):
         self.assertIn('OCI_COMPUTE_INVENTORY=FAIL class=NORMALIZATION_FAILED', self.runner)
+        self.assertIn('OCI_COMPUTE_INVENTORY=FAIL class=EMPTY_STDOUT', self.runner)
         self.assertIn('python3 "$D/oci-normalize-compute.py"', self.runner)
+        self.assertIn('--output json --query data', self.runner)
         self.assertIn('"--display-name"', self.runner)
         self.assertIn('if [ "$has_display" -eq 0 ]', self.runner)
 
