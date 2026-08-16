@@ -80,7 +80,7 @@ class OciStaticContractTests(unittest.TestCase):
         self.assertIn('chmod 600 "$KEY"', self.provision)
         self.assertNotIn('cat "$KEY"', self.all_boot)
         self.assertNotIn("OCI_PRIVATE_KEY", self.all_boot)
-        self.assertIn("read -rsp 'GitHub token", self.configure)
+        self.assertIn("read -rsp 'GitHub classic PAT with public_repo scope", self.configure)
         self.assertIn("read -rsp 'GOOGLE_API_KEY", self.configure)
         self.assertIn("chmod 600 /etc/atm/control.env", self.configure)
         self.assertIn("chmod 640 /etc/atm/runtime.env", self.configure)
