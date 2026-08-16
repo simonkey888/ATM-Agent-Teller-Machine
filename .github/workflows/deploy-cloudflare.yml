@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: atm-cloudflare-production
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -62,8 +62,6 @@ jobs:
           url = "https://atm.simondalmasso44.workers.dev/health"
           expected = os.environ["EXPECTED_SHA"]
           last = None
-          # workers.dev propagation can lag the successful deploy; keep the
-          # deploy exact-SHA fail-closed while allowing up to three minutes.
           for _ in range(36):
               try:
                   with urllib.request.urlopen(url, timeout=15) as r:
