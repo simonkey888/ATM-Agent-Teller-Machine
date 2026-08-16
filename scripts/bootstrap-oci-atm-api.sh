@@ -45,7 +45,7 @@ cleanup(){
 trap cleanup EXIT INT TERM
 
 RAW="https://raw.githubusercontent.com/$REPO/$SHA"
-for f in oci-provision.sh oci-provision-runner.sh oci-normalize-bv.py oci-normalize-compute.py oci-configure.sh; do
+for f in oci-provision.sh oci-provision-runner.sh oci-normalize-bv.py oci-normalize-compute.py oci-compute-usage-sdk.py oci-configure.sh; do
   curl -fsSL "$RAW/scripts/$f" -o "$D/$f"
   chmod 700 "$D/$f"
 done
