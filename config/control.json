@@ -1,0 +1,9 @@
+{
+  "repository": "simonkey888/ATM-Agent-Teller-Machine",
+  "owner_login": "simonkey888",
+  "control_issue": 4,
+  "branch": "agent/atm-v1",
+  "poll_seconds": 30,
+  "max_backoff_seconds": 900,
+  "ignore_comment_ids_before_or_equal": 5305532747
+}
