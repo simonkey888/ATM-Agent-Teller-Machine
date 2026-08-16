@@ -118,8 +118,6 @@ def log_event(kind: str, payload: Any, known_secrets: list[str] | None = None) -
     path.write_text(redact_text(text, known_secrets or []), encoding="utf-8")
 
 
-
-
 def provider_env_has(name: str) -> bool:
     """Check process env and Hermes' persisted env without exposing values."""
     if os.getenv(name):
@@ -138,6 +136,7 @@ def provider_env_has(name: str) -> bool:
             if stripped.startswith(prefix) and stripped.split("=", 1)[1].strip():
                 return True
     return False
+
 
 def agent_workspace(phase: Phase, state: RuntimeState) -> Path:
     identity = state.active_opportunity.canonical_opportunity_id if state.active_opportunity else "no-opportunity"
@@ -194,7 +193,6 @@ def build_agent_prompt(phase: Phase, config: dict[str, Any], state: RuntimeState
     role = load_prompt(phase)
     runtime = {
         "phase": phase.value,
-        "target_paid_usd": str(state.target_paid_usd),
         "active_opportunity": state.active_opportunity.model_dump(mode="json") if state.active_opportunity else None,
         "allow_auto_pr": bool(config.get("allow_auto_pr", True)),
         "workspace": str(agent_workspace(phase, state)),
@@ -300,11 +298,19 @@ def run_agent(phase: Phase, config: dict[str, Any], state: RuntimeState) -> Agen
 
 
 def choose_opportunity(opportunities: list[Opportunity], max_competition: int) -> Opportunity | None:
-    eligible = [o for o in opportunities if o.competition <= max_competition and o.reward_net > 0]
+    del max_competition  # Competition belongs in realized-EV estimates, not a headline-reward cutoff.
+    eligible = [o for o in opportunities if o.reward_net > 0 and o.ev_realized > 0]
     if not eligible:
         return None
-    # Conservative deterministic ranking before model involvement.
-    return max(eligible, key=lambda o: (o.reward_net / Decimal(1 + max(o.competition, 0)), -o.competition))
+    return max(
+        eligible,
+        key=lambda o: (
+            o.ev_per_effort_hour,
+            o.ev_realized,
+            -o.payout_latency_hours,
+            -o.competition,
+        ),
+    )
 
 
 def adapter_for(adapters: dict[str, OpportunityAdapter], opportunity: Opportunity) -> OpportunityAdapter:
@@ -335,6 +341,7 @@ def phase_discover(config: dict[str, Any], state: RuntimeState, adapters: dict[s
 
 
 def phase_verify(config: dict[str, Any], state: RuntimeState, adapters: dict[str, OpportunityAdapter]) -> None:
+    del config
     opp = state.active_opportunity
     if not opp:
         state.phase = Phase.DISCOVER
@@ -345,9 +352,9 @@ def phase_verify(config: dict[str, Any], state: RuntimeState, adapters: dict[str
     adapter.verify_funding(opp, snapshot)
     adapter.verify_eligibility(opp, snapshot)
     competition = adapter.inspect_competition(opp, snapshot)
-    if max(competition.values() or [0]) > int(config.get("max_competition", 8)):
-        raise OpportunityValidationError("competition exceeds configured maximum")
     opp.competition = max(competition.values() or [0])
+    opp.claims = int(competition.get("claims", opp.claims))
+    opp.open_prs = int(competition.get("open_prs", opp.open_prs))
     from atm_core.opportunities import external_state_hash
 
     opp.external_state_hash = external_state_hash(snapshot)
@@ -357,12 +364,19 @@ def phase_verify(config: dict[str, Any], state: RuntimeState, adapters: dict[str
 
 
 def phase_claim(config: dict[str, Any], state: RuntimeState, adapters: dict[str, OpportunityAdapter]) -> None:
+    del config
     opp = state.active_opportunity
     if not opp:
         state.phase = Phase.DISCOVER
         return
     adapter = adapter_for(adapters, opp)
     result = adapter.claim(opp)
+    if isinstance(result, dict) and result.get("claim_required") is False:
+        opp.idempotency_key = f"claim-not-required:{opp.canonical_opportunity_id}"
+        state.active_opportunity = opp
+        state.phase = Phase.WORK
+        state.last_result = {"status": "CLAIM_NOT_REQUIRED", "opportunity_id": opp.canonical_opportunity_id}
+        return
     claim_obj = result.get("claim") if isinstance(result, dict) else None
     claim_id = (claim_obj or {}).get("id") if isinstance(claim_obj, dict) else result.get("claimId") if isinstance(result, dict) else None
     if not claim_id:
@@ -380,7 +394,6 @@ def phase_work(config: dict[str, Any], state: RuntimeState) -> None:
         state.human_gate = result.human_gate
         return
     if result.active_opportunity:
-        # Preserve deterministic identity/claim if the model omitted or altered them.
         old = state.active_opportunity
         new = result.active_opportunity
         if old:
@@ -396,7 +409,6 @@ def phase_work(config: dict[str, Any], state: RuntimeState) -> None:
 
 
 def phase_check(config: dict[str, Any], state: RuntimeState) -> None:
-    # run_agent is a fresh one-shot Hermes invocation; checker receives no worker chat session.
     result = run_agent(Phase.CHECK, config, state)
     state.last_result = result.model_dump(mode="json")
     if result.human_gate:
@@ -409,11 +421,11 @@ def phase_check(config: dict[str, Any], state: RuntimeState) -> None:
 
 
 def phase_submit(config: dict[str, Any], state: RuntimeState, adapters: dict[str, OpportunityAdapter]) -> None:
+    del config
     opp = state.active_opportunity
     if not opp or not opp.deliverable_url:
         raise OpportunityValidationError("SUBMIT requires verified deliverable_url")
     adapter = adapter_for(adapters, opp)
-    # Immediate re-preflight before submission.
     snapshot = adapter.fetch_authoritative(opp)
     adapter.verify_freshness(opp, snapshot)
     adapter.verify_funding(opp, snapshot)
@@ -428,6 +440,7 @@ def phase_submit(config: dict[str, Any], state: RuntimeState, adapters: dict[str
 
 
 def phase_monitor(config: dict[str, Any], state: RuntimeState, adapters: dict[str, OpportunityAdapter]) -> None:
+    del config
     opp = state.active_opportunity
     if not opp:
         state.phase = Phase.DISCOVER
