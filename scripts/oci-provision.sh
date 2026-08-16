@@ -13,33 +13,39 @@ print(c.get(p,"tenancy"))
 PY
 )" || fail CANNOT_DISCOVER_TENANCY
 REGION_SUBSCRIPTIONS="$(oci iam region-subscription list --all)" || fail CANNOT_DISCOVER_REGION_SUBSCRIPTIONS
-REGION="$(jq -r '.data[]|select(."is-home-region"==true)|."region-name"' <<<"$REGION_SUBSCRIPTIONS" | head -n1)"
+REGION="$(jq -r '(.data // [])[]?|select(."is-home-region"==true)|."region-name"' <<<"$REGION_SUBSCRIPTIONS" | head -n1)"
 [ -n "$REGION" ] && [ "$REGION" != null ] || fail EMPTY_HOME_REGION
-mapfile -t SUBSCRIBED_REGIONS < <(jq -r '.data[]."region-name"' <<<"$REGION_SUBSCRIPTIONS")
+mapfile -t SUBSCRIBED_REGIONS < <(jq -r '(.data // [])[]?."region-name"' <<<"$REGION_SUBSCRIPTIONS")
 [ "${#SUBSCRIBED_REGIONS[@]}" -gt 0 ] || fail NO_SUBSCRIBED_REGIONS
 COMP="${ATM_OCI_COMPARTMENT_ID:-$TENANCY}"; o(){ oci "$@" --region "$REGION"; }
 SHAPE=VM.Standard.A1.Flex; OCPU=1; MEM=6; BOOT=50
 echo "OCI_PREFLIGHT=START region=$REGION sha=$SHA"
-mapfile -t ADS < <(o iam availability-domain list --compartment-id "$TENANCY" --all | jq -r '.data[].name')
+mapfile -t ADS < <(o iam availability-domain list --compartment-id "$TENANCY" --all | jq -r '(.data // [])[]?.name')
 [ "${#ADS[@]}" -gt 0 ] || fail NO_ADS
 o compute instance list --compartment-id "$COMP" --all >/dev/null || fail COMPUTE_READ_DENIED
 o network vcn list --compartment-id "$COMP" --all >/dev/null || fail NETWORK_READ_DENIED
 # Current Always Free guard: 2 OCPU / 12 GB A1 and 200 GB block total.
 # Inventory every accessible active compartment, not only the target compartment.
-mapfile -t COMPS < <({ printf '%s\n' "$TENANCY"; o iam compartment list --compartment-id "$TENANCY" --compartment-id-in-subtree true --access-level ACCESSIBLE --all | jq -r '.data[]|select(."lifecycle-state"=="ACTIVE")|.id'; } | awk '!seen[$0]++')
+mapfile -t COMPS < <({ printf '%s\n' "$TENANCY"; o iam compartment list --compartment-id "$TENANCY" --compartment-id-in-subtree true --access-level ACCESSIBLE --all | jq -r '(.data // [])[]?|select(."lifecycle-state"=="ACTIVE")|.id'; } | awk '!seen[$0]++')
 CPU_USED=0; MEM_USED=0; VOL_USED=0
 for c in "${COMPS[@]}"; do
-  inst="$(o compute instance list --compartment-id "$c" --all 2>/dev/null || echo '{"data":[]}')"
-  read -r cpu mem <<<"$(jq -r '[.data[]|select(.shape=="VM.Standard.A1.Flex" and (."lifecycle-state"!="TERMINATED"))|[(."shape-config".ocpus//0),(."shape-config"."memory-in-gbs"//0)]]|[map(.[0])|add//0,map(.[1])|add//0]|@tsv' <<<"$inst")"
+  inst="$(o compute instance list --compartment-id "$c" --all 2>/dev/null)" || fail COMPUTE_INVENTORY_AMBIGUOUS
+  usage="$(jq -er '(.data // []) as $rows | [$rows[]? | select(.shape=="VM.Standard.A1.Flex" and (."lifecycle-state"!="TERMINATED")) | (."shape-config" // {})] as $a1 | [((($a1 | map(.ocpus // 0) | add) // 0)), ((($a1 | map(."memory-in-gbs" // 0) | add) // 0))] | @tsv' <<<"$inst")" || fail COMPUTE_INVENTORY_PARSE_FAILED
+  read -r cpu mem <<<"$usage"
+  [[ "$cpu" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail COMPUTE_OCPU_INVENTORY_INVALID
+  [[ "$mem" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail COMPUTE_MEMORY_INVENTORY_INVALID
   CPU_USED="$(python3 -c "print(float('$CPU_USED')+float('$cpu'))")"; MEM_USED="$(python3 -c "print(float('$MEM_USED')+float('$mem'))")"
   for ad in "${ADS[@]}"; do
     for kind in boot-volume volume; do
-      n="$(o bv "$kind" list --compartment-id "$c" --availability-domain "$ad" --all 2>/dev/null | jq '[.data[]|select(."lifecycle-state"!="TERMINATED")|."size-in-gbs"]|add//0' || echo 0)"
+      volume_json="$(o bv "$kind" list --compartment-id "$c" --availability-domain "$ad" --all 2>/dev/null)" || fail BLOCK_VOLUME_INVENTORY_AMBIGUOUS
+      n="$(jq -er '[(.data // [])[]? | select(."lifecycle-state"!="TERMINATED") | (."size-in-gbs" // 0)] | add // 0' <<<"$volume_json")" || fail BLOCK_VOLUME_INVENTORY_PARSE_FAILED
+      [[ "$n" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail BLOCK_VOLUME_INVENTORY_INVALID
       VOL_USED="$(python3 -c "print(float('$VOL_USED')+float('$n'))")"
     done
   done
 done
-IID="$(o compute instance list --compartment-id "$COMP" --display-name atm-oci --all --query 'data[?"lifecycle-state"!=`TERMINATED`].id|[0]' --raw-output 2>/dev/null || true)"
+instance_inventory="$(o compute instance list --compartment-id "$COMP" --display-name atm-oci --all 2>/dev/null)" || fail ATM_INSTANCE_LOOKUP_AMBIGUOUS
+IID="$(jq -r '[.data[]? | select(."lifecycle-state"!="TERMINATED") | .id][0] // empty' <<<"$instance_inventory")"
 if [ -z "$IID" ] || [ "$IID" = null ]; then
   python3 - "$CPU_USED" "$MEM_USED" "$VOL_USED" <<'PY' || fail ALWAYS_FREE_HEADROOM_EXCEEDED
 import sys
@@ -90,10 +96,10 @@ for r in "${SUBSCRIBED_REGIONS[@]}"; do
     buckets="$(oci os bucket list --region "$r" --namespace-name "$NS" --compartment-id "$c" --all 2>/dev/null)" || fail OBJECT_STORAGE_INVENTORY_AMBIGUOUS
     while IFS= read -r bucket; do
       [ -n "$bucket" ] || continue
-      bytes="$(oci os object list-object-versions --region "$r" --namespace-name "$NS" --bucket-name "$bucket" --all --fields name,size 2>/dev/null | jq '[.data[].size // 0]|add//0')" || fail OBJECT_STORAGE_OBJECT_INVENTORY_AMBIGUOUS
+      bytes="$(oci os object list-object-versions --region "$r" --namespace-name "$NS" --bucket-name "$bucket" --all --fields name,size 2>/dev/null | jq '[(.data // [])[]? | .size // 0] | add // 0')" || fail OBJECT_STORAGE_OBJECT_INVENTORY_AMBIGUOUS
       [[ "$bytes" =~ ^[0-9]+$ ]] || fail OBJECT_STORAGE_SIZE_INVALID
       OBJECT_BYTES=$((OBJECT_BYTES + bytes))
-    done < <(jq -r '.data[].name' <<<"$buckets")
+    done < <(jq -r '(.data // [])[]?.name' <<<"$buckets")
   done
 done
 # Leave 1 MiB safety margin so state growth cannot cross the free 20-GB boundary silently.
