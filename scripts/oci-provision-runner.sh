@@ -29,6 +29,36 @@ ssh-keygen() {
 }
 
 oci() {
+  # The OCI SDK models OCPUs and memory-in-GBs as floats, while CLI JSON can
+  # surface valid numeric values in representations that the legacy shell
+  # regex rejects. For general compute inventory only, validate/sum A1 rows
+  # with Decimal and return a stable numeric JSON shape. A display-name lookup
+  # must remain byte-for-byte service truth because it is used to recover the
+  # actual atm-oci instance OCID.
+  if [ "${1:-}" = "compute" ] && [ "${2:-}" = "instance" ] && [ "${3:-}" = "list" ]; then
+    local has_display=0 arg out rc totals cpu mem
+    for arg in "$@"; do
+      [ "$arg" = "--display-name" ] && has_display=1
+    done
+    if [ "$has_display" -eq 0 ]; then
+      set +e
+      out="$("$REAL_OCI" "$@")"
+      rc=$?
+      set -e
+      [ "$rc" -eq 0 ] || return "$rc"
+      totals="$(python3 "$D/oci-normalize-compute.py" <<<"$out")" || {
+        echo 'OCI_COMPUTE_INVENTORY=FAIL class=NORMALIZATION_FAILED' >&2
+        return 44
+      }
+      IFS=$'\t' read -r cpu mem <<<"$totals"
+      jq -nc --argjson cpu "$cpu" --argjson mem "$mem" '
+        if ($cpu == 0 and $mem == 0) then {data:[]}
+        else {data:[{shape:"VM.Standard.A1.Flex","lifecycle-state":"RUNNING","shape-config":{ocpus:$cpu,"memory-in-gbs":$mem}}]}
+        end'
+      return 0
+    fi
+  fi
+
   # Current OCI CLI returns list-object-versions as {data:{items:[...]}}.
   # The provisioner consumes the ordinary list shape {data:[...]}; normalize
   # this command only so storage accounting is deterministic across CLI shapes.
