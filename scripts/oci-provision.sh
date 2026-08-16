@@ -52,11 +52,40 @@ import sys
 c,m,v=map(float,sys.argv[1:]); assert c+1<=2 and m+6<=12 and v+50<=200
 PY
 fi
+
+query_a1_limit(){
+  local kind="$1" service="$2" limit="$3" ad="$4" out rc val cls err
+  err="$D/oci-a1-${kind,,}-limit.$$.err"
+  set +e
+  out="$(o limits resource-availability get --compartment-id "$COMP" --service-name "$service" --limit-name "$limit" --availability-domain "$ad" --output json 2>"$err")"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    cls=COMMAND_FAILED
+    grep -Eqi 'NotAuthorizedOrNotFound|NotAuthorized|Forbidden|(^|[^0-9])(401|403)([^0-9]|$)' "$err" && cls=NOT_AUTHORIZED_OR_NOT_FOUND
+    grep -Eqi '(^|[^0-9])404([^0-9]|$)|not supported|Unsupported' "$err" && cls=RESOURCE_AVAILABILITY_UNSUPPORTED
+    grep -Eqi 'InvalidParameter|(^|[^0-9])400([^0-9]|$)' "$err" && cls=INVALID_SCOPE_OR_PARAMETER
+    grep -Eqi 'TooManyRequests|(^|[^0-9])429([^0-9]|$)' "$err" && cls=RATE_LIMITED
+    rm -f "$err"
+    echo "OCI_A1_LIMIT=FAIL kind=$kind ad=$ad class=$cls" >&2
+    return 51
+  fi
+  rm -f "$err"
+  val="$(jq -er '.data as $d | ($d."fractional-available" // $d.fractionalAvailable // $d.fractional_available // $d.available) | select(type=="number" and .>=0)' <<<"$out")" || {
+    echo "OCI_A1_LIMIT=FAIL kind=$kind ad=$ad class=AVAILABLE_FIELD_MISSING_OR_INVALID" >&2
+    return 52
+  }
+  printf '%s\n' "$val"
+}
+
 GOOD_ADS=()
 for ad in "${ADS[@]}"; do
-  c="$(o limits resource-availability get --compartment-id "$COMP" --service-name compute-core --limit-name standard-a1-core-count --availability-domain "$ad" 2>/dev/null | jq -r '.data."fractional-available"//.data.available//0' || true)"
-  m="$(o limits resource-availability get --compartment-id "$COMP" --service-name compute-memory --limit-name standard-a1-memory-count --availability-domain "$ad" 2>/dev/null | jq -r '.data."fractional-available"//.data.available//0' || true)"
-  python3 - "$c" "$m" -c 'import sys; raise SystemExit(0 if float(sys.argv[1] or 0)>=1 and float(sys.argv[2] or 0)>=6 else 1)' && GOOD_ADS+=("$ad") || true
+  c="$(query_a1_limit CORE compute-core standard-a1-core-count "$ad")" || fail A1_CORE_LIMIT_QUERY_FAILED
+  m="$(query_a1_limit MEMORY compute-memory standard-a1-memory-count "$ad")" || fail A1_MEMORY_LIMIT_QUERY_FAILED
+  echo "OCI_A1_LIMIT=OK ad=$ad core_available=$c memory_gb_available=$m"
+  if python3 -c 'import sys; c=float(sys.argv[1]); m=float(sys.argv[2]); raise SystemExit(0 if c>=1 and m>=6 else 1)' "$c" "$m"; then
+    GOOD_ADS+=("$ad")
+  fi
 done
 if { [ -z "$IID" ] || [ "$IID" = null ]; } && [ "${#GOOD_ADS[@]}" -eq 0 ]; then fail NO_A1_FREE_LIMIT_HEADROOM 20; fi
 
