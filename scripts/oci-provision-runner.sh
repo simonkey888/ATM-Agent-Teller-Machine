@@ -8,8 +8,7 @@ REAL_SSH_KEYGEN="$(command -v ssh-keygen)"
 
 # OCI Cloud Shell can run with a FIPS crypto policy that rejects Ed25519 key
 # generation. The provisioner asks for a local break-glass key only; preserve
-# the same private/public paths but translate that exact request to RSA-3072,
-# which OCI Linux platform images support and FIPS-capable OpenSSH accepts.
+# the same private/public paths but translate that exact request to RSA-3072.
 ssh-keygen() {
   local -a argv=("$@") out=()
   local i transformed=0
@@ -29,23 +28,31 @@ ssh-keygen() {
 }
 
 oci() {
-  # The OCI SDK models OCPUs and memory-in-GBs as floats, while CLI JSON can
-  # surface valid numeric values in representations that the legacy shell
-  # regex rejects. For general compute inventory only, validate/sum A1 rows
-  # with Decimal and return a stable numeric JSON shape. A display-name lookup
-  # must remain byte-for-byte service truth because it is used to recover the
-  # actual atm-oci instance OCID.
+  # General compute inventory must not inherit Cloud Shell/user output/query
+  # defaults. Force a single JSON data array, capture stderr separately, and
+  # fail closed on empty/non-JSON output. Display-name lookup remains direct
+  # OCI service truth because it recovers the actual atm-oci instance OCID.
   if [ "${1:-}" = "compute" ] && [ "${2:-}" = "instance" ] && [ "${3:-}" = "list" ]; then
-    local has_display=0 arg out rc totals cpu mem
+    local has_display=0 arg out rc totals cpu mem err
     for arg in "$@"; do
       [ "$arg" = "--display-name" ] && has_display=1
     done
     if [ "$has_display" -eq 0 ]; then
+      err="$D/oci-compute-inventory.$$.err"
       set +e
-      out="$("$REAL_OCI" "$@")"
+      out="$("$REAL_OCI" "$@" --output json --query data 2>"$err")"
       rc=$?
       set -e
-      [ "$rc" -eq 0 ] || return "$rc"
+      if [ "$rc" -ne 0 ]; then
+        rm -f "$err"
+        echo 'OCI_COMPUTE_INVENTORY=FAIL class=COMMAND_FAILED' >&2
+        return "$rc"
+      fi
+      rm -f "$err"
+      if [ -z "${out//[[:space:]]/}" ]; then
+        echo 'OCI_COMPUTE_INVENTORY=FAIL class=EMPTY_STDOUT' >&2
+        return 44
+      fi
       totals="$(python3 "$D/oci-normalize-compute.py" <<<"$out")" || {
         echo 'OCI_COMPUTE_INVENTORY=FAIL class=NORMALIZATION_FAILED' >&2
         return 44
@@ -76,8 +83,6 @@ oci() {
   if [ "${1:-}" = "bv" ] && [ "${3:-}" = "list" ] && { [ "${2:-}" = "boot-volume" ] || [ "${2:-}" = "volume" ]; }; then
     # Do not enumerate Block Volume objects here. For ORDER-002C we only need
     # authoritative combined boot+block usage to enforce the 200-GB free cap.
-    # OCI exposes that directly via Limits/ResourceAvailability as
-    # block-storage / total-storage-gb (AD-scoped).
     if [ "${2:-}" = "volume" ]; then
       printf '%s\n' '{"data":[]}'
       return 0
@@ -132,8 +137,6 @@ oci() {
       return 43
     }
 
-    # oci-provision.sh already sums one result per compartment/AD and applies
-    # the independent ORDER-002C hard cap: current_usage + 50 GB <= 200 GB.
     jq -nc --argjson used "$used" '{"data":[{"lifecycle-state":"AVAILABLE","size-in-gbs":$used}]}'
     return 0
   fi
