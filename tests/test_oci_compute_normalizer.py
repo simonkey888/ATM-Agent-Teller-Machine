@@ -69,7 +69,11 @@ class OciComputeNormalizerTests(unittest.TestCase):
 
     def test_runner_forces_json_data_query_and_preserves_display_lookup(self):
         self.assertIn('OCI_COMPUTE_INVENTORY=FAIL class=NORMALIZATION_FAILED', self.runner)
-        self.assertIn('OCI_COMPUTE_INVENTORY=FALLBACK class=EMPTY_JSON_STDOUT mode=SCALAR_SUMS', self.runner)
+        self.assertIn('OCI_COMPUTE_INVENTORY=FALLBACK class=EMPTY_JSON_STDOUT mode=COUNT_THEN_SCALAR_SUMS', self.runner)
+        self.assertIn('length(data[?shape==`VM.Standard.A1.Flex`', self.runner)
+        self.assertIn('SCALAR_COUNT_QUERY_FAILED', self.runner)
+        self.assertIn('SCALAR_COUNT_INVALID', self.runner)
+        self.assertIn('OCI_COMPUTE_INVENTORY=EMPTY_A1_CONFIRMED count=0', self.runner)
         self.assertIn('SCALAR_OCPU_QUERY_FAILED', self.runner)
         self.assertIn('SCALAR_MEMORY_QUERY_FAILED', self.runner)
         self.assertIn('SCALAR_OCPU_INVALID', self.runner)
