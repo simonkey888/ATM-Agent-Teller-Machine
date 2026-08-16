@@ -70,12 +70,17 @@ mkdir -p "$HOME/.atm"; chmod 700 "$HOME/.atm"; KEY="$HOME/.atm/oci-atm-ed25519"
 [ -f "$KEY" ] || ssh-keygen -q -t ed25519 -N '' -f "$KEY" -C atm-oci-breakglass
 chmod 600 "$KEY"; chmod 644 "$KEY.pub"
 
-# Tiny private external state object. We inspect namespace/buckets and refuse if those APIs are unavailable.
+# Tiny private external state object. Never overwrite an existing state object on bootstrap reruns.
 NS="$(o os ns get --query data --raw-output)" || fail OBJECT_STORAGE_DENIED
 for c in "${COMPS[@]}"; do o os bucket list --namespace-name "$NS" --compartment-id "$c" --all >/dev/null 2>&1 || true; done
 B="atm-state-$(printf %s "$TENANCY"|sha256sum|cut -c1-12)"
 o os bucket get --namespace-name "$NS" --bucket-name "$B" >/dev/null 2>&1 || o os bucket create --namespace-name "$NS" --compartment-id "$COMP" --name "$B" --public-access-type NoPublicAccess --storage-tier Standard >/dev/null || fail STATE_BUCKET_CREATE
-: >"$D/empty"; o os object put --namespace-name "$NS" --bucket-name "$B" --name atm-state.tgz --file "$D/empty" --force >/dev/null || fail STATE_OBJECT_CREATE
+if ! o os object head --namespace-name "$NS" --bucket-name "$B" --name atm-state.tgz >/dev/null 2>&1; then
+  : >"$D/empty"
+  o os object put --namespace-name "$NS" --bucket-name "$B" --name atm-state.tgz --file "$D/empty" --force >/dev/null || fail STATE_OBJECT_CREATE
+else
+  echo 'OCI_STATE_OBJECT=PRESERVED_EXISTING'
+fi
 EXP="$(date -u -d '+365 days' +%Y-%m-%dT%H:%M:%SZ)"
 URI="$(o os preauth-request create --namespace-name "$NS" --bucket-name "$B" --name "atm-state-rw-$(date +%s)" --access-type ObjectReadWrite --object-name atm-state.tgz --time-expires "$EXP" --query 'data."access-uri"' --raw-output)" || fail STATE_PAR_CREATE
 PAR="https://objectstorage.$REGION.oraclecloud.com$URI"
