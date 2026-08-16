@@ -14,7 +14,12 @@ from typing import Any
 import atm as v1
 from atm_core.models import HumanGate, Phase, RuntimeState
 from atm_core.money_velocity import MonthlyTargetStore, choose_money_velocity, money_velocity, monthly_metrics
-from atm_core.opportunities import HumanGateRequired, OpportunityValidationError
+from atm_core.opportunities import (
+    HumanGateRequired,
+    OpportunityValidationError,
+    external_state_hash,
+    local_atm_value,
+)
 from atm_core.payments import PaymentLedger, PaymentNotFinal, PaymentValidationError
 from atm_core.runtime import ProcessLock, SingletonLockError
 from atm_core.security import redact_text
@@ -180,6 +185,51 @@ def phase_discover(config: dict[str, Any], state: RuntimeState, adapters: dict[s
         state.last_result = {"status": "NO_ELIGIBLE_OPPORTUNITY", "count": len(found)}
 
 
+def phase_verify_v2(config: dict[str, Any], state: RuntimeState, adapters: dict[str, Any]) -> None:
+    del config
+    opp = state.active_opportunity
+    if not opp:
+        state.phase = Phase.DISCOVER
+        return
+    adapter = v1.adapter_for(adapters, opp)
+    snapshot = adapter.fetch_authoritative(opp)
+    adapter.verify_freshness(opp, snapshot)
+    adapter.verify_funding(opp, snapshot)
+    adapter.verify_eligibility(opp, snapshot)
+    competition = adapter.inspect_competition(opp, snapshot)
+    opp.competition = max(competition.values() or [0])
+    opp.claims = int(competition.get("claims", opp.claims))
+    opp.open_prs = int(competition.get("open_prs", opp.open_prs))
+
+    if opp.source == "workprotocol":
+        job = snapshot.get("job") or snapshot
+        claims = snapshot.get("claims") or []
+        max_workers = int(job.get("maxWorkers") or 0)
+        terminal_claim_statuses = {"rejected", "expired", "cancelled", "canceled", "withdrawn", "refunded"}
+        active_claims = [
+            claim
+            for claim in claims
+            if str(claim.get("status") or "claimed").lower() not in terminal_claim_statuses
+        ]
+        our_agent_id = local_atm_value("WORKPROTOCOL_AGENT_ID")
+        own_active_claim = bool(
+            our_agent_id
+            and any(
+                str(claim.get("agentId") or claim.get("agent_id") or "") == our_agent_id
+                for claim in active_claims
+            )
+        )
+        if max_workers > 0 and len(active_claims) >= max_workers and not own_active_claim:
+            raise OpportunityValidationError(
+                f"WorkProtocol claim capacity exhausted: active_claims={len(active_claims)} maxWorkers={max_workers}"
+            )
+
+    opp.external_state_hash = external_state_hash(snapshot)
+    state.active_opportunity = opp
+    state.phase = Phase.CLAIM
+    state.last_result = {"status": "VERIFIED", "snapshot_hash": opp.external_state_hash}
+
+
 def status_payload(state: RuntimeState, ledger: PaymentLedger, target_store: MonthlyTargetStore) -> dict[str, Any]:
     proofs = ledger.load()
     target = target_store.target_for(utcnow(), proofs)
@@ -201,7 +251,7 @@ def run_cycle(config: dict[str, Any], state: RuntimeState, adapters: dict[str, A
     if state.phase == Phase.DISCOVER:
         phase_discover(config, state, adapters)
     elif state.phase == Phase.VERIFY:
-        v1.phase_verify(config, state, adapters)
+        phase_verify_v2(config, state, adapters)
     elif state.phase == Phase.CLAIM:
         v1.phase_claim(config, state, adapters)
     elif state.phase == Phase.WORK:
@@ -270,14 +320,24 @@ def main() -> int:
                 store.save(state)
                 v1.log_event("human-gate-localized", state.last_result)
             except (OpportunityValidationError, PaymentNotFinal, PaymentValidationError) as exc:
+                failed_id = state.active_opportunity.canonical_opportunity_id if state.active_opportunity else None
+                failed_phase = state.phase
                 state.last_error = str(exc)
-                if state.phase == Phase.VERIFY:
+                if failed_phase == Phase.VERIFY:
+                    _degrade_opportunity(failed_id, "VERIFY_ROUTE_INVALID", config)
                     state.active_opportunity = None
                     state.phase = Phase.DISCOVER
-                elif state.phase == Phase.PAYMENT_VERIFY:
+                elif failed_phase == Phase.CLAIM:
+                    _degrade_opportunity(failed_id, "CLAIM_ROUTE_FAILED", config)
+                    state.active_opportunity = None
+                    state.phase = Phase.DISCOVER
+                elif failed_phase == Phase.PAYMENT_VERIFY:
                     state.phase = Phase.MONITOR
                 store.save(state)
-                v1.log_event("validation-v2", {"error": str(exc), "phase": state.phase.value})
+                v1.log_event(
+                    "validation-v2",
+                    {"error": str(exc), "failed_phase": failed_phase.value, "phase": state.phase.value, "opportunity_id": failed_id},
+                )
             except KeyboardInterrupt:
                 store.save(state)
                 return 130
