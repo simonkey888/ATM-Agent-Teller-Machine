@@ -18,7 +18,7 @@ from .payments import (
     TaskmarketPaymentAdapter,
     WorkProtocolPaymentAdapter,
 )
-from .security import assert_external_task_safe
+from .security import PromptInjectionRisk, assert_external_task_safe
 
 
 class OpportunityValidationError(ValueError):
@@ -144,12 +144,15 @@ class WorkProtocolOpportunityAdapter(OpportunityAdapter):
             description = "\n".join(
                 [str(job.get("title", "")), str(job.get("description", "")), json.dumps(job.get("requirements", {}))]
             )
-            assert_external_task_safe(description)
+            try:
+                assert_external_task_safe(description)
+            except PromptInjectionRisk:
+                continue
             reward = Decimal(str(job.get("paymentAmount") or "0"))
             if reward < min_reward_usd:
                 continue
-            claims = job.get("claims") or []
-            claim_count = len(claims) if isinstance(claims, list) else int(job.get("claimCount") or 0)
+            claims_raw = job.get("claims")
+            claim_count = len(claims_raw) if isinstance(claims_raw, list) else int(job.get("claimCount") or 0)
             window_hours = Decimal(str(job.get("verificationWindowHours") or 24))
             explicit_funding = {
                 "escrow_funded": bool(job.get("escrowFunded")),
@@ -329,15 +332,22 @@ class TaskmarketOpportunityAdapter(OpportunityAdapter):
         data = self.http.get(f"{self.base_url}/api/tasks?{query}")
         result: list[Opportunity] = []
         for task in data.get("tasks", []):
-            assert_external_task_safe(str(task.get("description", "")))
             mode = str(task.get("mode") or "bounty").lower()
             if bool(task.get("stakeRequired")) or mode in self.PAID_UPFRONT_MODES:
+                continue
+            try:
+                assert_external_task_safe(str(task.get("description", "")))
+            except PromptInjectionRisk:
                 continue
             reward = Decimal(str(task.get("reward") or "0")) / Decimal(1_000_000)
             if reward < min_reward_usd:
                 continue
-            submissions_raw = task.get("submissions") or []
-            submissions = len(submissions_raw) if isinstance(submissions_raw, list) else int(task.get("submissionCount") or task.get("submissionsCount") or 0)
+            submissions_raw = task.get("submissions")
+            submissions = (
+                len(submissions_raw)
+                if isinstance(submissions_raw, list)
+                else int(task.get("submissionCount") or task.get("submissionsCount") or 0)
+            )
             p_accept = max(Decimal("0.05"), Decimal("1") / Decimal(submissions + 2))
             task_id = task["id"] if "id" in task else task.get("taskId")
             result.append(
