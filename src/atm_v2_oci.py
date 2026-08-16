@@ -4,15 +4,44 @@ import argparse
 import json
 import time
 from decimal import Decimal
+from pathlib import Path
 
 import atm as v1
 import atm_v2 as core
+from atm_publish_client import publish_workspace
 from atm_core.models import HumanGate, Phase
 from atm_core.opportunities import HumanGateRequired, OpportunityValidationError
 from atm_core.payments import PaymentLedger, PaymentNotFinal, PaymentValidationError
 from atm_core.runtime import ProcessLock, SingletonLockError
 from atm_core.security import redact_text
 from atm_core.state import StateStore
+
+
+def publish_local_deliverable_if_needed(state, prior_phase: Phase) -> None:
+    if prior_phase != Phase.WORK or state.phase != Phase.CHECK or not state.active_opportunity:
+        return
+    raw = str(state.active_opportunity.deliverable_url or "")
+    if not raw.startswith("file://"):
+        return
+    workspace = Path(raw[7:])
+    try:
+        url = publish_workspace(state.active_opportunity.canonical_opportunity_id, workspace)
+    except Exception as exc:
+        raise HumanGateRequired(
+            HumanGate(
+                kind="DELIVERABLE_PUBLISHER_UNAVAILABLE",
+                reason=redact_text(str(exc))[-1000:],
+                exact_human_action="Repair/rotate the OCI GitHub token with public repository creation/content write permission; never provide the token in chat or to Hermes.",
+                resume_phase=Phase.WORK,
+                opportunity_id=state.active_opportunity.canonical_opportunity_id,
+            )
+        ) from exc
+    state.active_opportunity.deliverable_url = url
+    state.last_result = {
+        "status": "WORK_PUBLISHED",
+        "deliverable_url": url,
+        "opportunity_id": state.active_opportunity.canonical_opportunity_id,
+    }
 
 
 def run_cycle_oci(config, state, adapters, ledger) -> None:
@@ -27,7 +56,9 @@ def run_cycle_oci(config, state, adapters, ledger) -> None:
         }
         state.cycle += 1
         return
+    prior_phase = state.phase
     core.run_cycle(config, state, adapters, ledger)
+    publish_local_deliverable_if_needed(state, prior_phase)
 
 
 def main() -> int:
