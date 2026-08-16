@@ -29,14 +29,26 @@ def canonical(value: Decimal) -> str:
     return text or "0"
 
 
+def extract_rows(payload: object) -> list[object]:
+    # The runner deliberately requests `--query data`, which yields the data
+    # array directly. Keep support for the ordinary OCI envelope as well so the
+    # normalizer can be tested/reused independently. Anything else is ambiguous.
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        if "data" not in payload:
+            raise ValueError("DATA_FIELD_MISSING")
+        rows = payload["data"]
+        if not isinstance(rows, list):
+            raise ValueError("DATA_NOT_ARRAY")
+        return rows
+    raise ValueError("ROOT_NOT_ARRAY_OR_OCI_ENVELOPE")
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
-        rows = payload.get("data") if isinstance(payload, dict) else None
-        if rows is None:
-            rows = []
-        if not isinstance(rows, list):
-            raise ValueError("DATA_NOT_ARRAY")
+        rows = extract_rows(payload)
 
         cpu = Decimal(0)
         memory = Decimal(0)
