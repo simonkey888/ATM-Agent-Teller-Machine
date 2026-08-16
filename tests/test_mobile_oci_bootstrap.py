@@ -11,7 +11,7 @@ class MobileOciBootstrapContractTests(unittest.TestCase):
         cls.mobile = (root / "scripts" / "mobile-oci-bootstrap.sh").read_text()
 
     def test_one_hidden_credential_action(self):
-        self.assertEqual(self.mobile.count("read -rsp"), 1)
+        self.assertEqual(self.mobile.count("read -rsp '"), 1)
         self.assertIn("PAT|GOOGLE_API_KEY", self.mobile)
         self.assertIn("unset BUNDLE", self.mobile)
 
