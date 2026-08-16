@@ -29,9 +29,11 @@ ssh-keygen() {
 
 oci() {
   # General compute inventory must not inherit Cloud Shell/user output/query
-  # defaults. Force a single JSON data array, capture stderr separately, and
-  # fail closed on empty/non-JSON output. Display-name lookup remains direct
-  # OCI service truth because it recovers the actual atm-oci instance OCID.
+  # defaults. Prefer a compact data-array query, but OCI CLI can legally return
+  # empty stdout with rc=0 under some config/output combinations. In that case
+  # retry once with the ordinary JSON envelope before failing closed.
+  # Display-name lookup remains direct OCI service truth because it recovers
+  # the actual atm-oci instance OCID.
   if [ "${1:-}" = "compute" ] && [ "${2:-}" = "instance" ] && [ "${3:-}" = "list" ]; then
     local has_display=0 arg out rc totals cpu mem err
     for arg in "$@"; do
@@ -48,9 +50,22 @@ oci() {
         echo 'OCI_COMPUTE_INVENTORY=FAIL class=COMMAND_FAILED' >&2
         return "$rc"
       fi
+      if [ -z "${out//[[:space:]]/}" ]; then
+        echo 'OCI_COMPUTE_INVENTORY=RETRY class=EMPTY_QUERY_STDOUT mode=FULL_JSON' >&2
+        : >"$err"
+        set +e
+        out="$("$REAL_OCI" "$@" --output json 2>"$err")"
+        rc=$?
+        set -e
+        if [ "$rc" -ne 0 ]; then
+          rm -f "$err"
+          echo 'OCI_COMPUTE_INVENTORY=FAIL class=FULL_JSON_COMMAND_FAILED' >&2
+          return "$rc"
+        fi
+      fi
       rm -f "$err"
       if [ -z "${out//[[:space:]]/}" ]; then
-        echo 'OCI_COMPUTE_INVENTORY=FAIL class=EMPTY_STDOUT' >&2
+        echo 'OCI_COMPUTE_INVENTORY=FAIL class=EMPTY_STDOUT_AFTER_FULL_JSON_RETRY' >&2
         return 44
       fi
       totals="$(python3 "$D/oci-normalize-compute.py" <<<"$out")" || {
