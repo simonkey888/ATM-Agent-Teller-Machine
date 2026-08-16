@@ -29,13 +29,14 @@ ssh-keygen() {
 
 oci() {
   # General compute inventory must not inherit Cloud Shell/user output/query
-  # defaults. Prefer a compact data-array query, but OCI CLI can legally return
-  # empty stdout with rc=0 under some config/output combinations. In that case
-  # retry once with the ordinary JSON envelope before failing closed.
+  # defaults. Prefer JSON normalization. Some OCI CLI/config combinations can
+  # return rc=0 with empty stdout for list serialization; never interpret that
+  # as zero usage. Instead query A1 OCPU and memory as independent numeric
+  # scalars and synthesize the minimal inventory required by the free-tier gate.
   # Display-name lookup remains direct OCI service truth because it recovers
   # the actual atm-oci instance OCID.
   if [ "${1:-}" = "compute" ] && [ "${2:-}" = "instance" ] && [ "${3:-}" = "list" ]; then
-    local has_display=0 arg out rc totals cpu mem err
+    local has_display=0 arg out rc totals cpu mem err cpuq memq
     for arg in "$@"; do
       [ "$arg" = "--display-name" ] && has_display=1
     done
@@ -50,29 +51,43 @@ oci() {
         echo 'OCI_COMPUTE_INVENTORY=FAIL class=COMMAND_FAILED' >&2
         return "$rc"
       fi
-      if [ -z "${out//[[:space:]]/}" ]; then
-        echo 'OCI_COMPUTE_INVENTORY=RETRY class=EMPTY_QUERY_STDOUT mode=FULL_JSON' >&2
+
+      if [ -n "${out//[[:space:]]/}" ]; then
+        rm -f "$err"
+        totals="$(python3 "$D/oci-normalize-compute.py" <<<"$out")" || {
+          echo 'OCI_COMPUTE_INVENTORY=FAIL class=NORMALIZATION_FAILED' >&2
+          return 44
+        }
+        IFS=$'\t' read -r cpu mem <<<"$totals"
+      else
+        echo 'OCI_COMPUTE_INVENTORY=FALLBACK class=EMPTY_JSON_STDOUT mode=SCALAR_SUMS' >&2
+        cpuq='sum(data[?shape==`VM.Standard.A1.Flex` && "lifecycle-state"!=`TERMINATED`]."shape-config".ocpus)'
+        memq='sum(data[?shape==`VM.Standard.A1.Flex` && "lifecycle-state"!=`TERMINATED`]."shape-config"."memory-in-gbs")'
         : >"$err"
         set +e
-        out="$("$REAL_OCI" "$@" --output json 2>"$err")"
-        rc=$?
+        cpu="$("$REAL_OCI" "$@" --query "$cpuq" --raw-output 2>"$err")"; rc=$?
         set -e
         if [ "$rc" -ne 0 ]; then
           rm -f "$err"
-          echo 'OCI_COMPUTE_INVENTORY=FAIL class=FULL_JSON_COMMAND_FAILED' >&2
+          echo 'OCI_COMPUTE_INVENTORY=FAIL class=SCALAR_OCPU_QUERY_FAILED' >&2
           return "$rc"
         fi
+        : >"$err"
+        set +e
+        mem="$("$REAL_OCI" "$@" --query "$memq" --raw-output 2>"$err")"; rc=$?
+        set -e
+        if [ "$rc" -ne 0 ]; then
+          rm -f "$err"
+          echo 'OCI_COMPUTE_INVENTORY=FAIL class=SCALAR_MEMORY_QUERY_FAILED' >&2
+          return "$rc"
+        fi
+        rm -f "$err"
+        cpu="$(tr -d '[:space:]' <<<"$cpu")"
+        mem="$(tr -d '[:space:]' <<<"$mem")"
+        [[ "$cpu" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo 'OCI_COMPUTE_INVENTORY=FAIL class=SCALAR_OCPU_INVALID' >&2; return 44; }
+        [[ "$mem" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo 'OCI_COMPUTE_INVENTORY=FAIL class=SCALAR_MEMORY_INVALID' >&2; return 44; }
       fi
-      rm -f "$err"
-      if [ -z "${out//[[:space:]]/}" ]; then
-        echo 'OCI_COMPUTE_INVENTORY=FAIL class=EMPTY_STDOUT_AFTER_FULL_JSON_RETRY' >&2
-        return 44
-      fi
-      totals="$(python3 "$D/oci-normalize-compute.py" <<<"$out")" || {
-        echo 'OCI_COMPUTE_INVENTORY=FAIL class=NORMALIZATION_FAILED' >&2
-        return 44
-      }
-      IFS=$'\t' read -r cpu mem <<<"$totals"
+
       jq -nc --argjson cpu "$cpu" --argjson mem "$mem" '
         if ($cpu == 0 and $mem == 0) then {data:[]}
         else {data:[{shape:"VM.Standard.A1.Flex","lifecycle-state":"RUNNING","shape-config":{ocpus:$cpu,"memory-in-gbs":$mem}}]}
