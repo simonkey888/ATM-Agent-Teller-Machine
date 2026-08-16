@@ -57,6 +57,11 @@ class OciBlockVolumeNormalizerTests(unittest.TestCase):
         self.assertIn('--output json', self.runner)
         self.assertIn('export -f oci ssh-keygen', self.runner)
 
+    def test_compute_inventory_retries_full_json_after_empty_query_stdout(self):
+        self.assertIn('OCI_COMPUTE_INVENTORY=RETRY class=EMPTY_QUERY_STDOUT mode=FULL_JSON', self.runner)
+        self.assertIn('out="$("$REAL_OCI" "$@" --output json 2>"$err")"', self.runner)
+        self.assertIn('EMPTY_STDOUT_AFTER_FULL_JSON_RETRY', self.runner)
+
     def test_cloud_shell_fips_breakglass_key_is_rsa3072(self):
         self.assertIn('REAL_SSH_KEYGEN="$(command -v ssh-keygen)"', self.runner)
         self.assertIn('out+=("-t" "rsa" "-b" "3072")', self.runner)
