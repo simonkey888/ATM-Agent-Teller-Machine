@@ -19,6 +19,12 @@ class OciRemoteExecutorContractTests(unittest.TestCase):
         self.assertNotIn("pull_request:", self.workflow)
         self.assertIn("cancel-in-progress: false", self.workflow)
 
+    def test_probe_and_mutating_bootstrap_have_distinct_triggers(self):
+        self.assertIn("paths: [.github/oci-remote-probe-trigger.txt]", self.probe)
+        self.assertIn("paths: [.github/oci-remote-trigger.txt]", self.workflow)
+        self.assertNotIn(".github/oci-remote-trigger.txt", self.probe)
+        self.assertNotIn(".github/oci-remote-probe-trigger.txt", self.workflow)
+
     def test_expected_encrypted_secret_names_are_used(self):
         self.assertIn("secrets.OCI_CONFIG", self.workflow)
         self.assertIn("secrets.OCI_PRIVATE_KEY_PEM", self.workflow)
