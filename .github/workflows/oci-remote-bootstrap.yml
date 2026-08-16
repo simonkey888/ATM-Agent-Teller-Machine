@@ -42,7 +42,6 @@ jobs:
           test -n "$OCI_CONFIG_SECRET" || { echo 'OCI_REMOTE_SECRET_MISSING=OCI_CONFIG'; exit 2; }
           test -n "$OCI_PRIVATE_KEY_PEM" || { echo 'OCI_REMOTE_SECRET_MISSING=OCI_PRIVATE_KEY_PEM'; exit 2; }
           test -n "$ATM_REMOTE_BUNDLE" || { echo 'OCI_REMOTE_SECRET_MISSING=ATM_AGENT_TELLER_MACHINE'; exit 2; }
-          case "$ATM_REMOTE_BUNDLE" in *'|'*'|'*) ;; *) echo 'OCI_REMOTE_SECRET_INVALID=ATM_AGENT_TELLER_MACHINE_FORMAT'; exit 2;; esac
 
       - name: Install OCI CLI
         shell: bash
