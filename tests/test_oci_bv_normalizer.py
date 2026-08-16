@@ -63,6 +63,11 @@ class OciBlockVolumeNormalizerTests(unittest.TestCase):
         self.assertIn('OCI_BREAKGLASS_KEY_ALGORITHM=RSA3072 reason=FIPS_COMPATIBILITY', self.runner)
         self.assertNotIn('"$REAL_SSH_KEYGEN" -t ed25519', self.runner)
 
+    def test_object_version_inventory_normalizes_data_items_shape(self):
+        self.assertIn('"${3:-}" = "list-object-versions"', self.runner)
+        self.assertIn('{data:(.data.items // [])}', self.runner)
+        self.assertIn('OBJECT_VERSION_INVENTORY_SHAPE_INVALID', self.runner)
+
 
 if __name__ == "__main__":
     unittest.main()
