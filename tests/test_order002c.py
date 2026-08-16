@@ -66,15 +66,18 @@ class OciStaticContractTests(unittest.TestCase):
     def test_free_tier_has_conservative_hard_caps_and_no_paid_fallback(self):
         self.assertIn("SHAPE=VM.Standard.A1.Flex", self.provision)
         self.assertIn("c+1<=2 and m+6<=12 and v+50<=200", self.provision)
-        self.assertIn("limits resource-availability get", self.provision)
-        self.assertIn("standard-a1-core-count", self.provision)
-        self.assertIn("standard-a1-memory-count", self.provision)
+        self.assertIn("--service-name compute-core --limit-name standard-a1-core-count", self.provision)
+        self.assertIn("--service-name compute-memory --limit-name standard-a1-memory-count", self.provision)
+        self.assertIn("OBJECT_FREE_LIMIT=$((20 * 1024 * 1024 * 1024))", self.provision)
+        self.assertIn("--fields name,size", self.provision)
+        self.assertIn("ALWAYS_FREE_OBJECT_STORAGE_HEADROOM_EXCEEDED", self.provision)
         self.assertNotIn("VM.Standard.E", self.all_boot)
         self.assertNotIn("Pay As You Go", self.all_boot)
 
     def test_inventory_spans_accessible_compartments(self):
         self.assertIn("--compartment-id-in-subtree true --access-level ACCESSIBLE", self.provision)
         self.assertIn('for c in "${COMPS[@]}"', self.provision)
+        self.assertIn('for r in "${SUBSCRIBED_REGIONS[@]}"', self.provision)
 
     def test_private_key_and_runtime_secrets_are_not_printed_or_committed(self):
         self.assertIn('chmod 600 "$KEY"', self.provision)
