@@ -62,7 +62,9 @@ jobs:
           url = "https://atm.simondalmasso44.workers.dev/health"
           expected = os.environ["EXPECTED_SHA"]
           last = None
-          for _ in range(12):
+          # workers.dev propagation can lag the successful deploy; keep the
+          # deploy exact-SHA fail-closed while allowing up to three minutes.
+          for _ in range(36):
               try:
                   with urllib.request.urlopen(url, timeout=15) as r:
                       last = json.loads(r.read().decode())
