@@ -29,18 +29,50 @@ ssh-keygen() {
 
 oci() {
   # General compute inventory must not inherit Cloud Shell/user output/query
-  # defaults. Prefer JSON normalization. Some OCI CLI/config combinations can
-  # return rc=0 with empty stdout for list serialization; never interpret that
-  # as zero usage. First count active A1 rows. Only an exact zero count may be
-  # reduced to zero usage; otherwise OCPU and memory sums must be numeric.
+  # defaults. The GitHub API-key executor uses the OCI Python SDK directly,
+  # avoiding a proven CLI formatter/JMESPath path that can return rc=0 with
+  # unusable stdout. Cloud Shell retains the conservative CLI path below.
   # Display-name lookup remains direct OCI service truth because it recovers
   # the actual atm-oci instance OCID.
   if [ "${1:-}" = "compute" ] && [ "${2:-}" = "instance" ] && [ "${3:-}" = "list" ]; then
-    local has_display=0 arg out rc totals cpu mem err count countq cpuq memq
+    local has_display=0 arg out rc totals cpu mem err count countq cpuq memq comp region i
+    local -a argv=("$@")
     for arg in "$@"; do
       [ "$arg" = "--display-name" ] && has_display=1
     done
     if [ "$has_display" -eq 0 ]; then
+      if [ "${OCI_CLI_AUTH:-}" = "api_key" ]; then
+        comp=""
+        region=""
+        for ((i=0; i<${#argv[@]}; i++)); do
+          case "${argv[$i]}" in
+            --compartment-id)
+              [ $((i+1)) -lt ${#argv[@]} ] && comp="${argv[$((i+1))]}"
+              ;;
+            --region)
+              [ $((i+1)) -lt ${#argv[@]} ] && region="${argv[$((i+1))]}"
+              ;;
+          esac
+        done
+        [ -n "$comp" ] || { echo 'OCI_COMPUTE_INVENTORY=FAIL class=SDK_COMPARTMENT_MISSING' >&2; return 45; }
+        [ -n "$region" ] || { echo 'OCI_COMPUTE_INVENTORY=FAIL class=SDK_REGION_MISSING' >&2; return 45; }
+        set +e
+        totals="$(ATM_OCI_COMPARTMENT_ID="$comp" ATM_OCI_REGION="$region" python3 "$D/oci-compute-usage-sdk.py")"
+        rc=$?
+        set -e
+        [ "$rc" -eq 0 ] || { echo 'OCI_COMPUTE_INVENTORY=FAIL class=SDK_QUERY_FAILED' >&2; return "$rc"; }
+        IFS=$'\t' read -r cpu mem <<<"$totals"
+        [[ "$cpu" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo 'OCI_COMPUTE_INVENTORY=FAIL class=SDK_OCPU_INVALID' >&2; return 45; }
+        [[ "$mem" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo 'OCI_COMPUTE_INVENTORY=FAIL class=SDK_MEMORY_INVALID' >&2; return 45; }
+        jq -nc --argjson cpu "$cpu" --argjson mem "$mem" '
+          if ($cpu == 0 and $mem == 0) then {data:[]}
+          else {data:[{shape:"VM.Standard.A1.Flex","lifecycle-state":"RUNNING","shape-config":{ocpus:$cpu,"memory-in-gbs":$mem}}]}
+          end'
+        return 0
+      fi
+
+      # Cloud Shell fallback path. Never reduce empty formatter output to zero
+      # without a separate exact zero count.
       err="$D/oci-compute-inventory.$$.err"
       set +e
       out="$("$REAL_OCI" "$@" --output json --query data 2>"$err")"
