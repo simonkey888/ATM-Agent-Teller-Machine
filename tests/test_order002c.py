@@ -66,8 +66,11 @@ class OciStaticContractTests(unittest.TestCase):
     def test_free_tier_has_conservative_hard_caps_and_no_paid_fallback(self):
         self.assertIn("SHAPE=VM.Standard.A1.Flex", self.provision)
         self.assertIn("c+1<=2 and m+6<=12 and v+50<=200", self.provision)
-        self.assertIn("query_a1_limit CORE compute-core standard-a1-core-count", self.provision)
-        self.assertIn("query_a1_limit MEMORY compute-memory standard-a1-memory-count", self.provision)
+        self.assertIn('GOOD_ADS=("${ADS[@]}")', self.provision)
+        self.assertIn("authority=ACTUAL_A1_LAUNCH", self.provision)
+        self.assertIn("A1_SERVICE_LIMIT_EXCEEDED", self.provision)
+        self.assertIn("A1_CAPACITY_UNAVAILABLE_ALL_ADS", self.provision)
+        self.assertNotIn("query_a1_limit", self.provision)
         self.assertIn("OBJECT_FREE_LIMIT=$((20 * 1024 * 1024 * 1024))", self.provision)
         self.assertIn("list-object-versions", self.provision)
         self.assertIn("ALWAYS_FREE_OBJECT_STORAGE_HEADROOM_EXCEEDED", self.provision)
