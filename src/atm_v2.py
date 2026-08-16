@@ -24,6 +24,7 @@ from atm_core.payments import PaymentLedger, PaymentNotFinal, PaymentValidationE
 from atm_core.runtime import ProcessLock, SingletonLockError
 from atm_core.security import redact_text
 from atm_core.state import StateStore
+from atm_core.workprotocol_v2 import upgrade_workprotocol_adapter
 
 ROOT = Path(__file__).resolve().parents[1]
 STATE_DIR = ROOT / ".atm"
@@ -41,6 +42,10 @@ HARD_DEFAULT_HOURS = Decimal("3")
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def build_adapters(config: dict[str, Any]) -> dict[str, Any]:
+    return upgrade_workprotocol_adapter(v1.build_adapters(config), config)
 
 
 def _atomic_json(path: Path, payload: Any) -> None:
@@ -281,7 +286,7 @@ def main() -> int:
     ledger = PaymentLedger(PAYMENT_LEDGER_FILE)
     month1 = max(MONTH1_FLOOR, Decimal(str(config.get("month1_target_realized_withdrawable_usd", 500))))
     targets = MonthlyTargetStore(TARGET_FILE, month1)
-    adapters = v1.build_adapters(config)
+    adapters = build_adapters(config)
     current_target = targets.target_for(utcnow(), ledger.load())
     state.target_paid_usd = current_target
     if state.human_gate:
@@ -306,7 +311,7 @@ def main() -> int:
                 continue
             try:
                 config = v1.load_config()
-                adapters = v1.build_adapters(config)
+                adapters = build_adapters(config)
                 run_cycle(config, state, adapters, ledger)
                 if state.human_gate:
                     localize_gate(state.human_gate, state, config)
