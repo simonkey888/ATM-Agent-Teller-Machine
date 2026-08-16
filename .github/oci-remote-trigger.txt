@@ -5,3 +5,5 @@ retry=7
 secret_bundle=owner_corrected
 compute_inventory=oci_python_sdk
 mode=zero_spend_a1_only
+last_result=A1_CAPACITY_UNAVAILABLE_ALL_ADS
+last_run=31977454877
