@@ -59,14 +59,14 @@ VCN="$(o network vcn list --compartment-id "$COMP" --all --query 'data[?"display
 IGW="$(o network internet-gateway list --compartment-id "$COMP" --vcn-id "$VCN" --all --query 'data[?"display-name"==`atm-igw`].id|[0]' --raw-output)"
 [ -n "$IGW" ] && [ "$IGW" != null ] || IGW="$(o network internet-gateway create --compartment-id "$COMP" --vcn-id "$VCN" --is-enabled true --display-name atm-igw --wait-for-state AVAILABLE --query data.id --raw-output)"
 RR="[{\"cidrBlock\":\"0.0.0.0/0\",\"networkEntityId\":\"$IGW\"}]"
-RT="$(o network route-table list --compartment-id "$COMP" --vcn-id "$VCN" --all --query 'data[?\"display-name\"==`atm-route`].id|[0]' --raw-output)"
+RT="$(o network route-table list --compartment-id "$COMP" --vcn-id "$VCN" --all --query 'data[?"display-name"==`atm-route`].id|[0]' --raw-output)"
 if [ -z "$RT" ] || [ "$RT" = null ]; then RT="$(o network route-table create --compartment-id "$COMP" --vcn-id "$VCN" --route-rules "$RR" --display-name atm-route --wait-for-state AVAILABLE --query data.id --raw-output)"; else o network route-table update --rt-id "$RT" --route-rules "$RR" --force >/dev/null; fi
 CSIP="$(curl -4fsS --max-time 10 https://api.ipify.org)" || fail CLOUD_SHELL_EGRESS_IP_FAILED
 [[ "$CSIP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail CLOUD_SHELL_EGRESS_IP_INVALID
 EG='[{"destination":"0.0.0.0/0","protocol":"all","isStateless":false}]'; IN="[{\"source\":\"$CSIP/32\",\"protocol\":\"6\",\"isStateless\":false,\"tcpOptions\":{\"destinationPortRange\":{\"min\":22,\"max\":22}}}]"
-SL="$(o network security-list list --compartment-id "$COMP" --vcn-id "$VCN" --all --query 'data[?\"display-name\"==`atm-security`].id|[0]' --raw-output)"
+SL="$(o network security-list list --compartment-id "$COMP" --vcn-id "$VCN" --all --query 'data[?"display-name"==`atm-security`].id|[0]' --raw-output)"
 if [ -z "$SL" ] || [ "$SL" = null ]; then SL="$(o network security-list create --compartment-id "$COMP" --vcn-id "$VCN" --display-name atm-security --egress-security-rules "$EG" --ingress-security-rules "$IN" --wait-for-state AVAILABLE --query data.id --raw-output)"; else o network security-list update --security-list-id "$SL" --egress-security-rules "$EG" --ingress-security-rules "$IN" --force >/dev/null; fi
-SUB="$(o network subnet list --compartment-id "$COMP" --vcn-id "$VCN" --all --query 'data[?\"display-name\"==`atm-subnet`].id|[0]' --raw-output)"
+SUB="$(o network subnet list --compartment-id "$COMP" --vcn-id "$VCN" --all --query 'data[?"display-name"==`atm-subnet`].id|[0]' --raw-output)"
 [ -n "$SUB" ] && [ "$SUB" != null ] || SUB="$(o network subnet create --compartment-id "$COMP" --vcn-id "$VCN" --cidr-block 10.77.1.0/24 --display-name atm-subnet --dns-label atm --route-table-id "$RT" --security-list-ids "[\"$SL\"]" --prohibit-public-ip-on-vnic false --wait-for-state AVAILABLE --query data.id --raw-output)"
 
 mkdir -p "$HOME/.atm"; chmod 700 "$HOME/.atm"; KEY="$HOME/.atm/oci-atm-ed25519"
