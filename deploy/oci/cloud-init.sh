@@ -23,9 +23,11 @@ chown atm:atm /var/lib/atm/atm.json; chmod 600 /var/lib/atm/atm.json
 runuser -u atm -- env HOME=/var/lib/atm HERMES_HOME=/var/lib/atm/.hermes bash -lc 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-browser --skip-setup'
 install -m 0644 /opt/atm/deploy/oci/atm-controller.service /etc/systemd/system/atm-controller.service
 install -m 0644 /opt/atm/deploy/oci/atm-supervisor.service /etc/systemd/system/atm-supervisor.service
+install -m 0644 /opt/atm/deploy/oci/atm-publisher.service /etc/systemd/system/atm-publisher.service
 install -m 0644 /opt/atm/deploy/oci/atm-state-backup.service /etc/systemd/system/atm-state-backup.service
 install -m 0644 /opt/atm/deploy/oci/atm-state-backup.timer /etc/systemd/system/atm-state-backup.timer
 systemctl daemon-reload
 systemctl disable --now atm-supervisor.service 2>/dev/null || true
 systemctl disable --now atm-controller.service 2>/dev/null || true
+systemctl disable --now atm-publisher.service 2>/dev/null || true
 touch /var/lib/atm/cloud-init-ready; chown atm:atm /var/lib/atm/cloud-init-ready
