@@ -67,7 +67,7 @@ class OciBlockVolumeNormalizerTests(unittest.TestCase):
         self.assertNotIn('EMPTY_STDOUT_AFTER_FULL_JSON_RETRY', self.runner)
 
     def test_cloud_shell_fips_breakglass_key_is_rsa3072(self):
-        self.assertIn('REAL_SSH_KEYGEN="$(command -v oci)"', self.runner.replace('REAL_SSH_KEYGEN="$(command -v ssh-keygen)"', 'REAL_SSH_KEYGEN="$(command -v oci)"'))
+        self.assertIn('REAL_SSH_KEYGEN="$(command -v ssh-keygen)"', self.runner)
         self.assertIn('out+=("-t" "rsa" "-b" "3072")', self.runner)
         self.assertIn('OCI_BREAKGLASS_KEY_ALGORITHM=RSA3072 reason=FIPS_COMPATIBILITY', self.runner)
         self.assertNotIn('"$REAL_SSH_KEYGEN" -t ed25519', self.runner)
