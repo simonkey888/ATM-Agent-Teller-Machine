@@ -1,6 +1,6 @@
-bootstrap=2026-08-16T22:20:30Z
+bootstrap=2026-08-16T22:30:00Z
 probe_run=31975900518
 probe_result=success
-retry=2
-parser=tolerant_secret_safe
+retry=3
+secret_bundle=owner_corrected
 mode=zero_spend_a1_only
