@@ -1,0 +1,39 @@
+{
+  "worker_id": "boqa",
+  "repo_url": "https://github.com/simonkey888/boqa",
+  "enabled": true,
+  "capabilities": [
+    "model",
+    "git",
+    "github",
+    "filesystem",
+    "shell",
+    "browser",
+    "python",
+    "node",
+    "evidence",
+    "qa_repro",
+    "playwright_e2e",
+    "browser_workflow_test",
+    "regression_test",
+    "ci_triage",
+    "evidence_generation",
+    "deterministic_replay",
+    "fix_verification",
+    "small_code_fix"
+  ],
+  "execution_backend": "github_repository_worker",
+  "entrypoint": "repository-contract",
+  "max_concurrency": 1,
+  "timeout_seconds": 1800,
+  "network_policy": "public-web-github-allowlist-zero-spend",
+  "expected_artifacts": [
+    "commit_sha",
+    "deliverable_url",
+    "test_results",
+    "evidence_refs",
+    "content_hashes"
+  ],
+  "cost_ceiling_usd": "0",
+  "financial_authority": false
+}
