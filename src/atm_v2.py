@@ -188,7 +188,8 @@ def _swarm_eligible_order(path: Path | None = None) -> list[str] | None:
     try:
         connection = sqlite3.connect(f"file:{board_path}?mode=ro", uri=True, timeout=10)
         rows = connection.execute(
-            "SELECT canonical_id FROM opportunities WHERE status='ELIGIBLE' "
+            "SELECT canonical_id FROM opportunities "
+            "WHERE status='ELIGIBLE' AND falsifier_verdict='CONFIRM' AND verified_at IS NOT NULL "
             "ORDER BY signal DESC, touched_at DESC"
         ).fetchall()
     except sqlite3.Error as exc:
