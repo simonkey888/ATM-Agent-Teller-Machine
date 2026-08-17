@@ -2,7 +2,7 @@ name: ATM CI
 
 on:
   push:
-    branches: [agent/atm-v1]
+    branches: [main, agent/atm-v1]
   pull_request:
 
 permissions:
