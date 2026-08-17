@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from decimal import Decimal
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -116,6 +117,101 @@ class LinkDoctorReceipt(BaseModel):
         return value
 
 
+def validate_worker_output_authority(value: Any, path: str = "result") -> None:
+    """Reject attempts by an untrusted worker to mutate ATM/external authority truth."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized = str(key).strip().lower()
+            if normalized in FORBIDDEN_RESULT_KEYS:
+                raise ValueError(f"worker authority field forbidden at {path}.{key}")
+            if any(fragment in normalized for fragment in SECRET_KEY_FRAGMENTS):
+                raise ValueError(f"secret-like worker output forbidden at {path}.{key}")
+            validate_worker_output_authority(child, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            validate_worker_output_authority(child, f"{path}[{index}]")
+
+
+def _require_keys(value: dict[str, Any], keys: set[str], label: str) -> None:
+    missing = sorted(keys - set(value))
+    if missing:
+        raise ValueError(f"Zungun {label} missing fields: {','.join(missing)}")
+
+
+def _bounded_changed_path(path: str, allowed_paths: list[str]) -> bool:
+    normalized = str(path).replace("\\", "/").strip()
+    parsed = PurePosixPath(normalized)
+    if not normalized or normalized.startswith("/") or ".." in parsed.parts or ".git" in parsed.parts:
+        return False
+    for root in allowed_paths:
+        root = root.rstrip("/")
+        if normalized == root or normalized.startswith(root + "/"):
+            return True
+    return False
+
+
+def validate_zungun_result_contract(
+    result: WorkerResult,
+    job: WorkerJobSpec,
+    manifest: WorkerManifest,
+    lease_id: str,
+) -> None:
+    """Validate Zungun's rich result without letting it assert external/economic truth."""
+    if manifest.worker_id != "zungun" or result.worker_id != "zungun":
+        raise ValueError("Zungun result worker identity mismatch")
+    if result.worker_version != manifest.worker_version:
+        raise ValueError("Zungun result worker_version mismatch")
+    if result.job_id != job.job_id:
+        raise ValueError("Zungun result job identity mismatch")
+    if result.work_lease_id != lease_id:
+        raise ValueError("Zungun result WorkLease mismatch")
+    if not result.commit_sha or not re.fullmatch(r"[0-9a-f]{40}", result.commit_sha):
+        raise ValueError("Zungun result final commit must be exact SHA")
+
+    _require_keys(result.target, {"repository", "base_sha", "final_sha"}, "target")
+    _require_keys(result.execution, {"state", "commands", "changed_paths"}, "execution")
+    _require_keys(result.verification, {"tests", "deterministic_checks", "resilience_checks"}, "verification")
+    _require_keys(result.findings, {"resolved", "unresolved", "unknown"}, "findings")
+    _require_keys(result.evidence, {"artifact_identifiers", "log_identifiers", "hashes"}, "evidence")
+    _require_keys(result.delivery, {"candidate_url", "candidate_commit"}, "delivery")
+    _require_keys(result.cost, {"outgoing_spend_usd"}, "cost")
+
+    if str(result.target["repository"]).rstrip("/") != job.repository_or_input.rstrip("/"):
+        raise ValueError("Zungun result target repository mismatch")
+    if str(result.target["base_sha"]) != str(job.target_base_sha):
+        raise ValueError("Zungun result target base SHA mismatch")
+    final_sha = str(result.target["final_sha"])
+    if final_sha != result.commit_sha or not re.fullmatch(r"[0-9a-f]{40}", final_sha):
+        raise ValueError("Zungun result target final SHA mismatch")
+    if str(result.delivery["candidate_commit"]) != final_sha:
+        raise ValueError("Zungun delivery commit mismatch")
+
+    changed = result.execution["changed_paths"]
+    if not isinstance(changed, list) or not all(_bounded_changed_path(str(path), job.allowed_paths) for path in changed):
+        raise ValueError("Zungun result changed path outside frozen scope")
+    if not isinstance(result.execution["commands"], list):
+        raise ValueError("Zungun execution commands must be structured list")
+    for key in ("tests", "deterministic_checks", "resilience_checks"):
+        if not isinstance(result.verification[key], (list, dict)):
+            raise ValueError(f"Zungun verification {key} must be structured")
+    for key in ("resolved", "unresolved", "unknown"):
+        if not isinstance(result.findings[key], list):
+            raise ValueError(f"Zungun findings {key} must be list")
+    for key in ("artifact_identifiers", "log_identifiers", "hashes"):
+        if not isinstance(result.evidence[key], list):
+            raise ValueError(f"Zungun evidence {key} must be list")
+    if Decimal(str(result.cost["outgoing_spend_usd"])) != Decimal("0"):
+        raise ValueError("Zungun result must remain zero spend")
+    if result.findings["unknown"] and result.status.upper() == "PASS":
+        raise ValueError("Zungun UNKNOWN findings cannot collapse to PASS")
+
+    candidate_url = str(result.delivery["candidate_url"])
+    allowed_url_roots = (manifest.repo_url.rstrip("/"), job.repository_or_input.rstrip("/"))
+    if not candidate_url.startswith(allowed_url_roots):
+        raise ValueError("Zungun delivery candidate URL outside worker/target allowlist")
+    validate_worker_output_authority(result.model_dump(mode="json"))
+
+
 class ZungunWorkerAdapter:
     """Worker-Fabric adapter for the zero-authority Zungun specialist.
 
@@ -164,12 +260,22 @@ class ZungunWorkerAdapter:
             raise KeyError(handle)
         return self._handles[handle]
 
-    def record_external_result(self, handle: str, result: WorkerResult, raw_envelope: dict[str, Any]) -> None:
+    def record_external_result(
+        self,
+        handle: str,
+        result: WorkerResult,
+        raw_envelope: dict[str, Any],
+        job: WorkerJobSpec | None = None,
+        lease: WorkLease | None = None,
+    ) -> None:
         if handle not in self._handles:
             raise KeyError(handle)
         validate_worker_output_authority(raw_envelope)
         if result.worker_id != "zungun":
             raise ValueError("worker identity mismatch")
+        if job is not None and lease is not None:
+            self._assert_bound(job, lease)
+            validate_zungun_result_contract(result, job, self.manifest, lease.lease_id)
         self._results[handle] = result
         self._handles[handle] = "READY_FOR_CHECK"
 
@@ -244,18 +350,3 @@ class ZungunWorkerAdapter:
             raise ValueError("lease opportunity mismatch")
         if lease.scope_hash != job.scope_hash:
             raise ValueError("lease scope mismatch")
-
-
-def validate_worker_output_authority(value: Any, path: str = "result") -> None:
-    """Reject attempts by an untrusted worker to mutate ATM/external authority truth."""
-    if isinstance(value, dict):
-        for key, child in value.items():
-            normalized = str(key).strip().lower()
-            if normalized in FORBIDDEN_RESULT_KEYS:
-                raise ValueError(f"worker authority field forbidden at {path}.{key}")
-            if any(fragment in normalized for fragment in SECRET_KEY_FRAGMENTS):
-                raise ValueError(f"secret-like worker output forbidden at {path}.{key}")
-            validate_worker_output_authority(child, f"{path}.{key}")
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            validate_worker_output_authority(child, f"{path}[{index}]")
