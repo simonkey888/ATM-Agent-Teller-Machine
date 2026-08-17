@@ -79,16 +79,21 @@ class CloudMasterContractTests(unittest.TestCase):
             sanitize_status({"active_task": {"authorization": "Bearer secret"}})
 
     def test_cloud_workflow_has_zero_spend_runner_and_no_windows(self):
-        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/atm-cloud-cycle.yml").read_text()
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/atm-cloud-cycle.yml").read_text()
+        scheduler = (root / ".github/workflows/atm-cloud-schedule.yml").read_text()
+        self.assertIn("workflow_call:", workflow)
         self.assertIn("runs-on: ubuntu-latest", workflow)
         self.assertNotIn("windows-", workflow.lower())
         self.assertNotIn("self-hosted", workflow.lower())
         self.assertNotIn("larger", workflow.lower())
-        match = re.search(r"cron:\s*'([^']+)'", workflow)
+        self.assertIn("group: atm-economic-authority", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        self.assertIn("uses: ./.github/workflows/atm-cloud-cycle.yml", scheduler)
+        self.assertIn("secrets: inherit", scheduler)
+        match = re.search(r"cron:\s*'([^']+)'", scheduler)
         self.assertIsNotNone(match)
         minute_field = match.group(1).split()[0]
         minute_values = [int(value) for value in minute_field.split(",")]
         self.assertEqual(minute_values, list(range(3, 60, 5)))
         self.assertNotIn(0, minute_values)
-        self.assertIn("group: atm-economic-authority", workflow)
-        self.assertIn("cancel-in-progress: false", workflow)
