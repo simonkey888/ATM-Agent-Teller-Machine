@@ -1,9 +1,15 @@
 name: ATM Cloud Cycle
 
 on:
+  workflow_call:
+    secrets:
+      OCI_CONFIG:
+        required: true
+      OCI_PRIVATE_KEY_PEM:
+        required: true
+      ATM_AGENT_TELLER_MACHINE:
+        required: true
   workflow_dispatch:
-  schedule:
-    - cron: '3,8,13,18,23,28,33,38,43,48,53,58 * * * *'
   push:
     branches: [main, agent/atm-v1]
     paths: [.github/atm-cloud-cycle-trigger.txt]
