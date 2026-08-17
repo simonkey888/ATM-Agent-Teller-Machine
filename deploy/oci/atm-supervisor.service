@@ -3,6 +3,7 @@ Description=ATM economic supervisor (OCI)
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/etc/atm/runtime.env
+ConditionPathExists=/etc/atm/authority.env
 
 [Service]
 Type=simple
@@ -15,6 +16,8 @@ Environment=HOME=/var/lib/atm
 Environment=HERMES_HOME=/var/lib/atm/.hermes
 Environment=PATH=/var/lib/atm/.local/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=/etc/atm/runtime.env
+EnvironmentFile=/etc/atm/authority.env
+ExecStartPre=/opt/atm/.venv/bin/python /opt/atm/scripts/atm-authority-fence.py
 ExecStart=/opt/atm/.venv/bin/python /opt/atm/src/atm_v2_oci.py
 Restart=on-failure
 RestartSec=30s
