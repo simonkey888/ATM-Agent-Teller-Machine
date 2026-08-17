@@ -1,0 +1,117 @@
+name: ATM Cloud Cycle
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  ATM_REPO_VISIBILITY: public
+
+concurrency:
+  group: atm-economic-authority
+  cancel-in-progress: false
+
+jobs:
+  cloud-cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      OCI_CONFIG_SECRET: ${{ secrets.OCI_CONFIG }}
+      OCI_PRIVATE_KEY_PEM: ${{ secrets.OCI_PRIVATE_KEY_PEM }}
+      ATM_REMOTE_BUNDLE: ${{ secrets.ATM_AGENT_TELLER_MACHINE }}
+      OCI_CLI_CONFIG_FILE: ${{ runner.temp }}/atm-oci/config
+      OCI_CLI_PROFILE: ATM_REMOTE
+      ATM_SOURCE_SHA: ${{ github.sha }}
+      ATM_GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+
+      - name: Zero-spend runner and repository guard
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$RUNNER_OS" = Linux
+          test "$ATM_REPO_VISIBILITY" = public
+          python - <<'PY'
+          import json, os, urllib.request
+          req=urllib.request.Request(
+              'https://api.github.com/repos/simonkey888/ATM-Agent-Teller-Machine',
+              headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','User-Agent':'ATM-Zero-Spend-Guard/1.0'},
+          )
+          with urllib.request.urlopen(req, timeout=30) as r:
+              repo=json.load(r)
+          if repo.get('private') is not False:
+              raise SystemExit('ZERO_SPEND_GUARD_FAIL=REPOSITORY_NOT_PUBLIC')
+          print('ZERO_SPEND_GUARD=PASS runner=ubuntu-latest repository=public')
+          PY
+
+      - name: Install cloud runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -e . 'oci>=2.180,<3'
+          curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-browser --skip-setup
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Materialize temporary OCI API profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "$OCI_CONFIG_SECRET" || { echo 'CLOUD_SECRET_MISSING=OCI_CONFIG'; exit 2; }
+          test -n "$OCI_PRIVATE_KEY_PEM" || { echo 'CLOUD_SECRET_MISSING=OCI_PRIVATE_KEY_PEM'; exit 2; }
+          umask 077
+          mkdir -p "$(dirname "$OCI_CLI_CONFIG_FILE")"
+          KEY_FILE="$(dirname "$OCI_CLI_CONFIG_FILE")/oci_api_key.pem"
+          RAW_FILE="$(dirname "$OCI_CLI_CONFIG_FILE")/config.raw"
+          printf '%s\n' "$OCI_PRIVATE_KEY_PEM" > "$KEY_FILE"
+          printf '%s\n' "$OCI_CONFIG_SECRET" > "$RAW_FILE"
+          export KEY_FILE RAW_FILE
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          src=Path(os.environ['RAW_FILE']); dst=Path(os.environ['OCI_CLI_CONFIG_FILE']); key=Path(os.environ['KEY_FILE'])
+          out=[]; saw_profile=False; saw_key=False
+          for line in src.read_text().splitlines():
+              if line.strip() == '[DEFAULT]': out.append('[ATM_REMOTE]'); saw_profile=True
+              elif line.lstrip().startswith('key_file='): out.append(f'key_file={key}'); saw_key=True
+              else: out.append(line)
+          if not saw_profile or not saw_key: raise SystemExit('OCI_CONFIG_INVALID_FOR_CLOUD')
+          dst.write_text('\n'.join(out)+'\n'); src.unlink()
+          PY
+          chmod 600 "$OCI_CLI_CONFIG_FILE" "$KEY_FILE"
+
+      - name: Execute bounded real cloud money cycle
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ACTIONS: 'true'
+          ATM_CLOUD_SLICE_SECONDS: '150'
+          ATM_CLOUD_MAX_PHASES: '4'
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "$ATM_REMOTE_BUNDLE" || { echo 'CLOUD_SECRET_MISSING=ATM_AGENT_TELLER_MACHINE'; exit 2; }
+          IFS='|' read -r PAYOUT _BUNDLE_GH_PAT GOOGLE_KEY REST <<< "$ATM_REMOTE_BUNDLE"
+          test -z "${REST:-}" || { echo 'ATM_REMOTE_BUNDLE_FORMAT_INVALID'; exit 2; }
+          [[ "$PAYOUT" =~ ^0x[0-9a-fA-F]{40}$ ]] || { echo 'ATM_REMOTE_BUNDLE_WALLET_INVALID'; exit 2; }
+          test -n "$GOOGLE_KEY" || { echo 'ATM_REMOTE_BUNDLE_MODEL_KEY_MISSING'; exit 2; }
+          export ATM_BASE_WALLET_ADDRESS="$PAYOUT"
+          export GOOGLE_API_KEY="$GOOGLE_KEY"
+          export PATH="$HOME/.local/bin:$PATH"
+          python src/atm_cloud.py run
+          unset PAYOUT _BUNDLE_GH_PAT GOOGLE_KEY ATM_BASE_WALLET_ADDRESS GOOGLE_API_KEY
