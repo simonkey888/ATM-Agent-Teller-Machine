@@ -7,13 +7,16 @@ import urllib.request
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import atm as v1
 import atm_v2 as core
+from atm_core.capabilities import CapabilityResolver
 from atm_core.models import Phase, RuntimeState
 from atm_core.opportunities import OpportunityValidationError, external_state_hash
 from atm_core.payments import PaymentLedger
-from atm_core.workers import WorkerJobSpec, WorkerRegistry, WorkerResult, WorkLeaseStore, canonical_hash
+from atm_core.workers import WorkerJobSpec, WorkerManifest, WorkerRegistry, WorkerResult, WorkLeaseStore, canonical_hash
+from atm_core.zungun_worker import validate_worker_output_authority, validate_zungun_result_contract
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_DIR = ROOT / "workers" / "manifests"
@@ -29,18 +32,47 @@ def _raw_job_id(canonical_opportunity_id: str) -> str:
     return canonical_opportunity_id.split(":", 1)[1] if ":" in canonical_opportunity_id else canonical_opportunity_id
 
 
-def boqa_result_locations(canonical_opportunity_id: str) -> tuple[str, str, str]:
+def _safe_job_id(canonical_opportunity_id: str) -> str:
     job_id = _raw_job_id(canonical_opportunity_id)
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", job_id):
         raise OpportunityValidationError("unsafe worker job id")
-    branch = f"atm-workprotocol-{job_id}"
-    base = f"{BOQA_RAW_PREFIX}{branch}/paid-work/{job_id}"
+    return job_id
+
+
+def _worker_repo_identity(manifest: WorkerManifest) -> tuple[str, str]:
+    parsed = urlparse(manifest.repo_url)
+    pieces = [part for part in parsed.path.split("/") if part]
+    if parsed.scheme != "https" or parsed.netloc != "github.com" or len(pieces) != 2:
+        raise OpportunityValidationError("worker repository identity invalid")
+    owner, repo = pieces
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", owner) or not re.fullmatch(r"[A-Za-z0-9_.-]+", repo):
+        raise OpportunityValidationError("worker repository identity unsafe")
+    return owner, repo
+
+
+def _worker_raw_prefix(manifest: WorkerManifest) -> str:
+    owner, repo = _worker_repo_identity(manifest)
+    return f"https://raw.githubusercontent.com/{owner}/{repo}/"
+
+
+def worker_result_locations(manifest: WorkerManifest, canonical_opportunity_id: str, source: str) -> tuple[str, str, str]:
+    job_id = _safe_job_id(canonical_opportunity_id)
+    source_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", str(source).strip().lower()).strip("-")
+    if not source_slug or len(source_slug) > 64:
+        raise OpportunityValidationError("unsafe worker source id")
+    branch = f"atm-{source_slug}-{job_id}"
+    base = f"{_worker_raw_prefix(manifest)}{branch}/paid-work/{job_id}"
     return branch, f"{base}/atm-worker-result.json", f"{base}/atm-checker-result.json"
 
 
-def _fetch_public_worker_json(url: str) -> dict[str, Any] | None:
-    if not url.startswith(BOQA_RAW_PREFIX):
-        raise OpportunityValidationError("worker result URL outside BOQA allowlist")
+def boqa_result_locations(canonical_opportunity_id: str) -> tuple[str, str, str]:
+    """Compatibility contract retained for existing BOQA tests and live jobs."""
+    return worker_result_locations(_registry().get("boqa"), canonical_opportunity_id, "workprotocol")
+
+
+def _fetch_public_worker_json(url: str, manifest: WorkerManifest) -> dict[str, Any] | None:
+    if not url.startswith(_worker_raw_prefix(manifest)):
+        raise OpportunityValidationError("worker result URL outside selected worker allowlist")
     request = urllib.request.Request(url, headers={"User-Agent": "ATM-Worker-Fabric/1.0"})
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
@@ -54,29 +86,91 @@ def _fetch_public_worker_json(url: str) -> dict[str, Any] | None:
     return data
 
 
+def _job_target(requirements: dict[str, Any], job: dict[str, Any]) -> tuple[str | None, str | None, list[str]]:
+    repo = (
+        requirements.get("targetRepository")
+        or requirements.get("target_repository")
+        or requirements.get("repository")
+        or job.get("targetRepository")
+        or job.get("target_repository")
+        or job.get("repository")
+    )
+    base_sha = (
+        requirements.get("targetBaseSha")
+        or requirements.get("target_base_sha")
+        or job.get("targetBaseSha")
+        or job.get("target_base_sha")
+    )
+    paths = (
+        requirements.get("allowedPaths")
+        or requirements.get("allowed_paths")
+        or job.get("allowedPaths")
+        or job.get("allowed_paths")
+        or []
+    )
+    if isinstance(paths, str):
+        paths = [paths]
+    return (str(repo).rstrip("/") if repo else None, str(base_sha) if base_sha else None, [str(value) for value in paths])
+
+
 def _build_worker_job(opp: Any, snapshot: dict[str, Any]) -> WorkerJobSpec:
     job = snapshot.get("job") or snapshot
-    criteria = [str(value) for value in (job.get("acceptanceCriteria") or [])]
+    if not isinstance(job, dict):
+        raise OpportunityValidationError("worker route requires object job snapshot")
+    criteria = [str(value) for value in (job.get("acceptanceCriteria") or job.get("acceptance_criteria") or [])]
     if not criteria:
         raise OpportunityValidationError("worker route requires frozen acceptance criteria")
     requirements = job.get("requirements") or {}
-    languages = {str(value).lower() for value in (requirements.get("languages") or [])}
-    required = ["git", "github", "evidence", "ci_triage", "small_code_fix"]
-    if any("python" in language for language in languages):
-        required.append("python")
-    if any(token in language for language in languages for token in ("typescript", "javascript", "node")):
-        required.append("node")
+    if not isinstance(requirements, dict):
+        raise OpportunityValidationError("worker route requirements must be structured object")
+
+    structured = CapabilityResolver.normalize_structured_requirements(requirements)
+    specialized_required = CapabilityResolver.required_for_structured(structured)
+    if specialized_required == ["financial_execution"]:
+        required = specialized_required
+        task_type = "financial_execution_forbidden"
+        repository_or_input = "https://github.com/simonkey888/boqa"
+        target_base_sha = None
+        allowed_paths: list[str] = []
+    elif any(capability.startswith("zungun.") for capability in specialized_required):
+        repo, target_base_sha, allowed_paths = _job_target(requirements, job)
+        if not repo or not repo.startswith("https://github.com/"):
+            raise OpportunityValidationError("Zungun route requires explicit GitHub target repository")
+        if not target_base_sha or not re.fullmatch(r"[0-9a-f]{40}", target_base_sha):
+            raise OpportunityValidationError("Zungun route requires exact target base SHA")
+        if not allowed_paths:
+            raise OpportunityValidationError("Zungun route requires bounded allowed paths")
+        required = specialized_required
+        task_type = "network_reliability_offline_delivery"
+        repository_or_input = repo
+    else:
+        languages = {str(value).lower() for value in (requirements.get("languages") or [])}
+        required = ["git", "github", "evidence", "ci_triage", "small_code_fix"]
+        if any("python" in language for language in languages):
+            required.append("python")
+        if any(token in language for language in languages for token in ("typescript", "javascript", "node")):
+            required.append("node")
+        task_type = "small_code_fix"
+        repository_or_input = "https://github.com/simonkey888/boqa"
+        target_base_sha = None
+        allowed_paths = []
+
     return WorkerJobSpec(
         job_id=_raw_job_id(opp.canonical_opportunity_id),
         canonical_opportunity_id=opp.canonical_opportunity_id,
         external_source=opp.source,
         external_url=opp.authoritative_url,
-        task_type="small_code_fix",
+        task_type=task_type,
         frozen_acceptance_criteria=criteria,
-        repository_or_input="https://github.com/simonkey888/boqa",
+        repository_or_input=repository_or_input,
         deadline=opp.deadline,
         max_spend_usd=Decimal("0"),
         required_capabilities=required,
+        structured_requirements=structured,
+        target_base_sha=target_base_sha,
+        allowed_paths=allowed_paths,
+        expected_deliverable=str(requirements.get("deliverable") or job.get("deliverable") or "") or None,
+        deterministic_checks=[str(value) for value in (requirements.get("deterministicChecks") or requirements.get("deterministic_checks") or [])],
     )
 
 
@@ -107,7 +201,7 @@ def phase_verify(config: dict[str, Any], state: RuntimeState, adapters: dict[str
         state.phase = Phase.DISCOVER
         return
     manifest, decision = selected
-    branch, result_url, checker_url = boqa_result_locations(opp.canonical_opportunity_id)
+    branch, result_url, checker_url = worker_result_locations(manifest, opp.canonical_opportunity_id, opp.source)
     opp.worker_job_spec = job_spec.model_dump(mode="json")
     opp.worker_id = manifest.worker_id
     opp.worker_manifest_hash = canonical_hash(manifest.model_dump(mode="json"))
@@ -161,7 +255,8 @@ def phase_work(config: dict[str, Any], state: RuntimeState) -> None:
         state.last_result = {"status": "MODEL_WORK_PAUSED_NO_VERIFIED_ZERO_COST_ROUTE"}
         return
     job_spec = WorkerJobSpec.model_validate(opp.worker_job_spec)
-    raw = _fetch_public_worker_json(str(opp.worker_result_url))
+    manifest = _registry().get(str(opp.worker_id))
+    raw = _fetch_public_worker_json(str(opp.worker_result_url), manifest)
     if raw is None:
         state.last_result = {
             "status": "WORKER_PENDING",
@@ -170,6 +265,8 @@ def phase_work(config: dict[str, Any], state: RuntimeState) -> None:
             "scope_hash": job_spec.scope_hash,
         }
         return
+    validate_worker_output_authority(raw)
+    raw = dict(raw)
     raw_scope = str(raw.pop("scope_hash", ""))
     raw_lease = str(raw.pop("lease_id", ""))
     if raw_scope != job_spec.scope_hash or raw_lease != str(opp.worker_lease_id):
@@ -177,13 +274,19 @@ def phase_work(config: dict[str, Any], state: RuntimeState) -> None:
     result = WorkerResult.model_validate(raw)
     if result.worker_id != str(opp.worker_id) or result.job_id != job_spec.job_id:
         raise OpportunityValidationError("worker result identity mismatch")
+    if manifest.worker_id == "zungun":
+        try:
+            validate_zungun_result_contract(result, job_spec, manifest, str(opp.worker_lease_id))
+        except ValueError as exc:
+            raise OpportunityValidationError(str(exc)) from exc
     if result.status.upper() not in {"PASS", "READY_FOR_CHECK"}:
         raise OpportunityValidationError("worker result not ready for checker")
     if not result.commit_sha or not re.fullmatch(r"[0-9a-f]{40}", result.commit_sha):
         raise OpportunityValidationError("worker result lacks exact commit SHA")
-    deliverable = result.pr_url or (result.artifact_urls[0] if result.artifact_urls else None)
-    if not deliverable or not deliverable.startswith("https://github.com/simonkey888/boqa"):
-        raise OpportunityValidationError("worker deliverable outside BOQA allowlist")
+    deliverable = result.pr_url or (result.artifact_urls[0] if result.artifact_urls else None) or str(result.delivery.get("candidate_url") or "")
+    worker_repo = manifest.repo_url.rstrip("/")
+    if not deliverable or not (deliverable.startswith(worker_repo) or deliverable.startswith(job_spec.repository_or_input.rstrip("/"))):
+        raise OpportunityValidationError("worker deliverable outside selected worker/target allowlist")
     opp.deliverable_url = deliverable
     opp.worker_commit_sha = result.commit_sha
     opp.worker_result_hash = result.envelope_hash
@@ -205,7 +308,8 @@ def phase_check(config: dict[str, Any], state: RuntimeState) -> None:
         state.last_result = {"status": "CHECKER_PENDING_NO_FABRIC_RECEIPT"}
         return
     job_spec = WorkerJobSpec.model_validate(opp.worker_job_spec)
-    receipt = _fetch_public_worker_json(str(opp.worker_checker_url))
+    manifest = _registry().get(str(opp.worker_id))
+    receipt = _fetch_public_worker_json(str(opp.worker_checker_url), manifest)
     if receipt is None:
         state.last_result = {
             "status": "CHECKER_PENDING",
@@ -213,6 +317,7 @@ def phase_check(config: dict[str, Any], state: RuntimeState) -> None:
             "work_lease_id": opp.worker_lease_id,
         }
         return
+    validate_worker_output_authority(receipt)
     required = {"checker_id", "job_id", "scope_hash", "lease_id", "commit_sha", "status", "evidence_refs", "checked_at"}
     if not required.issubset(receipt):
         raise OpportunityValidationError("checker receipt missing required fields")
