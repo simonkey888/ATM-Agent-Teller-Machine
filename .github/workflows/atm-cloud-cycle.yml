@@ -4,6 +4,9 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '*/5 * * * *'
+  push:
+    branches: [agent/atm-v1]
+    paths: [.github/atm-cloud-cycle-trigger.txt]
 
 permissions:
   contents: read
