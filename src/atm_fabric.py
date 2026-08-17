@@ -16,7 +16,7 @@ from atm_core.models import Phase, RuntimeState
 from atm_core.opportunities import OpportunityValidationError, external_state_hash
 from atm_core.payments import PaymentLedger
 from atm_core.workers import WorkerJobSpec, WorkerManifest, WorkerRegistry, WorkerResult, WorkLeaseStore, canonical_hash
-from atm_core.zungun_worker import validate_worker_output_authority
+from atm_core.zungun_worker import validate_worker_output_authority, validate_zungun_result_contract
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_DIR = ROOT / "workers" / "manifests"
@@ -274,11 +274,16 @@ def phase_work(config: dict[str, Any], state: RuntimeState) -> None:
     result = WorkerResult.model_validate(raw)
     if result.worker_id != str(opp.worker_id) or result.job_id != job_spec.job_id:
         raise OpportunityValidationError("worker result identity mismatch")
+    if manifest.worker_id == "zungun":
+        try:
+            validate_zungun_result_contract(result, job_spec, manifest, str(opp.worker_lease_id))
+        except ValueError as exc:
+            raise OpportunityValidationError(str(exc)) from exc
     if result.status.upper() not in {"PASS", "READY_FOR_CHECK"}:
         raise OpportunityValidationError("worker result not ready for checker")
     if not result.commit_sha or not re.fullmatch(r"[0-9a-f]{40}", result.commit_sha):
         raise OpportunityValidationError("worker result lacks exact commit SHA")
-    deliverable = result.pr_url or (result.artifact_urls[0] if result.artifact_urls else None)
+    deliverable = result.pr_url or (result.artifact_urls[0] if result.artifact_urls else None) or str(result.delivery.get("candidate_url") or "")
     worker_repo = manifest.repo_url.rstrip("/")
     if not deliverable or not (deliverable.startswith(worker_repo) or deliverable.startswith(job_spec.repository_or_input.rstrip("/"))):
         raise OpportunityValidationError("worker deliverable outside selected worker/target allowlist")
