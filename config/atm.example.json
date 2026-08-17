@@ -8,9 +8,21 @@
   "allow_auto_claim": true,
   "allow_auto_pr": true,
   "payment_recipient_public_identifier": "",
-  "provider": {"primary":{"provider":"gemini","model":"gemini-3.5-flash","requires_env":"GOOGLE_API_KEY","enabled":true},"fallbacks":[]},
-  "provider_runtime":{"default_429_circuit_seconds":900},
-  "opportunity_adapters":{"workprotocol":{"enabled":true,"base_url":"https://workprotocol.ai"},"taskmarket":{"enabled":true,"base_url":"https://api.taskmarket.dev"},"algora":{"enabled":false,"payout_api_template":null},"opire":{"enabled":false},"moltjobs":{"enabled":false}},
+  "provider": {
+    "primary": {
+      "provider": "opencode-zen",
+      "model": "deepseek-v4-flash-free",
+      "base_url": "https://opencode.ai/zen/v1",
+      "requires_env": "OPENCODE_API_KEY",
+      "enabled": false,
+      "zero_cost_required": true
+    },
+    "fallbacks": [],
+    "paid_model_fallback": false,
+    "worker_fabric_generation": "R1"
+  },
+  "provider_runtime": {"default_429_circuit_seconds": 900},
+  "opportunity_adapters": {"workprotocol":{"enabled":true,"base_url":"https://workprotocol.ai"},"taskmarket":{"enabled":true,"base_url":"https://api.taskmarket.dev"},"algora":{"enabled":false,"payout_api_template":null},"opire":{"enabled":false},"moltjobs":{"enabled":false}},
   "discovery_order":["workprotocol","taskmarket","algora","opire","moltjobs"],
   "hermes":{"max_turns":500,"process_timeout_seconds":7200},
   "loop":{"failure_backoff_seconds":30,"max_failure_backoff_seconds":1800,"pause_poll_seconds":10,"phase_delay_seconds":{"DISCOVER":60,"VERIFY":2,"CLAIM":2,"WORK":2,"CHECK":2,"SUBMIT":2,"MONITOR":300,"PAYMENT_VERIFY":30}}

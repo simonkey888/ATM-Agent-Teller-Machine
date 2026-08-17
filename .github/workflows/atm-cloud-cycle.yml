@@ -68,13 +68,11 @@ jobs:
           print('ZERO_SPEND_GUARD=PASS runner=ubuntu-latest repository=public')
           PY
 
-      - name: Install cloud runtime dependencies
+      - name: Install deterministic cloud runtime dependencies
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --disable-pip-version-check -e . 'oci>=2.180,<3'
-          curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-browser --skip-setup
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Materialize temporary OCI API profile
         shell: bash
@@ -114,12 +112,9 @@ jobs:
           set -euo pipefail
           set +x
           test -n "$ATM_REMOTE_BUNDLE" || { echo 'CLOUD_SECRET_MISSING=ATM_AGENT_TELLER_MACHINE'; exit 2; }
-          IFS='|' read -r PAYOUT _BUNDLE_GH_PAT GOOGLE_KEY REST <<< "$ATM_REMOTE_BUNDLE"
+          IFS='|' read -r PAYOUT _BUNDLE_GH_PAT _LEGACY_MODEL_KEY REST <<< "$ATM_REMOTE_BUNDLE"
           test -z "${REST:-}" || { echo 'ATM_REMOTE_BUNDLE_FORMAT_INVALID'; exit 2; }
           [[ "$PAYOUT" =~ ^0x[0-9a-fA-F]{40}$ ]] || { echo 'ATM_REMOTE_BUNDLE_WALLET_INVALID'; exit 2; }
-          test -n "$GOOGLE_KEY" || { echo 'ATM_REMOTE_BUNDLE_MODEL_KEY_MISSING'; exit 2; }
           export ATM_BASE_WALLET_ADDRESS="$PAYOUT"
-          export GOOGLE_API_KEY="$GOOGLE_KEY"
-          export PATH="$HOME/.local/bin:$PATH"
-          python src/atm_cloud.py run
-          unset PAYOUT _BUNDLE_GH_PAT GOOGLE_KEY ATM_BASE_WALLET_ADDRESS GOOGLE_API_KEY
+          python src/atm_cloud_fabric.py
+          unset PAYOUT _BUNDLE_GH_PAT _LEGACY_MODEL_KEY ATM_BASE_WALLET_ADDRESS
