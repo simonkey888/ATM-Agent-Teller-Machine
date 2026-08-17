@@ -60,4 +60,17 @@ export OCI_CLI_PROFILE="$PROFILE"
 export OCI_CLI_AUTH=api_key
 
 "$D/oci-provision-runner.sh" "$D/infra.env"
+# A prior failed promotion may have deliberately stopped the canonical A1.
+# Reuse it instead of allocating a second instance, and never start any non-A1 shape.
+# shellcheck disable=SC1090
+source "$D/infra.env"
+LIFECYCLE="$(oci compute instance get --config-file "$CFG" --profile "$PROFILE" --region "$REGION" --instance-id "$INSTANCE_ID" --query 'data."lifecycle-state"' --raw-output)" || fail OCI_INSTANCE_STATE_LOOKUP
+case "$LIFECYCLE" in
+  RUNNING) ;;
+  STOPPED)
+    echo 'OCI_CANONICAL_A1=RESTARTING_FROM_SAFE_ROLLBACK'
+    oci compute instance action --config-file "$CFG" --profile "$PROFILE" --region "$REGION" --instance-id "$INSTANCE_ID" --action START --wait-for-state RUNNING --max-wait-seconds 900 >/dev/null || fail OCI_CANONICAL_A1_RESTART
+    ;;
+  *) fail "OCI_CANONICAL_A1_UNEXPECTED_STATE_$LIFECYCLE" ;;
+esac
 "$D/oci-configure.sh" "$D/infra.env"
