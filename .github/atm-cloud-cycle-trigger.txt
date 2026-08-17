@@ -1,4 +1,4 @@
-gate=worker-fabric-r1-live-economic-proof
+gate=worker-fabric-r1-autonomy-filter-live-proof
 order=OWNER_MASTER_ORDER_ATM_WORKER_FABRIC_R1
-worker_fabric_merge=efef75bee69f65d9a1ad323fae41148fbe90d026
-requested_utc=2026-08-17T10:03:00Z
+worker_fabric_merge=45f18dcb30b6a6e5667fcf463e55a6a1e070e6e1
+requested_utc=2026-08-17T10:36:00Z
