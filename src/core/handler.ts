@@ -1,0 +1,1 @@
+const total = amount + fee; if (total > balance) return false; balance -= total;
