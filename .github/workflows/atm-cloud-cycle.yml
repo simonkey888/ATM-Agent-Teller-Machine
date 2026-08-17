@@ -3,7 +3,7 @@ name: ATM Cloud Cycle
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '3,8,13,18,23,28,33,38,43,48,53,58 * * * *'
   push:
     branches: [main, agent/atm-v1]
     paths: [.github/atm-cloud-cycle-trigger.txt]
