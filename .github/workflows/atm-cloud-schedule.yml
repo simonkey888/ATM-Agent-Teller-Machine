@@ -1,0 +1,14 @@
+name: ATM Cloud Cycle Scheduled
+
+on:
+  schedule:
+    - cron: '3,8,13,18,23,28,33,38,43,48,53,58 * * * *'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  scheduled-cloud-cycle:
+    uses: ./.github/workflows/atm-cloud-cycle.yml
+    secrets: inherit
