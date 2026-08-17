@@ -1,0 +1,30 @@
+{
+  "worker_id": "senex-prophet",
+  "repo_url": "https://github.com/simonkey888/SeneX-Prophet",
+  "enabled": false,
+  "capabilities": [
+    "model",
+    "git",
+    "github",
+    "filesystem",
+    "shell",
+    "python",
+    "evidence",
+    "data_analysis",
+    "deterministic_replay",
+    "research"
+  ],
+  "execution_backend": "github_repository_worker",
+  "entrypoint": "repository-contract",
+  "max_concurrency": 1,
+  "timeout_seconds": 1800,
+  "network_policy": "public-data-readonly-github-zero-spend",
+  "expected_artifacts": [
+    "commit_sha",
+    "test_results",
+    "evidence_refs",
+    "content_hashes"
+  ],
+  "cost_ceiling_usd": "0",
+  "financial_authority": false
+}
