@@ -5,11 +5,13 @@ import json
 import atm_cloud
 import atm_fabric
 from atm_core.funding_gate import install_workprotocol_chain_funding_gate
+from atm_core.swarm_runtime import current_pass_swarm_shadow
 
 
 # Extend the existing canonical durable cloud state; do not introduce a second supervisor.
 atm_cloud.STATE_ALLOWLIST.add("worker-fabric.sqlite3")
 install_workprotocol_chain_funding_gate()
+atm_cloud.swarm_shadow = current_pass_swarm_shadow
 atm_fabric.install()
 
 _original_build_status = atm_cloud.build_status
