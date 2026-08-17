@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+config/atm.json
+.atm/
+.env
+*.local
