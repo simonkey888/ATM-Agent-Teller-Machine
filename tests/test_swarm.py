@@ -150,3 +150,28 @@ class SwarmContractTests(unittest.TestCase):
 
             self.assertEqual(selector, "SWARM_MONEY_BOARD")
             self.assertIsNone(selected)
+
+    def test_eligible_status_without_falsifier_confirm_does_not_enter_authority(self):
+        with tempfile.TemporaryDirectory() as d:
+            board_path = Path(d) / "board.sqlite3"
+            forged_eligible = self.opportunity("forged-eligible", "100")
+            board = MoneyBoard(board_path)
+            try:
+                board.upsert_candidate(
+                    forged_eligible.model_dump(mode="json"),
+                    scout="SCOUT_A",
+                    base_score=100,
+                    status="ELIGIBLE",
+                )
+                self.assertEqual(board.get("forged-eligible")["status"], "ELIGIBLE")
+                self.assertIsNone(board.get("forged-eligible")["falsifier_verdict"])
+            finally:
+                board.close()
+
+            with patch.object(atm_v2, "MONEY_BOARD_FILE", board_path):
+                selected, selector = atm_v2._choose_discovery_candidate(
+                    [forged_eligible], Decimal("3")
+                )
+
+            self.assertEqual(selector, "SWARM_MONEY_BOARD")
+            self.assertIsNone(selected)
