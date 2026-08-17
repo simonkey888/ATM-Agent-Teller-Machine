@@ -16,14 +16,14 @@ class OciResumeContractTests(unittest.TestCase):
         self.assertIn('${GITHUB_TOKEN:-${GH_TOKEN:-}}', self.configure)
         self.assertIn('${GOOGLE_API_KEY:-}', self.configure)
 
-    def test_windows_is_absent_from_cloud_only_handover(self):
-        self.assertNotIn("WINDOWS", self.configure.upper())
-        self.assertNotIn("cutover-stop-windows", self.configure)
-        self.assertNotIn("WAITING_WINDOWS_STOP", self.configure)
+    def test_windows_runtime_cutover_is_absent(self):
+        for marker in ("cutover-stop-windows", "WAITING_WINDOWS_STOP", "HOST_CLASS=WINDOWS"):
+            self.assertNotIn(marker, self.configure)
+        self.assertIn('"windows_authority":0', self.configure)
 
     def test_cloud_state_restore_precedes_authority_promotion(self):
-        restore = '/opt/atm/scripts/atm-state-backup.sh restore'
-        promote = 'oci-authority.py'
+        restore = "atm-state-backup.sh restore"
+        promote = 'promote --instance-id "$INSTANCE_ID" --source-sha "$SHA"'
         self.assertIn(restore, self.configure)
         self.assertIn(promote, self.configure)
         self.assertLess(self.configure.index(restore), self.configure.index(promote))
