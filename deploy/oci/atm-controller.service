@@ -2,6 +2,7 @@
 Description=ATM GitHub control bus (OCI canonical controller)
 After=network-online.target
 Wants=network-online.target
+ConditionPathExists=/etc/atm/authority.env
 
 [Service]
 Type=simple
@@ -11,7 +12,8 @@ WorkingDirectory=/opt/atm
 Environment=ATM_HOST_CLASS=OCI
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/etc/atm/control.env
-ExecStart=/opt/atm/.venv/bin/python /opt/atm/src/atm_control_oci_entry.py
+EnvironmentFile=/etc/atm/authority.env
+ExecStart=/opt/atm/.venv/bin/python /opt/atm/src/atm_control_oci_fenced.py
 Restart=always
 RestartSec=15s
 TimeoutStopSec=30s
