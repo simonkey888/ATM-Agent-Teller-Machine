@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -43,6 +44,11 @@ class WorkerManifest(BaseModel):
     expected_artifacts: list[str] = Field(default_factory=list)
     cost_ceiling_usd: Decimal = Decimal("0")
     financial_authority: bool = False
+    claim_authority: bool = False
+    submission_authority: bool = False
+    model_authority: bool = False
+    worker_class: str = "general"
+    worker_version: str = "1"
 
     @field_validator("repo_url")
     @classmethod
@@ -67,8 +73,8 @@ class WorkerManifest(BaseModel):
 
     @model_validator(mode="after")
     def no_financial_authority_or_spend(self) -> "WorkerManifest":
-        if self.financial_authority:
-            raise ValueError("workers may not hold financial authority")
+        if self.financial_authority or self.claim_authority or self.submission_authority or self.model_authority:
+            raise ValueError("workers may not hold financial, claim, submission, or model authority")
         if self.cost_ceiling_usd != Decimal("0"):
             raise ValueError("current OWNER order requires zero worker spend")
         CapabilityResolver.assert_manifest_safe(self.capabilities)
@@ -89,6 +95,11 @@ class WorkerJobSpec(BaseModel):
     scope_hash: str = ""
     max_spend_usd: Decimal = Decimal("0")
     required_capabilities: list[str] = Field(default_factory=list)
+    structured_requirements: list[str] = Field(default_factory=list)
+    target_base_sha: str | None = None
+    allowed_paths: list[str] = Field(default_factory=list)
+    expected_deliverable: str | None = None
+    deterministic_checks: list[str] = Field(default_factory=list)
 
     @field_validator("external_url")
     @classmethod
@@ -96,6 +107,32 @@ class WorkerJobSpec(BaseModel):
         if not value.startswith("https://"):
             raise ValueError("external_url must use https")
         return value
+
+    @field_validator("repository_or_input")
+    @classmethod
+    def repository_or_input_safe(cls, value: str) -> str:
+        if value.startswith("https://") and not value.startswith("https://github.com/"):
+            raise ValueError("repository URL must use GitHub https")
+        return value
+
+    @field_validator("target_base_sha")
+    @classmethod
+    def target_sha_exact(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"[0-9a-f]{40}", value):
+            raise ValueError("target_base_sha must be exact lowercase git SHA")
+        return value
+
+    @field_validator("allowed_paths")
+    @classmethod
+    def allowed_paths_bounded(cls, values: list[str]) -> list[str]:
+        clean: list[str] = []
+        for raw in values:
+            value = str(raw).replace("\\", "/").strip()
+            path = PurePosixPath(value)
+            if not value or value.startswith("/") or ".." in path.parts or ".git" in path.parts:
+                raise ValueError("allowed_paths must stay inside target worktree")
+            clean.append(value.rstrip("/"))
+        return sorted(set(clean))
 
     @model_validator(mode="after")
     def bind_scope(self) -> "WorkerJobSpec":
