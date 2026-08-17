@@ -45,15 +45,18 @@ class OciStaticContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.root = Path(__file__).resolve().parents[1]
         cls.bootstrap = (cls.root / "scripts" / "bootstrap-oci-atm.sh").read_text()
+        cls.remote_bootstrap = (cls.root / "scripts" / "bootstrap-oci-atm-api.sh").read_text()
         cls.provision = (cls.root / "scripts" / "oci-provision.sh").read_text()
         cls.configure = (cls.root / "scripts" / "oci-configure.sh").read_text()
         cls.cloudinit = (cls.root / "deploy" / "oci" / "cloud-init.sh").read_text()
         cls.backup = (cls.root / "scripts" / "atm-state-backup.sh").read_text()
+        cls.authority = (cls.root / "scripts" / "oci-authority.py").read_text()
+        cls.fence = (cls.root / "scripts" / "atm-authority-fence.py").read_text()
         cls.controller_unit = (cls.root / "deploy" / "oci" / "atm-controller.service").read_text()
         cls.supervisor_unit = (cls.root / "deploy" / "oci" / "atm-supervisor.service").read_text()
         cls.worker = (cls.root / "worker" / "src" / "index.js").read_text()
         cls.oci_runtime = (cls.root / "src" / "atm_v2_oci.py").read_text()
-        cls.all_boot = "\n".join([cls.bootstrap, cls.provision, cls.configure, cls.cloudinit])
+        cls.all_boot = "\n".join([cls.bootstrap, cls.remote_bootstrap, cls.provision, cls.configure, cls.cloudinit])
 
     def test_bootstrap_is_exact_sha_and_cloud_shell_only(self):
         self.assertIn("instance_obo_user", self.bootstrap)
@@ -97,6 +100,7 @@ class OciStaticContractTests(unittest.TestCase):
         self.assertIn("read -rsp 'GOOGLE_API_KEY", self.configure)
         self.assertIn("chmod 600 /etc/atm/control.env", self.configure)
         self.assertIn("chmod 640 /etc/atm/runtime.env", self.configure)
+        self.assertIn("chmod 640 /etc/atm/authority.env", self.configure)
 
     def test_canonical_payout_address_is_environment_bound_and_public_only(self):
         self.assertIn('PAYOUT="${ATM_BASE_WALLET_ADDRESS:-}"', self.bootstrap)
@@ -107,9 +111,10 @@ class OciStaticContractTests(unittest.TestCase):
         self.assertNotIn("seed phrase", self.all_boot.lower())
         self.assertNotIn("private key", self.configure.lower())
 
-    def test_systemd_separates_controller_and_supervisor(self):
-        self.assertIn("ExecStart=/opt/atm/.venv/bin/python /opt/atm/src/atm_control_oci_entry.py", self.controller_unit)
+    def test_systemd_separates_controller_and_supervisor_with_authority_fence(self):
+        self.assertIn("ExecStart=/opt/atm/.venv/bin/python /opt/atm/src/atm_control_oci_fenced.py", self.controller_unit)
         self.assertIn("Restart=always", self.controller_unit)
+        self.assertIn("ExecStartPre=/opt/atm/.venv/bin/python /opt/atm/scripts/atm-authority-fence.py", self.supervisor_unit)
         self.assertIn("ExecStart=/opt/atm/.venv/bin/python /opt/atm/src/atm_v2_oci.py", self.supervisor_unit)
         self.assertIn("Restart=on-failure", self.supervisor_unit)
         self.assertIn("User=atm", self.supervisor_unit)
@@ -119,20 +124,26 @@ class OciStaticContractTests(unittest.TestCase):
         self.assertIn("PAUSED_SAFE_MONITOR_ONLY", self.oci_runtime)
         self.assertIn("refresh_discovery_cache", self.oci_runtime)
 
-    def test_backup_allowlist_excludes_secrets_logs_and_workspaces(self):
+    def test_backup_is_manifested_cloud_state_and_excludes_secrets_logs_workspaces(self):
+        self.assertIn("ATM_CLOUD_STATE_V1", self.backup)
+        self.assertIn("manifest.json", self.backup)
+        self.assertIn("sha256", self.backup)
         self.assertIn("validated-payment-proofs.jsonl", self.backup)
-        self.assertIn("controller-state-oci.json", self.backup)
+        self.assertIn("money-board.sqlite3", self.backup)
+        self.assertIn("cloud-control.json", self.backup)
+        self.assertNotIn("controller-state-oci.json", self.backup)
         self.assertNotIn("secrets.env", self.backup)
         self.assertNotIn("workspaces", self.backup)
         self.assertNotIn("logs/", self.backup)
 
-    def test_external_state_object_is_preserved_on_rerun(self):
-        self.assertIn("os object head", self.provision)
-        self.assertIn("OCI_STATE_OBJECT=PRESERVED_EXISTING", self.provision)
-        head_pos = self.provision.index("os object head")
-        put_pos = self.provision.index("os object put")
-        self.assertLess(head_pos, put_pos)
-        self.assertIn("NO_VALID_REMOTE_ARCHIVE", self.backup)
+    def test_cloud_state_object_is_required_before_oci_promotion(self):
+        self.assertIn("atm-cloud-state.tgz", self.configure)
+        self.assertIn("atm-authority.json", self.configure)
+        self.assertIn("CLOUD_BASE_STATE_OBJECT_MISSING", self.configure)
+        self.assertIn("CLOUD_BASE_AUTHORITY_OBJECT_MISSING", self.configure)
+        restore_pos = self.configure.index("atm-state-backup.sh restore")
+        promote_pos = self.configure.index("oci-authority.py")
+        self.assertLess(restore_pos, promote_pos)
 
     def test_ssh_rule_is_break_glass_only_and_removed(self):
         self.assertIn("destinationPortRange", self.provision)
@@ -141,12 +152,19 @@ class OciStaticContractTests(unittest.TestCase):
         self.assertNotIn("9222", self.all_boot)
         self.assertNotIn("8000", self.all_boot)
 
-    def test_cutover_fail_closed_prevents_second_supervisor(self):
-        marker = "WINDOWS_STOP_UNPROVEN_OCI_SUPERVISOR_NOT_STARTED"
-        start_id = 'ID="order002c-oci-start-$SHA"'
-        self.assertIn(marker, self.configure)
-        self.assertIn(start_id, self.configure)
-        self.assertLess(self.configure.index(marker), self.configure.index(start_id))
+    def test_cloud_only_cutover_uses_cas_fencing_and_no_windows(self):
+        upper = self.configure.upper()
+        self.assertNotIn("WINDOWS", upper)
+        self.assertIn('promote --instance-id "$INSTANCE_ID" --source-sha "$SHA"', self.configure)
+        self.assertIn("AUTHORITY_FENCE_REMOTE", self.configure)
+        self.assertIn("GITHUB_ACTIONS_LEASE_STILL_LIVE", self.authority)
+        self.assertIn("ROLLBACK_REFUSED_INSTANCE_NOT_PROVEN_STOPPED", self.authority)
+        start_id = 'ID="master-oci-start-$SHA"'
+        self.assertLess(self.configure.index("AUTHORITY_FENCE_REMOTE"), self.configure.index(start_id))
+
+    def test_stopped_canonical_a1_is_reused_not_duplicated(self):
+        self.assertIn("OCI_CANONICAL_A1=RESTARTING_FROM_SAFE_ROLLBACK", self.remote_bootstrap)
+        self.assertIn("--action START --wait-for-state RUNNING", self.remote_bootstrap)
 
     def test_observatory_is_sanitized_read_only(self):
         self.assertIn("const OBS_ISSUE = 7", self.worker)
