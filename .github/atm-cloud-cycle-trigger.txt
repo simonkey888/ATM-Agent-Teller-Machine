@@ -1,3 +1,4 @@
-gate=master-cloud-postmerge-recovery-v1
-command_id=master-cloud-postmerge-status-c038d2a8
-source_parent=c038d2a891c83d87116512845ec0229e416efce4
+gate=worker-fabric-r1-s2-fresh-proof
+order=OWNER_MASTER_ORDER_ATM_WORKER_FABRIC_R1
+source_main=152c005672991188096cbc4cb8edf044f41a4cba
+requested_utc=2026-08-17T09:38:00Z
