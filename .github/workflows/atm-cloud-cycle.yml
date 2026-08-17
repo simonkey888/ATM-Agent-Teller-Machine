@@ -5,7 +5,7 @@ on:
   schedule:
     - cron: '*/5 * * * *'
   push:
-    branches: [agent/atm-v1]
+    branches: [main, agent/atm-v1]
     paths: [.github/atm-cloud-cycle-trigger.txt]
 
 permissions:
