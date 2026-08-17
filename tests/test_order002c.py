@@ -142,8 +142,9 @@ class OciStaticContractTests(unittest.TestCase):
         self.assertIn("CLOUD_BASE_STATE_OBJECT_MISSING", self.configure)
         self.assertIn("CLOUD_BASE_AUTHORITY_OBJECT_MISSING", self.configure)
         restore_pos = self.configure.index("atm-state-backup.sh restore")
-        promote_pos = self.configure.index("oci-authority.py")
-        self.assertLess(restore_pos, promote_pos)
+        promote_marker = 'promote --instance-id "$INSTANCE_ID" --source-sha "$SHA"'
+        self.assertIn(promote_marker, self.configure)
+        self.assertLess(restore_pos, self.configure.index(promote_marker))
 
     def test_ssh_rule_is_break_glass_only_and_removed(self):
         self.assertIn("destinationPortRange", self.provision)
@@ -152,9 +153,11 @@ class OciStaticContractTests(unittest.TestCase):
         self.assertNotIn("9222", self.all_boot)
         self.assertNotIn("8000", self.all_boot)
 
-    def test_cloud_only_cutover_uses_cas_fencing_and_no_windows(self):
-        upper = self.configure.upper()
-        self.assertNotIn("WINDOWS", upper)
+    def test_cloud_only_cutover_uses_cas_fencing_and_no_windows_runtime_dependency(self):
+        forbidden = ("cutover-stop-windows", "WAITING_WINDOWS_STOP", "HOST_CLASS=WINDOWS", "target_host\\\":\\\"WINDOWS")
+        for marker in forbidden:
+            self.assertNotIn(marker, self.configure)
+        self.assertIn('"windows_authority":0', self.configure)
         self.assertIn('promote --instance-id "$INSTANCE_ID" --source-sha "$SHA"', self.configure)
         self.assertIn("AUTHORITY_FENCE_REMOTE", self.configure)
         self.assertIn("GITHUB_ACTIONS_LEASE_STILL_LIVE", self.authority)
