@@ -1,4 +1,4 @@
-gate=worker-fabric-r1-chain-funding-gate-live-proof
+gate=worker-fabric-r1-current-pass-live-proof
 order=OWNER_MASTER_ORDER_ATM_WORKER_FABRIC_R1
-funding_gate_merge=13cc61030de90b0679b99726fcbc1a663d0f3a4c
-requested_utc=2026-08-17T10:43:00Z
+swarm_runtime_merge=e570630e3f939295b8fc0835f6e365eb3417ae28
+requested_utc=2026-08-17T10:48:00Z
