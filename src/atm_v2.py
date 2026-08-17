@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import sqlite3
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -34,6 +35,7 @@ TARGET_FILE = STATE_DIR / "monthly-targets.json"
 GATES_FILE = STATE_DIR / "human-gates.jsonl"
 DEGRADED_FILE = STATE_DIR / "degraded-opportunities.json"
 DISCOVERY_CACHE = STATE_DIR / "discovery-cache.json"
+MONEY_BOARD_FILE = STATE_DIR / "money-board.sqlite3"
 PAUSE_FILE = STATE_DIR / "paused"
 LOCK_FILE = STATE_DIR / "atm.lock"
 MONTH1_FLOOR = Decimal("500")
@@ -173,11 +175,55 @@ def refresh_discovery_cache(config: dict[str, Any], adapters: dict[str, Any]) ->
     )
 
 
+def _swarm_eligible_order(path: Path | None = None) -> list[str] | None:
+    """Return falsifier-confirmed board order, or None when swarm state is absent.
+
+    A present Money Board is authoritative for candidate admission. If it cannot be
+    read, fail closed rather than silently bypassing swarm falsification.
+    """
+    board_path = path or MONEY_BOARD_FILE
+    if not board_path.exists():
+        return None
+    connection = None
+    try:
+        connection = sqlite3.connect(f"file:{board_path}?mode=ro", uri=True, timeout=10)
+        rows = connection.execute(
+            "SELECT canonical_id FROM opportunities "
+            "WHERE status='ELIGIBLE' AND falsifier_verdict='CONFIRM' AND verified_at IS NOT NULL "
+            "ORDER BY signal DESC, touched_at DESC"
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise RuntimeError("Money Board eligible-set read failed") from exc
+    finally:
+        if connection is not None:
+            connection.close()
+    return [str(row[0]) for row in rows]
+
+
+def _choose_discovery_candidate(found: list[Any], hard_cap: Decimal) -> tuple[Any | None, str]:
+    eligible_order = _swarm_eligible_order()
+    if eligible_order is None:
+        return choose_money_velocity(found, hard_default_hours=hard_cap), "SEQUENTIAL_FALLBACK_NO_BOARD"
+
+    # Never execute an old board payload directly. Economic authority may only
+    # admit a falsifier-confirmed candidate that was rediscovered in this exact
+    # authoritative DISCOVER pass and still passes the canonical economic gates.
+    fresh_by_id = {o.canonical_opportunity_id: o for o in found}
+    for opportunity_id in eligible_order:
+        candidate = fresh_by_id.get(opportunity_id)
+        if candidate is None:
+            continue
+        selected = choose_money_velocity([candidate], hard_default_hours=hard_cap)
+        if selected is not None:
+            return selected, "SWARM_MONEY_BOARD"
+    return None, "SWARM_MONEY_BOARD"
+
+
 def phase_discover(config: dict[str, Any], state: RuntimeState, adapters: dict[str, Any]) -> None:
     found = discover_candidates(config, adapters)
     configured = Decimal(str(config.get("max_task_hours", 3)))
     hard_cap = min(HARD_DEFAULT_HOURS, max(Decimal("0.25"), configured))
-    selected = choose_money_velocity(found, hard_default_hours=hard_cap)
+    selected, selector = _choose_discovery_candidate(found, hard_cap)
     if selected:
         state.active_opportunity = selected
         state.phase = Phase.VERIFY
@@ -185,9 +231,10 @@ def phase_discover(config: dict[str, Any], state: RuntimeState, adapters: dict[s
             "status": "FOUND",
             "opportunity": selected.model_dump(mode="json"),
             "money_velocity": str(money_velocity(selected)),
+            "selector": selector,
         }
     else:
-        state.last_result = {"status": "NO_ELIGIBLE_OPPORTUNITY", "count": len(found)}
+        state.last_result = {"status": "NO_ELIGIBLE_OPPORTUNITY", "count": len(found), "selector": selector}
 
 
 def phase_verify_v2(config: dict[str, Any], state: RuntimeState, adapters: dict[str, Any]) -> None:
