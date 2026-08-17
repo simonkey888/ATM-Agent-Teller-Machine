@@ -1,4 +1,4 @@
-gate=worker-fabric-r1-s2-fresh-proof
+gate=worker-fabric-r1-live-economic-proof
 order=OWNER_MASTER_ORDER_ATM_WORKER_FABRIC_R1
-source_main=152c005672991188096cbc4cb8edf044f41a4cba
-requested_utc=2026-08-17T09:38:00Z
+worker_fabric_merge=efef75bee69f65d9a1ad323fae41148fbe90d026
+requested_utc=2026-08-17T10:03:00Z
