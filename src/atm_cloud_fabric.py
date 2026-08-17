@@ -13,6 +13,7 @@ atm_cloud.STATE_ALLOWLIST.add("worker-fabric.sqlite3")
 atm_cloud.STATE_ALLOWLIST.add("execution-jobs.sqlite3")
 atm_cloud.STATE_ALLOWLIST.add("economic-episodes.sqlite3")
 atm_cloud.STATE_ALLOWLIST.add("immune-memory.sqlite3")
+atm_cloud.STATE_ALLOWLIST.add("vnext-learning.sqlite3")
 install_workprotocol_chain_funding_gate()
 atm_cloud.swarm_shadow = current_pass_swarm_shadow
 atm_fabric.install()
