@@ -161,20 +161,52 @@ class WorkLease(BaseModel):
 
 
 class WorkerResult(BaseModel):
+    """Canonical Worker Fabric result envelope; never external acceptance/payment truth."""
+
     model_config = ConfigDict(extra="forbid")
 
     worker_id: str
     job_id: str
     status: str
+    worker_version: str | None = None
+    work_lease_id: str | None = None
     artifact_urls: list[str] = Field(default_factory=list)
     commit_sha: str | None = None
     pr_url: str | None = None
     test_results: dict[str, Any] = Field(default_factory=dict)
     evidence_refs: list[str] = Field(default_factory=list)
     content_hashes: list[str] = Field(default_factory=list)
+    target: dict[str, Any] = Field(default_factory=dict)
+    execution: dict[str, Any] = Field(default_factory=dict)
+    verification: dict[str, Any] = Field(default_factory=dict)
+    findings: dict[str, Any] = Field(default_factory=dict)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    delivery: dict[str, Any] = Field(default_factory=dict)
+    limitations: list[str] = Field(default_factory=list)
+    cost: dict[str, Any] = Field(default_factory=dict)
     started_at: datetime
     finished_at: datetime
     error_class: str | None = None
+
+    @model_validator(mode="after")
+    def worker_result_is_zero_cost_and_non_economic(self) -> "WorkerResult":
+        if "outgoing_spend_usd" in self.cost and Decimal(str(self.cost["outgoing_spend_usd"])) != Decimal("0"):
+            raise ValueError("worker result reports nonzero outgoing spend")
+        forbidden = {"paid", "withdrawable", "withdrawable_usdc", "realized_withdrawable_usd", "external_accepted"}
+        raw = self.model_dump(mode="json")
+
+        def walk(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if str(key).strip().lower() in forbidden:
+                        raise ValueError("worker result contains economic/external authority field")
+                    walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+
+        walk(raw)
+        return self
 
     @property
     def envelope_hash(self) -> str:
