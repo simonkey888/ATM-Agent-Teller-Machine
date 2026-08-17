@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tempfile
 import threading
 import unittest
@@ -83,6 +84,11 @@ class CloudMasterContractTests(unittest.TestCase):
         self.assertNotIn("windows-", workflow.lower())
         self.assertNotIn("self-hosted", workflow.lower())
         self.assertNotIn("larger", workflow.lower())
-        self.assertIn("cron: '*/5 * * * *'", workflow)
+        match = re.search(r"cron:\s*'([^']+)'", workflow)
+        self.assertIsNotNone(match)
+        minute_field = match.group(1).split()[0]
+        minute_values = [int(value) for value in minute_field.split(",")]
+        self.assertEqual(minute_values, list(range(3, 60, 5)))
+        self.assertNotIn(0, minute_values)
         self.assertIn("group: atm-economic-authority", workflow)
         self.assertIn("cancel-in-progress: false", workflow)
