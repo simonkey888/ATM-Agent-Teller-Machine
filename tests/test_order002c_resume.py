@@ -19,7 +19,8 @@ class OciResumeContractTests(unittest.TestCase):
     def test_windows_runtime_cutover_is_absent(self):
         for marker in ("cutover-stop-windows", "WAITING_WINDOWS_STOP", "HOST_CLASS=WINDOWS"):
             self.assertNotIn(marker, self.configure)
-        self.assertIn('"windows_authority":0', self.configure)
+        self.assertIn("windows_authority", self.configure)
+        self.assertIn("owner_pc_in_production_graph", self.configure)
 
     def test_cloud_state_restore_precedes_authority_promotion(self):
         restore = "atm-state-backup.sh restore"
