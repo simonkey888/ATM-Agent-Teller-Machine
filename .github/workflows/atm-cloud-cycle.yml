@@ -24,7 +24,7 @@ jobs:
       OCI_CONFIG_SECRET: ${{ secrets.OCI_CONFIG }}
       OCI_PRIVATE_KEY_PEM: ${{ secrets.OCI_PRIVATE_KEY_PEM }}
       ATM_REMOTE_BUNDLE: ${{ secrets.ATM_AGENT_TELLER_MACHINE }}
-      OCI_CLI_CONFIG_FILE: ${{ runner.temp }}/atm-oci/config
+      OCI_CLI_CONFIG_FILE: ${{ github.workspace }}/.oci-cloud/config
       OCI_CLI_PROFILE: ATM_REMOTE
       ATM_SOURCE_SHA: ${{ github.sha }}
       ATM_GITHUB_TOKEN: ${{ github.token }}
@@ -99,7 +99,6 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          GITHUB_ACTIONS: 'true'
           ATM_CLOUD_SLICE_SECONDS: '150'
           ATM_CLOUD_MAX_PHASES: '4'
         run: |
