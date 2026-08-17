@@ -2,7 +2,7 @@ name: ATM Cloudflare Deploy
 
 on:
   push:
-    branches: [agent/atm-v1]
+    branches: [main, agent/atm-v1]
   workflow_dispatch:
 
 permissions:
