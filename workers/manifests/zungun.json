@@ -39,5 +39,5 @@
   "submission_authority": false,
   "model_authority": false,
   "worker_class": "NETWORK_RELIABILITY_AND_OFFLINE_DELIVERY_SPECIALIST",
-  "worker_version": "1.0.0-order076+a325bc4"
+  "worker_version": "1.0.0-order076+219d088"
 }
