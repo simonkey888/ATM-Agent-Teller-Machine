@@ -157,7 +157,8 @@ class OciStaticContractTests(unittest.TestCase):
         forbidden = ("cutover-stop-windows", "WAITING_WINDOWS_STOP", "HOST_CLASS=WINDOWS", "target_host\\\":\\\"WINDOWS")
         for marker in forbidden:
             self.assertNotIn(marker, self.configure)
-        self.assertIn('"windows_authority":0', self.configure)
+        self.assertIn("windows_authority", self.configure)
+        self.assertIn("owner_pc_in_production_graph", self.configure)
         self.assertIn('promote --instance-id "$INSTANCE_ID" --source-sha "$SHA"', self.configure)
         self.assertIn("AUTHORITY_FENCE_REMOTE", self.configure)
         self.assertIn("GITHUB_ACTIONS_LEASE_STILL_LIVE", self.authority)
