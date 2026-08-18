@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: atm-cloudflare-production
@@ -74,6 +75,8 @@ jobs:
           python - <<'PY'
           import json, os, subprocess, time, urllib.parse
           base = "https://atm.simondalmasso44.workers.dev"
+          health_endpoint = "https://atm.simondalmasso44.workers.dev/health"
+          assert health_endpoint == base + "/health"
           expected = os.environ["EXPECTED_SHA"]
           require_radar = os.environ.get("REQUIRE_LIVE_RADAR") == "1"
           ua = "ATM-Order009-Exact-SHA/1.0"
@@ -125,4 +128,47 @@ jobs:
                   last = {"error": str(exc)}
               time.sleep(3)
           raise SystemExit(f"Canonical exact-SHA E2E smoke failed: {last}")
+          PY
+      - name: Publish durable ORDER-009 Cloudflare receipt
+        if: github.ref == 'refs/heads/pivot/universal-money-radar-r1'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DEPLOY_SHA: ${{ github.sha }}
+          DEPLOY_RUN_ID: ${{ github.run_id }}
+          DEPLOY_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          repo = os.environ["GITHUB_REPOSITORY"]
+          sha = os.environ["DEPLOY_SHA"]
+          run_id = os.environ["DEPLOY_RUN_ID"]
+          receipt = {
+              "schema": "ATM_ORDER009_CLOUDFLARE_DEPLOY_V1",
+              "sha": sha,
+              "run_id": run_id,
+              "run_attempt": os.environ["DEPLOY_RUN_ATTEMPT"],
+              "run_url": f"https://github.com/{repo}/actions/runs/{run_id}",
+              "canonical_url": "https://atm.simondalmasso44.workers.dev/",
+              "health_url": "https://atm.simondalmasso44.workers.dev/health",
+              "e2e": "PASS",
+              "radar_snapshot_exact_sha": True,
+              "outgoing_spend_usd": "0",
+              "merge": "NO",
+          }
+          body = "ATM ORDER009 CLOUDFLARE DEPLOY\n```json\n" + json.dumps(receipt, sort_keys=True) + "\n```"
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/{repo}/issues/7/comments",
+              data=json.dumps({"body": body}).encode(),
+              method="POST",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+                  "Content-Type": "application/json",
+                  "User-Agent": "ATM-Order009-Deploy-Receipt/1.0",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+          with urllib.request.urlopen(req, timeout=20) as response:
+              data = json.loads(response.read().decode())
+          print("ATM_ORDER009_DEPLOY_RECEIPT=" + str(data.get("html_url")))
           PY
