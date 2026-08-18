@@ -1,6 +1,6 @@
 {
   "worker_id": "zungun",
-  "source_sha": "aadb42dcd1e24e52221a1e1f6c0e1f380f5f1f41",
+  "source_sha": "2793b3e01f68b7fd0797a393486fb7db07fdeaf7",
   "task_entrypoint": "tools/atm-worker-entrypoint.mjs",
   "prepare_commands": [
     ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
