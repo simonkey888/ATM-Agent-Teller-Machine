@@ -24,6 +24,7 @@ class SuperteamAgentApi:
     """Exactly-one-agent boundary for the official Superteam Earn Agent API.
 
     apiKey and claimCode are write-only secrets: public methods never return them.
+    Payout claiming remains a human action even after an agent submission wins.
     """
 
     def __init__(self, http: JsonHttpClient | None = None, base_url: str = "https://superteam.fun"):
@@ -90,13 +91,16 @@ class SuperteamAgentApi:
         return data if isinstance(data, dict) else {"listings": data if isinstance(data, list) else []}
 
     def listing_details(self, slug: str) -> dict[str, Any]:
+        if not slug or "/" in slug or ".." in slug:
+            raise SuperteamAgentError("LISTING_SLUG_INVALID")
         data = self.http.get_json(
             f"{self.base_url}/api/agents/listings/details/{urllib.parse.quote(slug)}",
             headers=self._headers(), timeout=10,
         )
         if not isinstance(data, dict):
             raise SuperteamAgentError("LISTING_DETAILS_MALFORMED")
-        access = str(data.get("agentAccess") or (data.get("listing") or {}).get("agentAccess") or "").upper()
+        listing = data.get("listing") if isinstance(data.get("listing"), dict) else data
+        access = str(listing.get("agentAccess") or "").upper()
         if access and access not in {"AGENT_ALLOWED", "AGENT_ONLY"}:
             raise SuperteamAgentError("LISTING_NOT_AGENT_ELIGIBLE")
         return data
@@ -106,14 +110,20 @@ class SuperteamAgentApi:
         *,
         listing_id: str,
         link: str,
-        telegram: str,
+        telegram: str = "https://t.me/simonkey888",
         tweet: str = "",
         other_info: str = "",
         eligibility_answers: list[Any] | None = None,
-        ask: str = "",
+        ask: str | int | float | None = None,
     ) -> dict[str, Any]:
-        if not telegram.startswith("https://t.me/"):
+        if not listing_id:
+            raise SuperteamAgentError("LISTING_ID_REQUIRED")
+        if link and not link.startswith("https://"):
+            raise SuperteamAgentError("SUBMISSION_LINK_MUST_USE_HTTPS")
+        if not telegram.startswith(("https://t.me/", "http://t.me/")):
             raise SuperteamAgentError("PUBLIC_TELEGRAM_URL_REQUIRED")
+        if not link and not other_info.strip():
+            raise SuperteamAgentError("SUBMISSION_CONTENT_REQUIRED")
         data, _, _ = self.http.request_json(
             "POST", f"{self.base_url}/api/agents/submissions/create", headers=self._headers(),
             body={"listingId": listing_id, "link": link, "tweet": tweet, "otherInfo": other_info, "eligibilityAnswers": eligibility_answers or [], "ask": ask, "telegram": telegram},
@@ -122,22 +132,43 @@ class SuperteamAgentApi:
         return data if isinstance(data, dict) else {}
 
     def update_submission(self, payload: dict[str, Any]) -> dict[str, Any]:
-        data, _, _ = self.http.request_json("POST", f"{self.base_url}/api/agents/submissions/update", headers=self._headers(), body=payload, timeout=12)
+        body = dict(payload)
+        telegram = str(body.get("telegram") or "https://t.me/simonkey888")
+        if not telegram.startswith(("https://t.me/", "http://t.me/")):
+            raise SuperteamAgentError("PUBLIC_TELEGRAM_URL_REQUIRED")
+        body["telegram"] = telegram
+        data, _, _ = self.http.request_json("POST", f"{self.base_url}/api/agents/submissions/update", headers=self._headers(), body=body, timeout=12)
         return data if isinstance(data, dict) else {}
 
+    def comments(self, listing_id: str, *, skip: int = 0, take: int = 20) -> list[dict[str, Any]]:
+        data = self.http.get_json(
+            f"{self.base_url}/api/agents/comments/{urllib.parse.quote(listing_id)}?skip={max(0, int(skip))}&take={min(100, max(1, int(take)))}",
+            headers=self._headers(), timeout=10,
+        )
+        rows = (data.get("comments") or data.get("data")) if isinstance(data, dict) else data
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
     def create_comment(self, payload: dict[str, Any]) -> dict[str, Any]:
+        message = str(payload.get("message") or "")
+        if not message.strip() or len(message) > 4000:
+            raise SuperteamAgentError("COMMENT_OUTSIDE_BOUND")
         data, _, _ = self.http.request_json("POST", f"{self.base_url}/api/agents/comments/create", headers=self._headers(), body=payload, timeout=12)
         return data if isinstance(data, dict) else {}
 
-    def submission_status(self, submission_id: str) -> dict[str, Any]:
-        # Official agent API status endpoint may evolve; keep path explicit and fail closed on incompatibility.
-        data = self.http.get_json(
-            f"{self.base_url}/api/agents/submissions/{urllib.parse.quote(submission_id)}",
-            headers=self._headers(), timeout=10,
-        )
-        if not isinstance(data, dict):
-            raise SuperteamAgentError("SUBMISSION_STATUS_MALFORMED")
-        return data
+    def monitor_listing(self, slug: str) -> dict[str, Any]:
+        """Read-only result monitor using the documented listing-details endpoint."""
+        raw = self.listing_details(slug)
+        listing = raw.get("listing") if isinstance(raw.get("listing"), dict) else raw
+        submission = raw.get("submission") if isinstance(raw.get("submission"), dict) else {}
+        status = str(submission.get("status") or "").upper()
+        return {
+            "listing_id": listing.get("id"),
+            "slug": listing.get("slug") or slug,
+            "listing_status": listing.get("status"),
+            "submission_status": status or None,
+            "is_winner": bool(submission.get("isWinner") or submission.get("is_winner") or status in {"WINNER", "ACCEPTED"}),
+            "human_claim_required": True,
+        }
 
     def winner_human_gate(self) -> dict[str, str]:
         _, agent_id, _, _ = self._credential_tuple()
