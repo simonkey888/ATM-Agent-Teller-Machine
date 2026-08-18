@@ -201,6 +201,27 @@ def _gemma_generate(api_key: str, model: str, prompt: str, *, max_tokens: int = 
     return text
 
 
+def _parse_json_object(text: str) -> dict[str, Any]:
+    """Parse one bounded JSON object without treating prose as a pass signal."""
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    candidates = [cleaned]
+    first = cleaned.find("{")
+    last = cleaned.rfind("}")
+    if first >= 0 and last > first:
+        candidates.append(cleaned[first : last + 1])
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise RuntimeError("GEMMA_REVIEW_NOT_JSON")
+
+
 def _artifact_hash() -> str:
     paths = [
         ROOT / "deliverables/workprotocol_gha_log_parser/cli.py",
@@ -251,10 +272,12 @@ def probe_executor() -> dict[str, Any]:
         result["owner_action"] = "Replace GEMINI_API_KEY with a free Google AI Studio key that exposes Gemma 4."
         return result
 
-    # A successful generateContent call that returns a non-empty candidate is the
-    # live-inference proof. The old probe incorrectly required the model's prose
-    # to contain the literal token "OK", which can false-negative a valid route.
-    probe = _gemma_generate(api_key, model, "Respond briefly to confirm this inference request was processed.", max_tokens=32)
+    probe = _gemma_generate(
+        api_key,
+        model,
+        "Respond briefly to confirm this inference request was processed.",
+        max_tokens=32,
+    )
     result["live_inference_probe"] = bool(probe.strip())
     result["live_probe_response_sha256"] = hashlib.sha256(probe.encode()).hexdigest()
     result["live_probe_response_chars"] = len(probe)
@@ -269,22 +292,17 @@ Acceptance criteria:
 4 README install/usage/example.
 5 Public functions typed; pylint >=8.
 
-Inspect this completed candidate. Return JSON only:
-{{"verdict":"PASS"|"FAIL","missing":[short strings],"security":[short strings]}}
+Inspect this completed candidate. Return exactly one JSON object and no markdown:
+{{"verdict":"PASS"|"FAIL","missing":["short strings"],"security":["short strings"]}}
 README:
 {task_spec}
 SOURCE:
 {source}
 """
     review_text = _gemma_generate(api_key, model, prompt, max_tokens=384)
-    cleaned = review_text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
-    try:
-        review = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("GEMMA_REVIEW_NOT_JSON") from exc
+    result["shadow_review_response_sha256"] = hashlib.sha256(review_text.encode()).hexdigest()
+    result["shadow_review_response_chars"] = len(review_text)
+    review = _parse_json_object(review_text)
     result["shadow_review"] = review
     result["status"] = "PASS" if str(review.get("verdict") or "").upper() == "PASS" else "FAIL"
     return result
