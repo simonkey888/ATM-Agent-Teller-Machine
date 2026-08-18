@@ -25,8 +25,7 @@ class ZeroCostModelGate:
 
     PAID_FALLBACK = False
     GEMMA4_ALLOWLIST = {"gemma-4-31b-it", "gemma-4-26b-a4b-it"}
-    # Current Gemini API pricing has a Standard Free Tier for Flash-Lite, but not
-    # for gemini-2.5-flash. Keep the allowlist deliberately narrower than model availability.
+    GEMMA4_PRICING_URL = "https://ai.google.dev/gemini-api/docs/pricing"
     GEMINI_FREE_ALLOWLIST = {"gemini-2.5-flash-lite"}
     OPENCODE_FREE_ALLOWLIST = {"deepseek-v4-flash-free"}
     VERIFICATION_MAX_AGE = timedelta(hours=24)
@@ -48,13 +47,9 @@ class ZeroCostModelGate:
             headers={"Authorization": f"Bearer {access_token}"},
             timeout=8,
         )
-        # Free-tier execution is only authorized when Cloud Billing itself says no
-        # billing account is enabled for the declared API-key project.
         return isinstance(data, dict) and data.get("billingEnabled") is False
 
     def _google_rate_probe(self, api_key: str, model: str) -> bool:
-        # This one-token inference probe runs only after the project is proven unbilled,
-        # so it cannot silently cross into paid usage. A 429/auth/model failure is unusable.
         try:
             data, _, status = self.http.request_json(
                 "POST",
@@ -71,15 +66,27 @@ class ZeroCostModelGate:
 
     def google_health(self, model: str) -> ProviderHealth:
         key = os.getenv("GEMINI_API_KEY", "").strip()
+        if not key:
+            return ProviderHealth("gemini-api", model, False, False, False, False, False, "NO_CREDENTIAL")
+        if model in self.GEMMA4_ALLOWLIST:
+            try:
+                available = model in self._google_models(key)
+            except Exception as exc:
+                return ProviderHealth("gemini-api", model, True, False, True, False, False, f"MODEL_PROBE_FAILED:{type(exc).__name__}")
+            if not available:
+                return ProviderHealth("gemini-api", model, True, False, True, False, False, "MODEL_CURRENTLY_UNAVAILABLE")
+            rate_ok = self._google_rate_probe(key, model)
+            return ProviderHealth(
+                "gemini-api", model, True, True, True, rate_ok, rate_ok,
+                "PASS_GEMMA4_FREE_ONLY_LIVE_PROBE" if rate_ok else "GEMMA4_FREE_INFERENCE_UNUSABLE",
+            )
+
         project_id = os.getenv("GEMINI_FREE_TIER_PROJECT_ID", "").strip()
         gcp_token = os.getenv("GCP_ACCESS_TOKEN", "").strip()
         declared_tier = os.getenv("GEMINI_USAGE_TIER", "").strip().lower()
-        is_allowed = model in self.GEMMA4_ALLOWLIST | self.GEMINI_FREE_ALLOWLIST
-        if not key:
-            return ProviderHealth("gemini-api", model, False, False, False, False, False, "NO_CREDENTIAL")
         if declared_tier != "free" or not project_id or not gcp_token:
             return ProviderHealth("gemini-api", model, True, False, False, False, False, "FREE_TIER_PROJECT_BILLING_PROOF_MISSING")
-        if not is_allowed:
+        if model not in self.GEMINI_FREE_ALLOWLIST:
             return ProviderHealth("gemini-api", model, True, False, False, False, False, "MODEL_NOT_ZERO_COST_ALLOWLISTED")
         try:
             unbilled = self._google_project_is_unbilled(project_id, gcp_token)

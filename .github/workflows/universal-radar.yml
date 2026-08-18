@@ -37,6 +37,7 @@ jobs:
         run: |
           python -m unittest discover -s tests -p 'test_*radar.py' -v
           python -m unittest discover -s tests -p 'test_superteam_agent.py' -v
+          python -m unittest discover -s tests -p 'test_order009_r1_*.py' -v
       - name: Worker syntax
         run: node --check worker/src/index.js
       - name: Zero-spend static contract
@@ -60,6 +61,106 @@ jobs:
         env:
           PYTHONPATH: src
         run: timeout 120s python scripts/universal-radar-probe.py
+
+  order009-r1-shadow:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/pivot/universal-money-radar-r1'
+    needs: radar-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - name: Install project and pylint
+        run: |
+          python -m pip install --disable-pip-version-check -e .
+          python -m pip install --disable-pip-version-check "pylint>=3,<5"
+      - name: WorkProtocol deliverable unit tests
+        env:
+          PYTHONPATH: src:.
+        run: python -m unittest tests.test_order009_r1_deliverable -v
+      - name: WorkProtocol deliverable pylint threshold
+        env:
+          PYTHONPATH: src:.
+        run: python -m pylint deliverables/workprotocol_gha_log_parser/cli.py --fail-under=8.0
+      - name: Independent falsifier and representative JSON
+        env:
+          PYTHONPATH: src:.
+        run: python scripts/order009-r1-check.py
+      - name: Fresh WorkProtocol + zero-cost Gemma 4 shadow
+        env:
+          PYTHONPATH: src:.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI_API_KEY }}
+        run: python scripts/order009-r1-shadow.py
+      - name: Publish sanitized R1 evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          from pathlib import Path
+
+          evidence = json.loads(Path("order009-r1-shadow-evidence.json").read_text())
+          check = json.loads(Path("order009-r1-check-evidence.json").read_text())
+          wp = evidence["workprotocol"]
+          executor = evidence["executor"]
+          safe = {
+              "schema": "ATM_ORDER009_R1_EVIDENCE_V1",
+              "head": evidence["head"],
+              "workprotocol_job": evidence["workprotocol_job"],
+              "job_live_verified": all(wp["checks"].values()),
+              "escrow_75_usdc": wp["checks"]["escrow_75_usdc"],
+              "active_slot_available": wp["checks"]["active_slot_available"],
+              "workprotocol_open_total": wp["open_total"],
+              "workprotocol_source_payload_sha256": wp["source_payload_sha256"],
+              "workprotocol_etag": wp["etag"],
+              "escrow_tx": wp["escrow_tx"],
+              "claims_total": wp["claims_total"],
+              "rejected_claims": len(wp["rejected_claims"]),
+              "executor_provider": executor["provider"],
+              "credential_present": executor["credential_present"],
+              "model": executor["model"],
+              "model_currently_available": executor["model_currently_available"],
+              "zero_cost_currently_proven": executor["zero_cost_currently_proven"],
+              "live_inference_probe": executor["live_inference_probe"],
+              "paid_fallback": executor["paid_fallback"],
+              "executor_status": executor["status"],
+              "owner_action": executor.get("owner_action"),
+              "shadow_artifact_sha256": evidence["artifact_sha256"],
+              "independent_check": "PASS",
+              "representative_json_sha256": check["representative_json_sha256"],
+              "terminal": evidence["terminal"],
+              "claim_performed": False,
+              "submission_performed": False,
+              "merge": False,
+              "outgoing_spend_usd": "0",
+              "realized_withdrawable_usd": "0",
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }
+          body = "ORDER-009-R1 SHADOW EVIDENCE\n```json\n" + json.dumps(safe, sort_keys=True) + "\n```"
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/issues/38/comments",
+              data=json.dumps({"body": body}).encode(),
+              method="POST",
+              headers={
+                  "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+                  "Accept": "application/vnd.github+json",
+                  "Content-Type": "application/json",
+                  "User-Agent": "ATM-Order009-R1/1.0",
+              },
+          )
+          with urllib.request.urlopen(request, timeout=20) as response:
+              posted = json.loads(response.read().decode())
+          print("ORDER009_R1_EVIDENCE_COMMENT=" + str(posted.get("html_url")))
+          print("ORDER009_R1_TERMINAL=" + safe["terminal"])
+          PY
 
   publish-live-radar:
     if: github.event_name == 'push' && github.ref == 'refs/heads/pivot/universal-money-radar-r1'

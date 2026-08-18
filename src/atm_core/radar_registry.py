@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from .order009_r1_sources import SuperteamR1Source, WorkProtocolR1Source
 from .order009_sources import _contract, _trash, order009_sources
 from .p1_radar_sources import AlgoraSource, ClawEarnSource, ZeroXWorkSource
 from .radar_sources import (
@@ -12,8 +13,6 @@ from .radar_sources import (
     MoltJobsSource,
     NearAgentMarketSource,
     OpireSource,
-    SuperteamEarnSource,
-    WorkProtocolRadarSource,
 )
 from .universal_radar import AgentPolicy, RadarRegistry, UniversalOpportunity
 
@@ -43,8 +42,8 @@ def build_canonical_registry(http: JsonHttpClient | None = None) -> RadarRegistr
     """Single ORDER-009 registry; adding a source never forks the ATM state machine."""
     shared = http or JsonHttpClient()
     concrete = [
-        SuperteamEarnSource(shared),
-        WorkProtocolRadarSource(shared),
+        SuperteamR1Source(shared),
+        WorkProtocolR1Source(shared),
         *order009_sources(shared),
         OpireSource(),
         GitHubDirectBountySource(shared),
