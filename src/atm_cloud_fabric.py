@@ -12,7 +12,7 @@ from atm_core.execution_router import UniversalExecutionRouter, legacy_to_univer
 from atm_core.funding_gate import install_workprotocol_chain_funding_gate
 from atm_core.models import Phase
 from atm_core.opportunities import external_state_hash
-from atm_core.radar_sources import build_default_registry
+from atm_core.radar_registry import build_canonical_registry
 from atm_core.swarm_runtime import current_pass_swarm_shadow
 from atm_core.universal_radar import RadarDisposition, UniversalRadar, load_snapshot, persist_snapshot
 
@@ -88,7 +88,7 @@ def _universal_swarm_shadow(config, adapters, board):
     except Exception:
         floor = Decimal("5")
     try:
-        snapshot = UniversalRadar(build_default_registry(), floor_usd=max(Decimal("5"), floor), per_source_timeout=10).scan()
+        snapshot = UniversalRadar(build_canonical_registry(), floor_usd=max(Decimal("5"), floor), per_source_timeout=10).scan()
         persist_snapshot(snapshot, RADAR_SNAPSHOT)
         for item in snapshot.opportunities:
             payload = {
