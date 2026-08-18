@@ -50,6 +50,10 @@ jobs:
         env:
           PYTHONPATH: src
         run: python -m unittest tests.test_order006_worker_integration -v
+      - name: Bounded Across bridge diagnostic
+        env:
+          PYTHONPATH: src
+        run: python scripts/diagnose-order006-across.py
       - name: ORDER-006 accepted worker native integration
         env:
           PYTHONPATH: src
