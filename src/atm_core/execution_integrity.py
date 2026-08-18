@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .actuator import ActuatorProfile, CheckoutSubprocessActuator
 from .execution_jobs import ExecutionJob, ExecutionJobStore, ExecutionStatus, TERMINAL_STATUSES, utcnow_iso
+from .worker_integration_checker import check_registered_worker_material
 from .workers import WorkerJobSpec, WorkerManifest, WorkLease, canonical_hash, canonical_json
 
 
@@ -210,11 +211,35 @@ class ProductionExecutionIntegrity:
         spec: WorkerJobSpec,
         acceptance: dict[str, Any],
         task_result: dict[str, Any],
+        lease: WorkLease,
+        worker_id: str,
+        source_sha: str,
     ) -> tuple[str, str, list[dict[str, Any]]]:
         results: list[dict[str, Any]] = []
         output = task_result.get("task_output")
         if not isinstance(output, dict):
             return "FAIL", "TASK_OUTPUT_MISSING", results
+
+        if spec.task_type in {"zungun_reliability_audit_v1", "across_readonly_unsigned_tx_v1"}:
+            try:
+                specialist = check_registered_worker_material(worker_id, task_result, spec, lease, source_sha)
+            except ValueError:
+                return "FAIL", "UNSUPPORTED_MATERIAL_ACCEPTANCE_TASK", results
+            results.extend(dict(row) for row in specialist.predicates)
+            if specialist.verdict != "PASS":
+                return "FAIL", "REGISTERED_WORKER_MATERIAL_CHECKER_FAILED", results
+            frozen = acceptance.get("deterministic_checks")
+            if not isinstance(frozen, list) or not frozen:
+                return "FAIL", "NO_ATM_MATERIAL_ACCEPTANCE_PREDICATE", results
+            if list(frozen) != list(spec.deterministic_checks):
+                return "FAIL", "FROZEN_ACCEPTANCE_PREDICATE_FAILED", results
+            results.append({
+                "predicate": "ATM_TYPED_WORKER_CHECKER_REGISTRY",
+                "expected": f"{worker_id}:{spec.task_type}",
+                "actual": f"{worker_id}:{spec.task_type}",
+                "passed": True,
+            })
+            return "PASS", "ATM_REGISTERED_WORKER_MATERIAL_CHECKER_PASS", results
 
         if spec.task_type != "deterministic_digest_v1":
             return "FAIL", "UNSUPPORTED_MATERIAL_ACCEPTANCE_TASK", results
@@ -378,7 +403,14 @@ class ProductionExecutionIntegrity:
         task_result, task_result_hash, checker_workspace_id = self._rehydrate_task_result(
             artifact, job, spec, lease
         )
-        verdict, reason, predicate_results = self._evaluate_acceptance(spec, acceptance, task_result)
+        verdict, reason, predicate_results = self._evaluate_acceptance(
+            spec,
+            acceptance,
+            task_result,
+            lease,
+            manifest.worker_id,
+            profile.source_sha,
+        )
 
         existing = self.checker_receipt(job.execution_job_id)
         if existing is not None:
