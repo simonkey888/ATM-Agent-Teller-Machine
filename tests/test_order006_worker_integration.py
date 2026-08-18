@@ -27,10 +27,10 @@ class Order006WorkerIntegrationTests(unittest.TestCase):
         zungun = self.integrations.get("zungun"); across = self.integrations.get("across-edge")
         self.assertTrue(zungun.registered); self.assertFalse(zungun.active)
         self.assertEqual(zungun.source_pin_ancestor, "c95002f94d5c5316e83bfca7215cf1d591a62739")
-        self.assertEqual(zungun.source_pin, "2793b3e01f68b7fd0797a393486fb7db07fdeaf7")
+        self.assertEqual(zungun.source_pin, "f3f59767cbc5f10b78d838b2ab8fbc28f9559a7b")
         self.assertTrue(across.registered); self.assertFalse(across.active)
         self.assertEqual(across.source_pin_ancestor, "f65e597a650bfaa5b09824b299811c8da713249e")
-        self.assertEqual(across.source_pin, "1f57f0a1604f4d75588599214768e26d7edf86a4")
+        self.assertEqual(across.source_pin, "0a757f83f1a51cc2c8d130a232ec217bc1cab178")
         for worker_id in ("zungun", "across-edge"):
             manifest = self.manifests.get(worker_id); record = self.integrations.get(worker_id)
             self.assertFalse(manifest.enabled); self.assertEqual(manifest.max_concurrency, 1)
