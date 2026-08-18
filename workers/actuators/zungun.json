@@ -1,9 +1,10 @@
 {
   "worker_id": "zungun",
-  "source_sha": "a63f78e0a065329b09965e7aa1367a7071c8b4f6",
+  "source_sha": "aadb42dcd1e24e52221a1e1f6c0e1f380f5f1f41",
   "task_entrypoint": "tools/atm-worker-entrypoint.mjs",
   "prepare_commands": [
-    ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"]
+    ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+    ["npm", "run", "build"]
   ],
   "execute_commands": [
     ["npm", "run", "test:link-blackout"]
