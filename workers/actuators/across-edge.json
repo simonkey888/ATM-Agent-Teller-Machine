@@ -1,6 +1,6 @@
 {
   "worker_id": "across-edge",
-  "source_sha": "0a757f83f1a51cc2c8d130a232ec217bc1cab178",
+  "source_sha": "1990694cb1027331f4700e95d739550beff0c539",
   "task_entrypoint": "tools/atm-worker-entrypoint.mjs",
   "prepare_commands": [
     ["python", "-m", "pip", "install", "--disable-pip-version-check", "--no-deps", "-e", "."]
