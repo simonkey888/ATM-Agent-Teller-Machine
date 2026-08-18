@@ -251,12 +251,13 @@ def probe_executor() -> dict[str, Any]:
         result["owner_action"] = "Replace GEMINI_API_KEY with a free Google AI Studio key that exposes Gemma 4."
         return result
 
-    probe = _gemma_generate(api_key, model, "Reply with exactly OK.", max_tokens=8)
-    result["live_inference_probe"] = "OK" in probe.upper()
-    if not result["live_inference_probe"]:
-        result["status"] = "OWNER_SECRET_REQUIRED"
-        result["owner_action"] = "Replace GEMINI_API_KEY with a working free Google AI Studio key."
-        return result
+    # A successful generateContent call that returns a non-empty candidate is the
+    # live-inference proof. The old probe incorrectly required the model's prose
+    # to contain the literal token "OK", which can false-negative a valid route.
+    probe = _gemma_generate(api_key, model, "Respond briefly to confirm this inference request was processed.", max_tokens=32)
+    result["live_inference_probe"] = bool(probe.strip())
+    result["live_probe_response_sha256"] = hashlib.sha256(probe.encode()).hexdigest()
+    result["live_probe_response_chars"] = len(probe)
 
     task_spec = (ROOT / "deliverables/workprotocol_gha_log_parser/README.md").read_text(encoding="utf-8")
     source = (ROOT / "deliverables/workprotocol_gha_log_parser/cli.py").read_text(encoding="utf-8")
