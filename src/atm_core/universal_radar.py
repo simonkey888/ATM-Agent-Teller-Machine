@@ -245,12 +245,11 @@ def route_executor(opportunity: UniversalOpportunity) -> ExecutorClass:
         return ExecutorClass.UNSUPPORTED
     if any(term in tokens for term in ("physical", "irl", "phone call", "video call", "on-site", "onsite")):
         return ExecutorClass.UNSUPPORTED
+    # Specific task semantics beat generic category tokens such as "code" or "repository".
     if any(term in tokens for term in ("test fix", "failing test", "pytest", "unit test", "regression")):
         return ExecutorClass.TEST_FIX
     if any(term in tokens for term in ("api integration", "webhook", "rest api", "graphql", "sdk")):
         return ExecutorClass.API_INTEGRATION
-    if any(term in tokens for term in ("github", "pull request", "patch", "bug fix", "code", "repository")):
-        return ExecutorClass.GITHUB_BOUNDED_PATCH
     if any(term in tokens for term in ("documentation", "docs", "readme")):
         return ExecutorClass.DOCS
     if any(term in tokens for term in ("extract", "scrape", "csv", "dataset", "data collection")):
@@ -261,7 +260,11 @@ def route_executor(opportunity: UniversalOpportunity) -> ExecutorClass:
         return ExecutorClass.CONTENT_GENERATION
     if any(term in tokens for term in ("qa", "verify", "validation", "browser test")):
         return ExecutorClass.LIGHT_QA
-    if any(term in tokens for term in ("build", "compile", "large repo")):
+    if any(term in tokens for term in ("heavy build", "build large", "large repo", "compile artifact")):
+        return ExecutorClass.HEAVY_BUILD
+    if any(term in tokens for term in ("github", "pull request", "patch", "bug fix", "code", "repository")):
+        return ExecutorClass.GITHUB_BOUNDED_PATCH
+    if any(term in tokens for term in ("build", "compile")):
         return ExecutorClass.HEAVY_BUILD
     return ExecutorClass.UNSUPPORTED
 
