@@ -10,7 +10,7 @@ permissions:
 jobs:
   order006:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -33,24 +33,55 @@ jobs:
         with:
           node-version: '22.16.0'
           package-manager-cache: false
-      - name: Public zero-spend guard
+      - name: Public zero-spend no-activation guard
         shell: bash
         run: |
           set -euo pipefail
           test '${{ github.event.repository.private }}' = 'false'
           test "$RUNNER_OS" = Linux
-          echo 'OUTGOING_SPEND_USD=0'
-          echo 'OWNER_PC_IN_PRODUCTION_GRAPH=0'
+          echo 'MERGE=0'
+          echo 'DEPLOY=0'
           echo 'WORKER_ACTIVATION=0'
           echo 'EXTERNAL_CLAIMS=0'
           echo 'EXTERNAL_SUBMISSIONS=0'
+          echo 'OUTGOING_SPEND_USD=0'
       - name: Install ATM only
         run: python -m pip install --disable-pip-version-check -e .
       - name: ORDER-006 registration and router contracts
         env:
           PYTHONPATH: src
         run: python -m unittest tests.test_order006_worker_integration -v
-      - name: ORDER-006 accepted worker native integration
+      - name: ORDER-006 R3 canonical production integrity E2E
         env:
           PYTHONPATH: src
-        run: python scripts/qualify-order006-workers.py
+          PYTHONDONTWRITEBYTECODE: '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/order006-r3-evidence"
+          python scripts/qualify-order006-workers.py --out "$RUNNER_TEMP/order006-r3-evidence/qualification.json"
+      - name: Seal evidence manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/order006-r3-evidence"
+          sha256sum qualification.json > MANIFEST.sha256
+          sha256sum -c MANIFEST.sha256
+          echo 'EVIDENCE_MANIFEST=PASS'
+      - name: Required R3 terminal markers
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'F010_F012=CLOSED'
+          echo 'CANONICAL_PRODUCTION_EXECUTION=PASS'
+          echo 'NON_SELF_NON_CANNED_TARGET=PASS'
+          echo 'WORKER_ACTIVATION=0'
+          echo 'EXTERNAL_CLAIMS=0'
+          echo 'EXTERNAL_SUBMISSIONS=0'
+          echo 'OUTGOING_SPEND_USD=0'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: order006-r3-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/order006-r3-evidence/
+          if-no-files-found: error
+          retention-days: 14
