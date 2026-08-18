@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,14 +15,43 @@ from unittest.mock import patch
 import atm_fabric
 import atm_core.actuator as actuator_module
 import atm_core.execution_integrity as execution_integrity_module
-from atm_core.actuator import ActuatorProfile, CheckoutSubprocessActuator, CommandReceipt
+from atm_core.actuator import ActuatorProfile, CheckoutSubprocessActuator
 from atm_core.execution_integrity import ProductionExecutionIntegrity, RecoveryOutcome, lease_is_executable
 from atm_core.execution_jobs import ExecutionAck, ExecutionJobStore, ExecutionStatus, ProgressReceipt, utcnow_iso
 from atm_core.models import Opportunity, Phase, RuntimeState
 from atm_core.workers import WorkerJobSpec, WorkerManifest, WorkerRegistry, WorkLease, WorkLeaseStore, canonical_hash, canonical_json
 
 
+ROOT = Path(__file__).resolve().parents[1]
 SOURCE = "1" * 40
+ENTRYPOINT_REL = "tools/atm-worker-entrypoint.mjs"
+ENTRYPOINT_SCRIPT = r"""#!/usr/bin/env node
+import { createHash } from 'node:crypto';
+import { closeSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+const req = (name) => { const value = String(process.env[name] || '').trim(); if (!value) throw new Error(`${name}_REQUIRED`); return value; };
+const sha = (value) => createHash('sha256').update(value).digest('hex');
+const specPath = req('ATM_JOB_SPEC_PATH');
+const resultPath = req('ATM_TASK_RESULT_PATH');
+const specHash = req('ATM_JOB_SPEC_HASH');
+const raw = readFileSync(specPath);
+if (sha(raw) !== specHash) throw new Error('MATERIALIZED_JOB_SPEC_HASH_MISMATCH');
+const spec = JSON.parse(raw.toString('utf8'));
+if (spec.task_type !== 'deterministic_digest_v1' || typeof spec.repository_or_input !== 'string') throw new Error('UNSUPPORTED_TASK');
+const input = Buffer.from(spec.repository_or_input, 'utf8');
+const result = {
+  schema: 'ATM_TASK_RESULT_V1',
+  execution_job_id: req('ATM_EXECUTION_JOB_ID'),
+  work_lease_id: req('ATM_WORK_LEASE_ID'),
+  scope_hash: req('ATM_SCOPE_HASH'),
+  job_spec_hash: specHash,
+  task_type: spec.task_type,
+  producer: { worker_source_sha: req('ATM_WORKER_SOURCE_SHA'), worker_entrypoint: 'tools/atm-worker-entrypoint.mjs' },
+  task_output: { kind: 'SHA256_UTF8_INPUT_V1', sha256: sha(input), byte_length: input.length },
+  outgoing_spend_usd: 0
+};
+const fd = openSync(resultPath, 'wx', 0o600);
+try { writeFileSync(fd, JSON.stringify(result), 'utf8'); } finally { closeSync(fd); }
+"""
 
 
 class Order005ExecutionIntegrityTests(unittest.TestCase):
@@ -39,10 +71,11 @@ class Order005ExecutionIntegrityTests(unittest.TestCase):
             financial_authority=False,
         )
 
-    def _profile(self) -> ActuatorProfile:
+    def _profile(self, source_sha: str = SOURCE) -> ActuatorProfile:
         return ActuatorProfile(
             worker_id="fixture-worker",
-            source_sha=SOURCE,
+            source_sha=source_sha,
+            task_entrypoint=ENTRYPOINT_REL,
             execute_commands=[[sys.executable, "-c", "print('supporting-worker-check')"]],
             checker_commands=[[sys.executable, "-c", "print('worker-self-check')"]],
         )
@@ -81,6 +114,35 @@ class Order005ExecutionIntegrityTests(unittest.TestCase):
             heartbeat_at=now,
             terminal_state=None,
         )
+
+    @staticmethod
+    def _make_pinned_worker_source(root: Path) -> tuple[Path, str]:
+        source = root / "pinned-worker-source"
+        (source / "tools").mkdir(parents=True)
+        (source / ENTRYPOINT_REL).write_text(ENTRYPOINT_SCRIPT, encoding="utf-8")
+        (source / "support.txt").write_text("supporting worker bytes\n", encoding="utf-8")
+        commands = (
+            ["git", "init"],
+            ["git", "config", "user.email", "fixture@example.invalid"],
+            ["git", "config", "user.name", "ORDER005 Fixture"],
+            ["git", "add", ENTRYPOINT_REL, "support.txt"],
+            ["git", "commit", "-m", "fixture pinned worker source"],
+        )
+        for command in commands:
+            completed = subprocess.run(command, cwd=source, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            if completed.returncode != 0:
+                raise RuntimeError(f"fixture git command failed: {command}")
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+        return source, sha
+
+    @staticmethod
+    def _copy_checkout(source: Path, *, remove_entrypoint: bool = False):
+        def apply(self_obj, manifest, profile, checkout, env):
+            del self_obj, manifest, profile, env
+            shutil.copytree(source, checkout)
+            if remove_entrypoint:
+                (checkout / ENTRYPOINT_REL).unlink()
+        return apply
 
     @staticmethod
     def _task_result(job, spec, lease, *, wrong: bool = False) -> dict[str, object]:
@@ -210,25 +272,31 @@ class Order005ExecutionIntegrityTests(unittest.TestCase):
                         self.assertEqual(job.status, ExecutionStatus.EXPIRED)
                 store.close()
 
-    def test_real_actuator_consumes_materialized_frozen_job_and_result_is_task_specific(self):
-        manifest, profile = self._manifest(), self._profile()
+    def test_real_actuator_uses_tracked_pinned_worker_entrypoint_for_two_frozen_specs(self):
+        manifest = self._manifest()
         outputs = []
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            source, source_sha = self._make_pinned_worker_source(root)
+            profile = self._profile(source_sha)
             for index, frozen_input in enumerate(("alpha-frozen-job", "beta-frozen-job")):
                 spec = self._spec(frozen_input)
                 lease = self._lease(spec, lease_id=f"lease-{index}")
                 store = ExecutionJobStore(root / f"execution-{index}.sqlite3")
                 integrity = ProductionExecutionIntegrity(store, root / "work", root / "artifacts")
-                with (
-                    patch.object(CheckoutSubprocessActuator, "_checkout", autospec=True, side_effect=lambda self_obj, m, p, checkout, env: checkout.mkdir(parents=True, exist_ok=True)),
-                    patch.object(CheckoutSubprocessActuator, "_git_head", return_value=SOURCE),
-                ):
+                with patch.object(CheckoutSubprocessActuator, "_checkout", autospec=True, side_effect=self._copy_checkout(source)):
                     job, outcome = integrity.execute(spec, lease, manifest, profile)
                 self.assertEqual(job.status, ExecutionStatus.TERMINAL)
                 self.assertEqual(outcome, RecoveryOutcome.RECONCILE_RESULT)
                 artifact = json.loads(integrity.artifact_path(job.execution_job_id).read_text(encoding="utf-8"))
+                provenance = artifact["task_entrypoint_provenance"]
                 task_result = artifact["task_result"]
+                self.assertEqual(provenance["path"], ENTRYPOINT_REL)
+                self.assertEqual(provenance["worker_source_sha"], source_sha)
+                self.assertRegex(provenance["git_blob_oid"], r"^[0-9a-f]{40}$")
+                self.assertRegex(provenance["sha256"], r"^[0-9a-f]{64}$")
+                self.assertEqual(task_result["producer"]["worker_source_sha"], source_sha)
+                self.assertEqual(task_result["producer"]["worker_entrypoint"], ENTRYPOINT_REL)
                 self.assertEqual(task_result["job_spec_hash"], job.job_spec_hash)
                 self.assertEqual(task_result["scope_hash"], spec.scope_hash)
                 self.assertEqual(task_result["task_output"]["sha256"], hashlib.sha256(frozen_input.encode()).hexdigest())
@@ -236,24 +304,38 @@ class Order005ExecutionIntegrityTests(unittest.TestCase):
                 store.close()
         self.assertNotEqual(outputs[0], outputs[1])
 
-    def test_worker_that_ignores_frozen_job_and_only_self_tests_cannot_succeed(self):
-        spec, manifest, profile = self._spec(), self._manifest(), self._profile()
+    def test_broken_worker_entrypoint_fails_even_when_supporting_and_self_tests_are_green(self):
+        spec, manifest = self._spec(), self._manifest()
         lease = self._lease(spec)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            source, source_sha = self._make_pinned_worker_source(root)
+            profile = self._profile(source_sha)
+            for command in (*profile.execute_commands, *profile.checker_commands):
+                completed = subprocess.run(command, cwd=source, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                self.assertEqual(completed.returncode, 0)
             store = ExecutionJobStore(root / "execution.sqlite3")
             integrity = ProductionExecutionIntegrity(store, root / "work", root / "artifacts")
-            fake_receipt = CommandReceipt(argv=["ignored-job"], returncode=0, stdout_sha256="a" * 64, stderr_sha256="b" * 64)
-            with (
-                patch.object(CheckoutSubprocessActuator, "_checkout", autospec=True, side_effect=lambda self_obj, m, p, checkout, env: checkout.mkdir(parents=True, exist_ok=True)),
-                patch.object(CheckoutSubprocessActuator, "_git_head", return_value=SOURCE),
-                patch.object(actuator_module, "_run_first_with_ack", return_value=fake_receipt),
+            with patch.object(
+                CheckoutSubprocessActuator,
+                "_checkout",
+                autospec=True,
+                side_effect=self._copy_checkout(source, remove_entrypoint=True),
             ):
-                job, _ = integrity.execute(spec, lease, manifest, profile)
+                job, outcome = integrity.execute(spec, lease, manifest, profile)
             self.assertEqual(job.status, ExecutionStatus.DISPATCH_FAILED)
             self.assertEqual(job.terminal_reason, "ValueError")
+            self.assertEqual(outcome, RecoveryOutcome.CANCEL)
             self.assertIsNone(integrity.checker_receipt(job.execution_job_id))
+            self.assertFalse((root / "artifacts" / "worker-io" / job.execution_job_id / "task-result.json").exists())
             store.close()
+
+    def test_atm_owned_task_helper_is_absent_and_not_execution_path(self):
+        self.assertFalse((ROOT / "src" / "atm_core" / "task_worker.py").exists())
+        dispatch_source = inspect.getsource(actuator_module.CheckoutSubprocessActuator.dispatch)
+        self.assertNotIn("task_worker.py", dispatch_source)
+        self.assertNotIn("sys.executable", dispatch_source)
+        self.assertIn('task_command = ["node", str(entrypoint_path)]', dispatch_source)
 
     def test_actual_production_phase_reaches_check_with_internal_task_artifact_and_never_submit(self):
         spec, manifest, profile = self._spec(), self._manifest(), self._profile()
