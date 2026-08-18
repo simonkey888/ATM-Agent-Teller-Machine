@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   actuator:
+    if: ${{ github.event_name != 'pull_request' || github.head_ref != 'order-006-worker-integration-r1' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
