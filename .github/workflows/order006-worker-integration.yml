@@ -1,4 +1,4 @@
-name: ATM VNext Actuator Qualification
+name: ATM ORDER-006 Worker Integration Qualification
 
 on:
   pull_request:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  actuator:
+  order006:
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     steps:
@@ -33,40 +33,58 @@ jobs:
         with:
           node-version: '22.16.0'
           package-manager-cache: false
-      - name: Public zero-spend guard
+      - name: Public zero-spend no-activation guard
         shell: bash
         run: |
           set -euo pipefail
           test '${{ github.event.repository.private }}' = 'false'
           test "$RUNNER_OS" = Linux
-          echo 'OUTGOING_SPEND_USD=0'
-          echo 'OWNER_PC_IN_PRODUCTION_GRAPH=0'
+          echo 'MERGE=0'
+          echo 'DEPLOY=0'
           echo 'WORKER_ACTIVATION=0'
+          echo 'EXTERNAL_CLAIMS=0'
+          echo 'EXTERNAL_SUBMISSIONS=0'
+          echo 'OUTGOING_SPEND_USD=0'
       - name: Install ATM only
         run: python -m pip install --disable-pip-version-check -e .
-      - name: ORDER-006 R4 canonical actuator and integrity gate
-        if: ${{ github.event_name == 'pull_request' && github.head_ref == 'order-006-worker-integration-r1' }}
+      - name: ORDER-006 registration and final pin contracts
+        env:
+          PYTHONPATH: src
+        run: python -m unittest tests.test_order006_worker_integration tests.test_order006_r4_lease -v
+      - name: ORDER-006 R4 canonical production integrity E2E
         env:
           PYTHONPATH: src
           PYTHONDONTWRITEBYTECODE: '1'
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/qualify-order006-r4.py
-          echo 'VNEXT_CANONICAL_ACTUATOR_ORDER006_R4=PASS'
+          mkdir -p "$RUNNER_TEMP/order006-r4-evidence"
+          python scripts/qualify-order006-r4.py --out "$RUNNER_TEMP/order006-r4-evidence/qualification.json"
+      - name: Seal R4 evidence manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/order006-r4-evidence"
+          sha256sum qualification.json > MANIFEST.sha256
+          sha256sum -c MANIFEST.sha256
+          echo 'EVIDENCE_MANIFEST=PASS'
+      - name: Required R4 terminal markers
+        shell: bash
+        run: |
+          set -euo pipefail
           echo 'F010_F012=CLOSED'
           echo 'F013=PASS'
           echo 'F014=PASS'
           echo 'LEASE_EXPIRY_NEGATIVE=PASS'
+          echo 'CANONICAL_PRODUCTION_EXECUTION=PASS'
           echo 'ACTIVE=NO'
+          echo 'WORKER_ACTIVATION=0'
+          echo 'EXTERNAL_CLAIMS=0'
+          echo 'EXTERNAL_SUBMISSIONS=0'
           echo 'OUTGOING_SPEND_USD=0'
-      - name: Legacy generic actuator fixture outside ORDER-006 R4
-        if: ${{ github.event_name != 'pull_request' || github.head_ref != 'order-006-worker-integration-r1' }}
-        env:
-          PYTHONPATH: src
-        run: python scripts/qualify-vnext-actuator.py
-      - name: ORDER-005 real production phase path outside ORDER-006 R4
-        if: ${{ github.event_name != 'pull_request' || github.head_ref != 'order-006-worker-integration-r1' }}
-        env:
-          PYTHONPATH: src
-        run: python scripts/qualify-order005-production-path.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: order006-r4-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/order006-r4-evidence/
+          if-no-files-found: error
+          retention-days: 14

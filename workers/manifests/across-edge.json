@@ -3,7 +3,6 @@
   "repo_url": "https://github.com/simonkey888/Across-Edge",
   "enabled": false,
   "capabilities": [
-    "model",
     "git",
     "github",
     "filesystem",
@@ -12,19 +11,30 @@
     "node",
     "web3_readonly",
     "evidence",
-    "protocol_verification"
+    "protocol_verification",
+    "event_log_decoding",
+    "chain_provenance",
+    "sdk_client_repair",
+    "unsigned_transaction_validation",
+    "relayer_reconciliation",
+    "fee_logic_verification"
   ],
   "execution_backend": "github_repository_worker",
   "entrypoint": "repository-contract",
   "max_concurrency": 1,
   "timeout_seconds": 1800,
-  "network_policy": "public-rpc-readonly-github-zero-spend",
+  "network_policy": "public-rpc-readonly-github-zero-spend-no-signing-no-broadcast",
   "expected_artifacts": [
-    "commit_sha",
     "test_results",
+    "chain_evidence_refs",
     "evidence_refs",
     "content_hashes"
   ],
   "cost_ceiling_usd": "0",
-  "financial_authority": false
+  "financial_authority": false,
+  "claim_authority": false,
+  "submission_authority": false,
+  "model_authority": false,
+  "worker_class": "WEB3_READONLY_PROTOCOL_INSPECTION_SPECIALIST",
+  "worker_version": "1.0.0-ready-f65e597+atm-1990694"
 }

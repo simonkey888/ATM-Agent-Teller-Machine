@@ -1,7 +1,7 @@
 {
   "worker_id": "boqa",
   "repo_url": "https://github.com/simonkey888/boqa",
-  "enabled": true,
+  "enabled": false,
   "capabilities": [
     "model",
     "git",

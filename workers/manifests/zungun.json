@@ -1,7 +1,7 @@
 {
   "worker_id": "zungun",
   "repo_url": "https://github.com/simonkey888/Zungun",
-  "enabled": true,
+  "enabled": false,
   "capabilities": [
     "git",
     "github",
@@ -39,5 +39,5 @@
   "submission_authority": false,
   "model_authority": false,
   "worker_class": "NETWORK_RELIABILITY_AND_OFFLINE_DELIVERY_SPECIALIST",
-  "worker_version": "1.0.0-order076+219d088"
+  "worker_version": "1.0.0-ready-c95002f+atm-7c407cc"
 }

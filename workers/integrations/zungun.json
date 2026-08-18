@@ -1,0 +1,12 @@
+{
+  "worker_id": "zungun",
+  "registered": true,
+  "active": false,
+  "source_pin": "7c407cc5e39ec0698a6763ea621eba5e87d832b8",
+  "source_pin_ancestor": "c95002f94d5c5316e83bfca7215cf1d591a62739",
+  "integration_audit_ref": "https://github.com/simonkey888/ATM-Agent-Teller-Machine/issues/31#issuecomment-5328444912",
+  "claim_authority": false,
+  "submission_authority": false,
+  "financial_authority": false,
+  "max_spend_usd": 0
+}

@@ -22,29 +22,24 @@ class ExecutionActuatorContractTests(unittest.TestCase):
     def _spec(self, worker_id="boqa"):
         profile = load_actuator_profile(PROFILES, worker_id)
         return WorkerJobSpec(
-            job_id=f"fixture-{worker_id}",
-            canonical_opportunity_id=f"fixture:{worker_id}",
-            external_source="fixture",
-            external_url="https://example.invalid/fixture",
-            task_type="fixture",
+            job_id=f"fixture-{worker_id}", canonical_opportunity_id=f"fixture:{worker_id}",
+            external_source="fixture", external_url="https://example.invalid/fixture", task_type="fixture",
             frozen_acceptance_criteria=["worker starts", "checker independently passes"],
-            repository_or_input=self.registry.get(worker_id).repo_url,
-            max_spend_usd=0,
+            repository_or_input=self.registry.get(worker_id).repo_url, max_spend_usd=0,
             required_capabilities=["git", "filesystem", "shell", "node", "evidence"],
-            target_base_sha=profile.source_sha,
-            allowed_paths=["test"],
+            target_base_sha=profile.source_sha, allowed_paths=["test"],
         )
 
     def test_profiles_are_pinned_zero_secret_workers(self):
         boqa = load_actuator_profile(PROFILES, "boqa")
         zungun = load_actuator_profile(PROFILES, "zungun")
         self.assertEqual(boqa.source_sha, "797dbf53e1cccf9521d3e2af9b8dc723fc7d1ca1")
-        self.assertEqual(zungun.source_sha, "a63f78e0a065329b09965e7aa1367a7071c8b4f6")
+        self.assertEqual(zungun.source_sha, "7c407cc5e39ec0698a6763ea621eba5e87d832b8")
         self.assertEqual(boqa.task_entrypoint, "tools/atm-worker-entrypoint.mjs")
         self.assertEqual(zungun.task_entrypoint, "tools/atm-worker-entrypoint.mjs")
         for worker_id in ("boqa", "zungun"):
             manifest = self.registry.get(worker_id)
-            self.assertTrue(manifest.enabled)
+            self.assertFalse(manifest.enabled)
             self.assertEqual(str(manifest.cost_ceiling_usd), "0")
             self.assertFalse(manifest.financial_authority)
             self.assertFalse(getattr(manifest, "claim_authority", False))
@@ -54,47 +49,26 @@ class ExecutionActuatorContractTests(unittest.TestCase):
     def test_execution_identity_persisted_before_dispatch_and_duplicate_collapses(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ExecutionJobStore(Path(directory) / "execution.sqlite3")
-            spec = self._spec()
-            source = load_actuator_profile(PROFILES, "boqa").source_sha
-            job = store.create_or_get(
-                opportunity_id=spec.canonical_opportunity_id,
-                worker_id="boqa",
-                worker_version_or_source_sha=source,
-                work_lease_id="lease-1",
-                scope_hash=spec.scope_hash,
-                job_spec_hash=canonical_hash(spec.model_dump(mode="json")),
-            )
+            spec = self._spec(); source = load_actuator_profile(PROFILES, "boqa").source_sha
+            job = store.create_or_get(opportunity_id=spec.canonical_opportunity_id, worker_id="boqa",
+                worker_version_or_source_sha=source, work_lease_id="lease-1", scope_hash=spec.scope_hash,
+                job_spec_hash=canonical_hash(spec.model_dump(mode="json")))
             first, launch = store.begin_dispatch(job.execution_job_id)
-            self.assertTrue(launch)
-            self.assertEqual(first.launch_count, 1)
+            self.assertTrue(launch); self.assertEqual(first.launch_count, 1)
             second, launch2 = store.begin_dispatch(job.execution_job_id)
-            self.assertFalse(launch2)
-            self.assertEqual(second.execution_job_id, first.execution_job_id)
-            self.assertEqual(second.launch_count, 1)
+            self.assertFalse(launch2); self.assertEqual(second.execution_job_id, first.execution_job_id); self.assertEqual(second.launch_count, 1)
             store.close()
 
     def test_ack_exact_binding_and_conflicting_duplicate_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ExecutionJobStore(Path(directory) / "execution.sqlite3")
-            spec = self._spec()
-            source = load_actuator_profile(PROFILES, "boqa").source_sha
-            job = store.create_or_get(
-                opportunity_id=spec.canonical_opportunity_id,
-                worker_id="boqa",
-                worker_version_or_source_sha=source,
-                work_lease_id="lease-1",
-                scope_hash=spec.scope_hash,
-                job_spec_hash=canonical_hash(spec.model_dump(mode="json")),
-            )
+            spec = self._spec(); source = load_actuator_profile(PROFILES, "boqa").source_sha
+            job = store.create_or_get(opportunity_id=spec.canonical_opportunity_id, worker_id="boqa",
+                worker_version_or_source_sha=source, work_lease_id="lease-1", scope_hash=spec.scope_hash,
+                job_spec_hash=canonical_hash(spec.model_dump(mode="json")))
             store.begin_dispatch(job.execution_job_id)
-            good = ExecutionAck(
-                execution_job_id=job.execution_job_id,
-                work_lease_id="lease-1",
-                scope_hash=spec.scope_hash,
-                worker_id="boqa",
-                source_sha=source,
-                acknowledged_at="2026-08-17T00:00:00+00:00",
-            )
+            good = ExecutionAck(execution_job_id=job.execution_job_id, work_lease_id="lease-1", scope_hash=spec.scope_hash,
+                worker_id="boqa", source_sha=source, acknowledged_at="2026-08-17T00:00:00+00:00")
             store.acknowledge(good)
             with self.assertRaisesRegex(ValueError, "binding mismatch"):
                 store.acknowledge(good.model_copy(update={"worker_id": "zungun"}))
@@ -103,66 +77,33 @@ class ExecutionActuatorContractTests(unittest.TestCase):
             store.close()
 
     def test_progress_receipt_hash_and_measurable_progress(self):
-        receipt = ProgressReceipt(
-            execution_job_id="exec-x",
-            checkpoint_seq=1,
-            objective_hash="a" * 64,
-            artifact_before_hash="b" * 64,
-            artifact_after_hash="c" * 64,
-            tests_run=["unit"],
-            new_evidence_refs=[],
-            blocker_class="NONE",
-            uncertainty_or_acceptance_delta="",
-            recommendation="CONTINUE",
-            created_at=utcnow_iso(),
-        )
-        self.assertTrue(receipt.measurable_progress)
-        self.assertRegex(receipt.receipt_hash, r"^[0-9a-f]{64}$")
-        no_progress = receipt.model_copy(update={"artifact_after_hash": "b" * 64})
-        self.assertFalse(no_progress.measurable_progress)
+        receipt = ProgressReceipt(execution_job_id="exec-x", checkpoint_seq=1, objective_hash="a" * 64,
+            artifact_before_hash="b" * 64, artifact_after_hash="c" * 64, tests_run=["unit"], new_evidence_refs=[],
+            blocker_class="NONE", uncertainty_or_acceptance_delta="", recommendation="CONTINUE", created_at=utcnow_iso())
+        self.assertTrue(receipt.measurable_progress); self.assertRegex(receipt.receipt_hash, r"^[0-9a-f]{64}$")
+        self.assertFalse(receipt.model_copy(update={"artifact_after_hash": "b" * 64}).measurable_progress)
 
     def test_worker_env_excludes_ambient_credentials(self):
         old = dict(os.environ)
         try:
-            os.environ["GITHUB_TOKEN"] = "secret"
-            os.environ["OCI_PRIVATE_KEY_PEM"] = "secret"
-            os.environ["ATM_REMOTE_BUNDLE"] = "secret"
+            os.environ["GITHUB_TOKEN"] = "secret"; os.environ["OCI_PRIVATE_KEY_PEM"] = "secret"; os.environ["ATM_REMOTE_BUNDLE"] = "secret"
             with tempfile.TemporaryDirectory() as directory:
                 store = ExecutionJobStore(Path(directory) / "execution.sqlite3")
-                spec = self._spec()
-                source = load_actuator_profile(PROFILES, "boqa").source_sha
-                job = store.create_or_get(
-                    opportunity_id=spec.canonical_opportunity_id,
-                    worker_id="boqa",
-                    worker_version_or_source_sha=source,
-                    work_lease_id="lease-1",
-                    scope_hash=spec.scope_hash,
-                    job_spec_hash=canonical_hash(spec.model_dump(mode="json")),
-                )
+                spec = self._spec(); source = load_actuator_profile(PROFILES, "boqa").source_sha
+                job = store.create_or_get(opportunity_id=spec.canonical_opportunity_id, worker_id="boqa",
+                    worker_version_or_source_sha=source, work_lease_id="lease-1", scope_hash=spec.scope_hash,
+                    job_spec_hash=canonical_hash(spec.model_dump(mode="json")))
                 env = safe_worker_env(Path(directory) / "home", job)
-                self.assertNotIn("GITHUB_TOKEN", env)
-                self.assertNotIn("OCI_PRIVATE_KEY_PEM", env)
-                self.assertNotIn("ATM_REMOTE_BUNDLE", env)
-                self.assertEqual(env["ATM_MAX_SPEND_USD"], "0")
-                store.close()
+                self.assertNotIn("GITHUB_TOKEN", env); self.assertNotIn("OCI_PRIVATE_KEY_PEM", env); self.assertNotIn("ATM_REMOTE_BUNDLE", env)
+                self.assertEqual(env["ATM_MAX_SPEND_USD"], "0"); store.close()
         finally:
             os.environ.clear(); os.environ.update(old)
 
     def test_terminal_or_mismatched_lease_cannot_execute(self):
-        spec = self._spec()
-        manifest = self.registry.get("boqa")
-        profile = load_actuator_profile(PROFILES, "boqa")
+        spec = self._spec(); manifest = self.registry.get("boqa"); profile = load_actuator_profile(PROFILES, "boqa")
         now = datetime.now(timezone.utc)
-        bad = WorkLease(
-            lease_id="lease-x",
-            canonical_opportunity_id=spec.canonical_opportunity_id,
-            worker_id="zungun",
-            scope_hash=spec.scope_hash,
-            acquired_at=now,
-            expires_at=now + timedelta(minutes=5),
-            heartbeat_at=now,
-            terminal_state=None,
-        )
+        bad = WorkLease(lease_id="lease-x", canonical_opportunity_id=spec.canonical_opportunity_id, worker_id="zungun",
+            scope_hash=spec.scope_hash, acquired_at=now, expires_at=now + timedelta(minutes=5), heartbeat_at=now, terminal_state=None)
         with self.assertRaisesRegex(ValueError, "wrong worker"):
             CheckoutSubprocessActuator._validate_input(spec, bad, manifest, profile)
         terminal = bad.model_copy(update={"worker_id": "boqa", "terminal_state": "SUBMITTED"})

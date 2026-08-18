@@ -12,7 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .actuator import ActuatorProfile, CheckoutSubprocessActuator
 from .execution_jobs import ExecutionJob, ExecutionJobStore, ExecutionStatus, TERMINAL_STATUSES, utcnow_iso
+from .lease_bound_actuator import LeaseBoundCheckoutSubprocessActuator
+from .worker_integration_checker import check_registered_worker_material
 from .workers import WorkerJobSpec, WorkerManifest, WorkLease, canonical_hash, canonical_json
+
+LEASE_BOUND_TASK_TYPES = frozenset({"zungun_reliability_audit_v1", "across_readonly_unsigned_tx_v1"})
 
 
 class RecoveryOutcome(StrEnum):
@@ -71,14 +75,16 @@ def assert_lease_executable(lease: WorkLease, now: datetime | None = None) -> No
         raise ValueError("terminal WorkLease cannot execute")
 
 
-class ProductionExecutionIntegrity:
-    """Canonical supervisor integrity around the landed CheckoutSubprocessActuator.
+def _lease_bound_task(spec: WorkerJobSpec) -> bool:
+    return spec.task_type in LEASE_BOUND_TASK_TYPES
 
-    Worker execution and ATM acceptance checking are deliberately distinct. The
-    worker subprocess receives only a frozen job path/result path and zero-secret
-    environment. The checker runs afterwards in a supervisor-owned workspace,
-    rehydrates the exact result by hash, recomputes deterministic task truth from
-    the frozen contract, and persists PASS/FAIL without trusting worker self-tests.
+
+class ProductionExecutionIntegrity:
+    """Canonical supervisor integrity around pinned worker execution.
+
+    ORDER-006 integrated worker task types use a lease-bounded actuator carrying
+    the exact ATM WorkLease expiry. Existing non-ORDER-006 paths retain the landed
+    generic actuator contract. The checker stays ATM-owned in both cases.
     """
 
     FORBIDDEN_WORKER_SELF_CERT_FIELDS = {
@@ -210,11 +216,35 @@ class ProductionExecutionIntegrity:
         spec: WorkerJobSpec,
         acceptance: dict[str, Any],
         task_result: dict[str, Any],
+        lease: WorkLease,
+        worker_id: str,
+        source_sha: str,
     ) -> tuple[str, str, list[dict[str, Any]]]:
         results: list[dict[str, Any]] = []
         output = task_result.get("task_output")
         if not isinstance(output, dict):
             return "FAIL", "TASK_OUTPUT_MISSING", results
+
+        if _lease_bound_task(spec):
+            try:
+                specialist = check_registered_worker_material(worker_id, task_result, spec, lease, source_sha)
+            except ValueError:
+                return "FAIL", "UNSUPPORTED_MATERIAL_ACCEPTANCE_TASK", results
+            results.extend(dict(row) for row in specialist.predicates)
+            if specialist.verdict != "PASS":
+                return "FAIL", "REGISTERED_WORKER_MATERIAL_CHECKER_FAILED", results
+            frozen = acceptance.get("deterministic_checks")
+            if not isinstance(frozen, list) or not frozen:
+                return "FAIL", "NO_ATM_MATERIAL_ACCEPTANCE_PREDICATE", results
+            if list(frozen) != list(spec.deterministic_checks):
+                return "FAIL", "FROZEN_ACCEPTANCE_PREDICATE_FAILED", results
+            results.append({
+                "predicate": "ATM_TYPED_WORKER_CHECKER_REGISTRY",
+                "expected": f"{worker_id}:{spec.task_type}",
+                "actual": f"{worker_id}:{spec.task_type}",
+                "passed": True,
+            })
+            return "PASS", "ATM_REGISTERED_WORKER_MATERIAL_CHECKER_PASS", results
 
         if spec.task_type != "deterministic_digest_v1":
             return "FAIL", "UNSUPPORTED_MATERIAL_ACCEPTANCE_TASK", results
@@ -326,6 +356,9 @@ class ProductionExecutionIntegrity:
     ) -> IndependentCheckerReceipt:
         """Recompute material acceptance outside the worker execution boundary."""
         self._validate_bindings(job, spec, lease, manifest, profile)
+        lease_bound = _lease_bound_task(spec)
+        if lease_bound:
+            assert_lease_executable(lease)
 
         acceptance_path = self.acceptance_path(job.execution_job_id)
         if not acceptance_path.exists():
@@ -362,6 +395,8 @@ class ProductionExecutionIntegrity:
             "job_spec_hash": job.job_spec_hash,
             "outgoing_spend_usd": 0,
         }
+        if lease_bound:
+            expected["work_lease_expires_at"] = lease.expires_at.isoformat()
         for key, value in expected.items():
             if artifact.get(key) != value:
                 raise ValueError(f"checker artifact binding mismatch: {key}")
@@ -378,7 +413,14 @@ class ProductionExecutionIntegrity:
         task_result, task_result_hash, checker_workspace_id = self._rehydrate_task_result(
             artifact, job, spec, lease
         )
-        verdict, reason, predicate_results = self._evaluate_acceptance(spec, acceptance, task_result)
+        verdict, reason, predicate_results = self._evaluate_acceptance(
+            spec,
+            acceptance,
+            task_result,
+            lease,
+            manifest.worker_id,
+            profile.source_sha,
+        )
 
         existing = self.checker_receipt(job.execution_job_id)
         if existing is not None:
@@ -386,6 +428,8 @@ class ProductionExecutionIntegrity:
                 raise ValueError("existing checker receipt does not bind current result")
             return existing
 
+        if lease_bound:
+            assert_lease_executable(lease)
         receipt = IndependentCheckerReceipt(
             checker_workspace_id=checker_workspace_id,
             execution_job_id=job.execution_job_id,
@@ -407,6 +451,10 @@ class ProductionExecutionIntegrity:
         failed = self.store.fail(job.execution_job_id, ExecutionStatus.QUARANTINED, reason)
         return failed, RecoveryOutcome.CANCEL
 
+    def _expire_fail_closed(self, job: ExecutionJob, reason: str) -> tuple[ExecutionJob, RecoveryOutcome]:
+        failed = self.store.fail(job.execution_job_id, ExecutionStatus.EXPIRED, reason)
+        return failed, RecoveryOutcome.FAIL_EXPIRE
+
     def recover(
         self,
         job: ExecutionJob,
@@ -426,26 +474,33 @@ class ProductionExecutionIntegrity:
 
         status = job.status
         artifact_path = self.artifact_path(job.execution_job_id)
+        lease_bound = _lease_bound_task(spec)
 
         if status == ExecutionStatus.CREATED:
             if not lease_is_executable(lease, now):
-                return self.store.fail(job.execution_job_id, ExecutionStatus.EXPIRED, "LEASE_EXPIRED_BEFORE_DISPATCH"), RecoveryOutcome.FAIL_EXPIRE
+                return self._expire_fail_closed(job, "LEASE_EXPIRED_BEFORE_DISPATCH")
             return job, RecoveryOutcome.RESUME
 
         if status in {ExecutionStatus.DISPATCHING, ExecutionStatus.ACKNOWLEDGED, ExecutionStatus.RUNNING}:
             if not lease_is_executable(lease, now):
-                return self.store.fail(job.execution_job_id, ExecutionStatus.EXPIRED, "LEASE_EXPIRED_DURING_RECOVERY"), RecoveryOutcome.FAIL_EXPIRE
+                return self._expire_fail_closed(job, "LEASE_EXPIRED_DURING_RECOVERY")
             return self.store.fail(job.execution_job_id, ExecutionStatus.CANCELLED, "RESTART_NO_SAFE_PROCESS_REATTACH"), RecoveryOutcome.CANCEL
 
         if status in {ExecutionStatus.RESULT_READY, ExecutionStatus.CHECKING}:
+            if lease_bound and not lease_is_executable(lease, now):
+                return self._expire_fail_closed(job, "LEASE_EXPIRED_BEFORE_RECOVERY_CHECK")
             if not job.result_hash or not artifact_path.exists() or self._sha256_file(artifact_path) != job.result_hash:
                 return self.store.fail(job.execution_job_id, ExecutionStatus.CANCELLED, "RECOVERY_RESULT_ARTIFACT_MISSING_OR_MISMATCH"), RecoveryOutcome.CANCEL
             try:
                 receipt = self.independently_check(job, spec, lease, manifest, profile)
             except Exception:
+                if lease_bound and not lease_is_executable(lease):
+                    return self._expire_fail_closed(job, "LEASE_EXPIRED_DURING_RECOVERY_CHECK")
                 return self._checker_fail_closed(job, "RECOVERY_INDEPENDENT_CHECK_FAILED")
             if receipt.verdict != "PASS":
                 return self._checker_fail_closed(job, "RECOVERY_MATERIAL_ACCEPTANCE_FAILED")
+            if lease_bound and not lease_is_executable(lease):
+                return self._expire_fail_closed(job, "LEASE_EXPIRED_BEFORE_RECOVERY_TERMINAL")
             reconciled = self.store.terminal(
                 job.execution_job_id,
                 checker_hash=receipt.receipt_hash,
@@ -460,12 +515,18 @@ class ProductionExecutionIntegrity:
             if receipt and receipt.verdict == "FAIL":
                 return self._checker_fail_closed(job, "TERMINAL_MATERIAL_CHECKER_FAIL")
             if job.result_hash and artifact_path.exists() and self._sha256_file(artifact_path) == job.result_hash:
+                if lease_bound and not lease_is_executable(lease):
+                    return self._expire_fail_closed(job, "LEASE_EXPIRED_BEFORE_TERMINAL_RECONCILIATION")
                 try:
                     receipt = self.independently_check(job, spec, lease, manifest, profile)
                 except Exception:
+                    if lease_bound and not lease_is_executable(lease):
+                        return self._expire_fail_closed(job, "LEASE_EXPIRED_DURING_TERMINAL_CHECK")
                     return self._checker_fail_closed(job, "TERMINAL_INDEPENDENT_CHECK_FAILED")
                 if receipt.verdict != "PASS":
                     return self._checker_fail_closed(job, "TERMINAL_MATERIAL_ACCEPTANCE_FAILED")
+                if lease_bound and not lease_is_executable(lease):
+                    return self._expire_fail_closed(job, "LEASE_EXPIRED_BEFORE_TERMINAL_COMMIT")
                 reconciled = self.store.terminal(
                     job.execution_job_id,
                     checker_hash=receipt.receipt_hash,
@@ -505,15 +566,23 @@ class ProductionExecutionIntegrity:
             self.store.fail(job.execution_job_id, ExecutionStatus.CANCELLED, "TERMINAL_WORK_LEASE")
             raise ValueError("terminal WorkLease cannot execute")
 
-        actuator = CheckoutSubprocessActuator(self.store, self.workspace_root, self.artifact_root)
+        lease_bound = _lease_bound_task(spec)
+        actuator_cls = LeaseBoundCheckoutSubprocessActuator if lease_bound else CheckoutSubprocessActuator
+        actuator = actuator_cls(self.store, self.workspace_root, self.artifact_root)
         job = actuator.dispatch(spec, lease, manifest, profile)
         if job.status in {ExecutionStatus.RESULT_READY, ExecutionStatus.CHECKING, ExecutionStatus.TERMINAL}:
+            if lease_bound and not lease_is_executable(lease):
+                return self._expire_fail_closed(job, "LEASE_EXPIRED_BEFORE_CHECK")
             try:
                 receipt = self.independently_check(job, spec, lease, manifest, profile)
             except Exception:
+                if lease_bound and not lease_is_executable(lease):
+                    return self._expire_fail_closed(job, "LEASE_EXPIRED_DURING_CHECK")
                 return self._checker_fail_closed(job, "INDEPENDENT_CHECK_FAILED_AFTER_DISPATCH")
             if receipt.verdict != "PASS":
                 return self._checker_fail_closed(job, "MATERIAL_ACCEPTANCE_FAILED_AFTER_DISPATCH")
+            if lease_bound and not lease_is_executable(lease):
+                return self._expire_fail_closed(job, "LEASE_EXPIRED_BEFORE_TERMINAL_PASS")
             job = self.store.terminal(
                 job.execution_job_id,
                 checker_hash=receipt.receipt_hash,

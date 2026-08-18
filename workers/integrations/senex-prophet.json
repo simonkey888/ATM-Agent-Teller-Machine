@@ -1,0 +1,12 @@
+{
+  "worker_id": "senex-prophet",
+  "registered": false,
+  "active": false,
+  "source_pin": null,
+  "source_pin_ancestor": null,
+  "integration_audit_ref": null,
+  "claim_authority": false,
+  "submission_authority": false,
+  "financial_authority": false,
+  "max_spend_usd": 0
+}

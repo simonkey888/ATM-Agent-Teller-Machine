@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
-from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -41,8 +40,8 @@ class ZungunWorkerTests(unittest.TestCase):
             deterministic_checks=["no duplicate receiver effect", "UNKNOWN reconciles before retry"],
         )
 
-    def test_manifest_is_narrow_enabled_zero_authority(self):
-        self.assertTrue(self.zungun.enabled)
+    def test_manifest_is_narrow_registered_inactive_zero_authority(self):
+        self.assertFalse(self.zungun.enabled)
         self.assertEqual(self.zungun.worker_class, "NETWORK_RELIABILITY_AND_OFFLINE_DELIVERY_SPECIALIST")
         self.assertEqual(set(self.zungun.capabilities) & ZUNGUN_CAPABILITIES, ZUNGUN_CAPABILITIES)
         for forbidden in ("cuda", "web3_readonly", "browser", "playwright_e2e", "financial_execution", "trading", "wallet", "payment_writer", "web3_signer"):
@@ -52,20 +51,19 @@ class ZungunWorkerTests(unittest.TestCase):
         self.assertFalse(self.zungun.submission_authority)
         self.assertFalse(self.zungun.model_authority)
         self.assertEqual(str(self.zungun.cost_ceiling_usd), "0")
+        self.assertEqual(self.zungun.max_concurrency, 1)
 
-    def test_structured_reliability_requirements_select_zungun(self):
-        normalized = CapabilityResolver.normalize_structured_requirements(
-            {
-                "platforms": ["Android"],
-                "features": ["offline-first", "WorkManager", "reconciliation"],
-                "failure_modes": ["ambiguous timeout", "process death", "duplicate operation"],
-            }
-        )
+    def test_structured_reliability_requirements_match_zungun_but_do_not_activate(self):
+        normalized = CapabilityResolver.normalize_structured_requirements({
+            "platforms": ["Android"],
+            "features": ["offline-first", "WorkManager", "reconciliation"],
+            "failure_modes": ["ambiguous timeout", "process death", "duplicate operation"],
+        })
         required = CapabilityResolver.required_for_structured(normalized)
-        selected = self.registry.choose(self.job(required))
-        self.assertIsNotNone(selected)
-        self.assertEqual(selected[0].worker_id, "zungun")
+        decision = CapabilityResolver.can_handle(self.zungun.capabilities, required)
+        self.assertTrue(decision["can_handle"])
         self.assertTrue(any(cap.startswith("zungun.") for cap in required))
+        self.assertIsNone(self.registry.choose(self.job(required)))
 
     def test_resolver_does_not_scan_unstructured_description(self):
         normalized = CapabilityResolver.normalize_structured_requirements(
@@ -73,96 +71,53 @@ class ZungunWorkerTests(unittest.TestCase):
         )
         self.assertEqual(normalized, [])
 
-    def test_playwright_regression_selects_boqa_not_zungun(self):
+    def test_playwright_regression_does_not_route_to_inactive_placeholders(self):
         job = self.job(["git", "github", "evidence", "playwright_e2e", "browser_workflow_test"], job_id="playwright")
-        selected = self.registry.choose(job)
-        self.assertIsNotNone(selected)
-        self.assertEqual(selected[0].worker_id, "boqa")
+        self.assertFalse(CapabilityResolver.can_handle(self.zungun.capabilities, job.required_capabilities)["can_handle"])
+        self.assertIsNone(self.registry.choose(job))
 
     def test_negative_controls_do_not_select_zungun(self):
-        for required in (
-            ["git", "github", "evidence", "small_code_fix"],
-            ["documentation"],
-            ["financial_execution"],
-        ):
+        for required in (["git", "github", "evidence", "small_code_fix"], ["documentation"], ["financial_execution"]):
             selected = self.registry.choose(self.job(required, job_id="negative-" + required[-1]))
             self.assertTrue(selected is None or selected[0].worker_id != "zungun")
 
-    def test_atm_builder_uses_structured_requirements_and_exact_target(self):
+    def test_atm_builder_uses_structured_requirements_and_exact_target_without_activation(self):
         opp = SimpleNamespace(
-            canonical_opportunity_id="shadow:745",
-            source="shadow",
-            authoritative_url="https://github.com/bitcoinppl/cove/issues/745",
-            deadline=None,
+            canonical_opportunity_id="shadow:745", source="shadow",
+            authoritative_url="https://github.com/bitcoinppl/cove/issues/745", deadline=None,
         )
-        snapshot = {
-            "job": {
-                "acceptanceCriteria": ["resume background cloud backup safely"],
-                "requirements": {
-                    "platforms": ["Android"],
-                    "features": ["WorkManager", "reconciliation", "offline-first"],
-                    "failure_modes": ["process death", "ambiguous timeout"],
-                    "targetRepository": "https://github.com/bitcoinppl/cove",
-                    "targetBaseSha": "dee29853705191a87c86eb9d1cb51e1b6f30213e",
-                    "allowedPaths": ["android", "rust/src/cloud_backup"],
-                    "deliverable": "implementation tests evidence",
-                },
-            }
-        }
+        snapshot = {"job": {"acceptanceCriteria": ["resume background cloud backup safely"], "requirements": {
+            "platforms": ["Android"], "features": ["WorkManager", "reconciliation", "offline-first"],
+            "failure_modes": ["process death", "ambiguous timeout"], "targetRepository": "https://github.com/bitcoinppl/cove",
+            "targetBaseSha": "dee29853705191a87c86eb9d1cb51e1b6f30213e", "allowedPaths": ["android", "rust/src/cloud_backup"],
+            "deliverable": "implementation tests evidence"}}}
         spec = atm_fabric._build_worker_job(opp, snapshot)
-        selected = self.registry.choose(spec)
-        self.assertIsNotNone(selected)
-        self.assertEqual(selected[0].worker_id, "zungun")
         self.assertEqual(spec.target_base_sha, "dee29853705191a87c86eb9d1cb51e1b6f30213e")
         self.assertIn("zungun.android_background_work", spec.required_capabilities)
         self.assertIn("zungun.ambiguous_timeout", spec.required_capabilities)
+        self.assertTrue(CapabilityResolver.can_handle(self.zungun.capabilities, spec.required_capabilities)["can_handle"])
+        self.assertIsNone(self.registry.choose(spec))
 
     def test_zungun_route_fails_closed_without_target_binding(self):
         opp = SimpleNamespace(
-            canonical_opportunity_id="shadow:missing-target",
-            source="shadow",
-            authoritative_url="https://example.invalid/jobs/missing-target",
-            deadline=None,
+            canonical_opportunity_id="shadow:missing-target", source="shadow",
+            authoritative_url="https://example.invalid/jobs/missing-target", deadline=None,
         )
-        snapshot = {
-            "job": {
-                "acceptanceCriteria": ["offline exactly once"],
-                "requirements": {"features": ["offline-first", "idempotency"]},
-            }
-        }
+        snapshot = {"job": {"acceptanceCriteria": ["offline exactly once"], "requirements": {"features": ["offline-first", "idempotency"]}}}
         with self.assertRaisesRegex(Exception, "target repository"):
             atm_fabric._build_worker_job(opp, snapshot)
 
-    def test_fixture_pipeline_selects_one_zungun_worklease_and_stops_before_submission(self):
-        normalized = CapabilityResolver.normalize_structured_requirements(
-            {
-                "platforms": ["Android"],
-                "features": ["offline-first", "reconciliation"],
-                "failure_modes": ["process death", "duplicate operation"],
-            }
-        )
+    def test_registered_fixture_stops_before_worklease_or_submission(self):
+        normalized = CapabilityResolver.normalize_structured_requirements({
+            "platforms": ["Android"], "features": ["offline-first", "reconciliation"],
+            "failure_modes": ["process death", "duplicate operation"],
+        })
         job = self.job(CapabilityResolver.required_for_structured(normalized))
-        selected = self.registry.choose(job)
-        self.assertIsNotNone(selected)
-        manifest = selected[0]
-        self.assertEqual(manifest.worker_id, "zungun")
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "leases.sqlite3"
-            store = WorkLeaseStore(path)
-            lease = store.acquire(job, manifest)
-            self.assertIsNotNone(lease)
-            duplicate = store.acquire(job, manifest)
-            self.assertIsNone(duplicate)
-            lease_id = lease.lease_id
-            store.close()
-            store = WorkLeaseStore(path)
-            self.assertEqual(store.active_counts().get("zungun"), 1)
-            store.close()
-        pipeline = ["DISCOVERED", "VERIFIED", "CLAIM_CONFIRMED_FIXTURE", "LEASED", "ZUNGUN_SELECTED", "WORKING", "CHECKING", "DELIVERABLE_READY"]
-        self.assertNotIn("SUBMITTED", pipeline)
-        self.assertNotIn("ACCEPTED", pipeline)
-        self.assertNotIn("PAID", pipeline)
-        self.assertTrue(lease_id)
+        self.assertTrue(CapabilityResolver.can_handle(self.zungun.capabilities, job.required_capabilities)["can_handle"])
+        self.assertIsNone(self.registry.choose(job))
+        pipeline = ["DISCOVERED", "VERIFIED", "REGISTERED_NOT_ACTIVE"]
+        for forbidden in ("LEASED", "WORKING", "SUBMITTED", "ACCEPTED", "PAID"):
+            self.assertNotIn(forbidden, pipeline)
 
     def test_adapter_honors_immutable_lease_and_preflight_semantics(self):
         job = self.job(["git", "github", "filesystem", "shell", "node", "evidence", "zungun.offline_sync"])
@@ -184,44 +139,29 @@ class ZungunWorkerTests(unittest.TestCase):
         receipt = LinkDoctorReceipt(
             source_head=TARGET_SHA,
             findings=[LinkDoctorFinding(
-                rule_id="ZL015_NO_RECEIVER_RECONCILIATION_PATH",
-                severity="WARNING",
-                path="src/sync.kt",
-                evidence="no receiver query",
-                explanation="must reconcile",
-                limitation="static",
-                assurance_tier="L1",
-                status="UNKNOWN",
+                rule_id="ZL015_NO_RECEIVER_RECONCILIATION_PATH", severity="WARNING", path="src/sync.kt",
+                evidence="no receiver query", explanation="must reconcile", limitation="static", assurance_tier="L1", status="UNKNOWN",
             )],
-            deterministic=True,
-            overall_status="PASS",
+            deterministic=True, overall_status="PASS",
         )
         with self.assertRaisesRegex(ValueError, "UNKNOWN"):
             ZungunWorkerAdapter.validate_link_doctor(receipt)
 
     def test_security_rejects_authority_and_secret_output(self):
-        for payload in (
-            {"external_accepted": True},
-            {"paid": True},
-            {"nested": {"private_key": "forbidden"}},
-            {"money_ledger": {"amount": 1}},
-        ):
+        for payload in ({"external_accepted": True}, {"paid": True}, {"nested": {"private_key": "forbidden"}}, {"money_ledger": {"amount": 1}}):
             with self.assertRaises(ValueError):
                 validate_worker_output_authority(payload)
 
     def test_security_rejects_path_escape_and_dot_git(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "worktree"
-            root.mkdir()
+            root = Path(directory) / "worktree"; root.mkdir()
             for path in ("../outside", ".git/config", "/tmp/outside"):
                 with self.assertRaises(ValueError):
                     ZungunWorkerAdapter.secure_target_path(root, path)
             safe = ZungunWorkerAdapter.secure_target_path(root, "android/app/src/Main.kt")
             self.assertTrue(str(safe).startswith(str(root.resolve())))
             if os.name != "nt":
-                outside = Path(directory) / "outside"
-                outside.mkdir()
-                (root / "linked").symlink_to(outside, target_is_directory=True)
+                outside = Path(directory) / "outside"; outside.mkdir(); (root / "linked").symlink_to(outside, target_is_directory=True)
                 with self.assertRaises(ValueError):
                     ZungunWorkerAdapter.secure_target_path(root, "linked/file.kt")
 
