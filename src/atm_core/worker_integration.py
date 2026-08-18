@@ -20,6 +20,10 @@ DENIED_INTEGRATION_CAPABILITIES = {
     "blockchain_broadcast",
     "transaction_broadcast",
     "write_rpc",
+    "trading",
+    "live_trading",
+    "order_placement",
+    "live_order_placement",
 }
 
 
@@ -33,10 +37,14 @@ class WorkerIntegrationRecord(BaseModel):
     active: bool
     source_pin: str | None = None
     source_pin_ancestor: str | None = None
+    source_pin_readiness_ref: str | None = None
     integration_audit_ref: str | None = None
     claim_authority: bool = False
     submission_authority: bool = False
     financial_authority: bool = False
+    payment_authority: bool = False
+    live_trading_authority: bool = False
+    production_senex_authority: bool = False
     max_spend_usd: Decimal = Decimal("0")
 
     @field_validator("source_pin", "source_pin_ancestor")
@@ -46,17 +54,31 @@ class WorkerIntegrationRecord(BaseModel):
             raise ValueError("integration source identity must be exact lowercase git SHA")
         return value
 
+    @field_validator("source_pin_readiness_ref", "integration_audit_ref")
+    @classmethod
+    def optional_audit_url(cls, value: str | None) -> str | None:
+        if value is not None and not value.startswith("https://github.com/"):
+            raise ValueError("integration audit/readiness ref must be GitHub https URL")
+        return value
+
     @model_validator(mode="after")
     def registration_activation_boundary(self) -> "WorkerIntegrationRecord":
-        if self.claim_authority or self.submission_authority or self.financial_authority:
+        if any((
+            self.claim_authority,
+            self.submission_authority,
+            self.financial_authority,
+            self.payment_authority,
+            self.live_trading_authority,
+            self.production_senex_authority,
+        )):
             raise ValueError("worker integration authority must remain zero")
         if self.max_spend_usd != Decimal("0"):
             raise ValueError("worker integration spend must remain zero")
         if self.registered:
             if not self.source_pin or not self.source_pin_ancestor or not self.integration_audit_ref:
-                raise ValueError("registered worker requires source pin, readiness ancestor, and audit ref")
-        elif self.source_pin is not None or self.source_pin_ancestor is not None:
-            raise ValueError("placeholder worker cannot advertise a final source pin")
+                raise ValueError("registered worker requires source pin, readiness anchor, and audit ref")
+        elif self.source_pin is not None or self.source_pin_ancestor is not None or self.source_pin_readiness_ref is not None:
+            raise ValueError("placeholder worker cannot advertise a final source pin/readiness ref")
         if self.active and not self.registered:
             raise ValueError("inactive readiness gate cannot be bypassed")
         return self
