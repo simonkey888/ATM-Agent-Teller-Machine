@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from atm_core.economic_ingress import (
+    AuthoritativeFundingProof,
     BudgetEvidence,
     DealworkProviderRadar,
     DemandFoundryShadow,
@@ -20,6 +21,7 @@ from atm_core.economic_ingress import (
     build_rail_health,
     build_supply_adequacy,
     normalize_radar_to_money_board,
+    order005_authoritative_funding_fixture,
 )
 from atm_swarm import MoneyBoard
 
@@ -61,22 +63,53 @@ class Order005EconomicIngressTests(unittest.TestCase):
         self.assertEqual(semantics.budget_evidence, BudgetEvidence.NO_BUDGET_EVIDENCE)
         self.assertFalse(semantics.funded_for_admission)
 
-    def test_funding_admission_requires_authoritative_evidence_and_payer_authority(self):
-        unverifiable_claim = EconomicSemantics.from_structured({"funding_verified": True})
-        self.assertEqual(unverifiable_claim.budget_evidence, BudgetEvidence.FUNDING_SIGNAL_EXTERNAL_UNVERIFIED)
-        self.assertFalse(unverifiable_claim.funded_for_admission)
-        evidence_without_payer = EconomicSemantics.from_structured({
-            "funding_verified": True,
-            "economic_evidence_refs": ["https://authoritative.example/escrow/1"],
-        })
+    def test_raw_source_funding_claims_and_arbitrary_refs_have_zero_verification_authority(self):
+        payloads = [
+            {"funding_verified": True},
+            {"funding_verified": True, "economic_evidence_refs": ["https://evil.example/fake-proof"]},
+            {"funding_verified": True, "economic_evidence_refs": ["https://github.com/example/repo/issues/1"]},
+            {"external_funding_ref": "0x" + "1" * 64},
+            {
+                "funding_verified": True,
+                "payer_authority_verified": True,
+                "economic_evidence_refs": ["https://authoritative.example/escrow/1"],
+                "authoritative_funding_proof": {"verdict": "PROVEN"},
+            },
+        ]
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                semantics = EconomicSemantics.from_structured(payload)
+                self.assertNotEqual(semantics.budget_evidence, BudgetEvidence.FUNDING_VERIFIED)
+                self.assertFalse(semantics.funded_for_admission)
+
+    def test_only_typed_atm_funding_proof_can_verify_and_payer_authority_remains_separate(self):
+        proof = order005_authoritative_funding_fixture()
+        self.assertTrue(proof.is_atm_authoritative)
+        evidence_without_payer = EconomicSemantics.from_structured(
+            {"funding_verified": False},
+            authoritative_funding_proof=proof,
+        )
         self.assertEqual(evidence_without_payer.budget_evidence, BudgetEvidence.FUNDING_VERIFIED)
         self.assertFalse(evidence_without_payer.funded_for_admission)
-        both = EconomicSemantics.from_structured({
-            "funding_verified": True,
-            "payer_authority_verified": True,
-            "economic_evidence_refs": ["https://authoritative.example/escrow/1"],
-        })
+        self.assertIn("atm-proof://order005/deterministic-funding-fixture-v1", evidence_without_payer.evidence_refs)
+
+        both = EconomicSemantics.from_structured(
+            {"payer_authority_verified": True},
+            authoritative_funding_proof=proof,
+        )
+        self.assertEqual(both.budget_evidence, BudgetEvidence.FUNDING_VERIFIED)
+        self.assertEqual(both.payer_authority_verified, EvidenceState.PROVEN)
         self.assertTrue(both.funded_for_admission)
+
+        with self.assertRaisesRegex(ValueError, "only be minted by ATM verifier"):
+            AuthoritativeFundingProof(
+                verifier_id="ATM_AUTHORITATIVE_FUNDING_VERIFIER_V1",
+                rail="FORGED",
+                evidence_ref="https://evil.example/proof",
+                evidence_hash="a" * 64,
+                verdict=EvidenceState.PROVEN,
+                _authority_token=object(),
+            )
 
     def test_current_workprotocol_supply_snapshot_stays_nonrealized_and_fail_closed(self):
         snapshot = build_supply_adequacy([
