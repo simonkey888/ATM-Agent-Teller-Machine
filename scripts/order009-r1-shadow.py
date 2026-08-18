@@ -179,13 +179,18 @@ def _model_catalog(api_key: str) -> set[str]:
 
 
 def _gemma_generate(api_key: str, model: str, prompt: str, *, max_tokens: int = 256) -> str:
+    """Call Gemma and return only answer text, never thought-channel text."""
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?"
         + urllib.parse.urlencode({"key": api_key})
     )
     body = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0},
+        "generationConfig": {
+            "maxOutputTokens": max_tokens,
+            "temperature": 0,
+            "thinkingConfig": {"thinkingLevel": "MINIMAL"},
+        },
     }
     raw, _, status = _request(url, headers={"Accept": "application/json"}, body=body)
     if status != 200:
@@ -195,9 +200,14 @@ def _gemma_generate(api_key: str, model: str, prompt: str, *, max_tokens: int = 
     if not candidates:
         raise RuntimeError("GEMMA_NO_CANDIDATE")
     parts = (((candidates[0] or {}).get("content") or {}).get("parts") or [])
-    text = "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict)).strip()
+    answer_parts = [
+        str(part.get("text") or "")
+        for part in parts
+        if isinstance(part, dict) and not bool(part.get("thought")) and str(part.get("text") or "").strip()
+    ]
+    text = "".join(answer_parts).strip()
     if not text:
-        raise RuntimeError("GEMMA_EMPTY_OUTPUT")
+        raise RuntimeError("GEMMA_EMPTY_ANSWER")
     return text
 
 
@@ -289,8 +299,6 @@ README:
 SOURCE:
 {source}
 """
-    # The actual bounded shadow execution is itself the live inference probe.
-    # A second synthetic inference is unnecessary and can consume free-tier RPM.
     review_text = _gemma_generate(api_key, model, prompt, max_tokens=384)
     result["live_inference_probe"] = bool(review_text.strip())
     result["live_probe_response_sha256"] = hashlib.sha256(review_text.encode()).hexdigest()
