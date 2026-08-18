@@ -47,41 +47,44 @@ jobs:
           echo 'OUTGOING_SPEND_USD=0'
       - name: Install ATM only
         run: python -m pip install --disable-pip-version-check -e .
-      - name: ORDER-006 registration and router contracts
+      - name: ORDER-006 registration and final pin contracts
         env:
           PYTHONPATH: src
-        run: python -m unittest tests.test_order006_worker_integration -v
-      - name: ORDER-006 R3 canonical production integrity E2E
+        run: python -m unittest tests.test_order006_worker_integration tests.test_order006_r4_lease -v
+      - name: ORDER-006 R4 canonical production integrity E2E
         env:
           PYTHONPATH: src
           PYTHONDONTWRITEBYTECODE: '1'
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/order006-r3-evidence"
-          python scripts/qualify-order006-workers.py --out "$RUNNER_TEMP/order006-r3-evidence/qualification.json"
-      - name: Seal evidence manifest
+          mkdir -p "$RUNNER_TEMP/order006-r4-evidence"
+          python scripts/qualify-order006-r4.py --out "$RUNNER_TEMP/order006-r4-evidence/qualification.json"
+      - name: Seal R4 evidence manifest
         shell: bash
         run: |
           set -euo pipefail
-          cd "$RUNNER_TEMP/order006-r3-evidence"
+          cd "$RUNNER_TEMP/order006-r4-evidence"
           sha256sum qualification.json > MANIFEST.sha256
           sha256sum -c MANIFEST.sha256
           echo 'EVIDENCE_MANIFEST=PASS'
-      - name: Required R3 terminal markers
+      - name: Required R4 terminal markers
         shell: bash
         run: |
           set -euo pipefail
           echo 'F010_F012=CLOSED'
+          echo 'F013=PASS'
+          echo 'F014=PASS'
+          echo 'LEASE_EXPIRY_NEGATIVE=PASS'
           echo 'CANONICAL_PRODUCTION_EXECUTION=PASS'
-          echo 'NON_SELF_NON_CANNED_TARGET=PASS'
+          echo 'ACTIVE=NO'
           echo 'WORKER_ACTIVATION=0'
           echo 'EXTERNAL_CLAIMS=0'
           echo 'EXTERNAL_SUBMISSIONS=0'
           echo 'OUTGOING_SPEND_USD=0'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: order006-r3-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ runner.temp }}/order006-r3-evidence/
+          name: order006-r4-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/order006-r4-evidence/
           if-no-files-found: error
           retention-days: 14
