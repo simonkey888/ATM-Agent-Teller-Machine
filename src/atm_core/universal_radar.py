@@ -250,12 +250,12 @@ def route_executor(opportunity: UniversalOpportunity) -> ExecutorClass:
         return ExecutorClass.TEST_FIX
     if any(term in tokens for term in ("api integration", "webhook", "rest api", "graphql", "sdk")):
         return ExecutorClass.API_INTEGRATION
+    if any(term in tokens for term in ("research", "fact check", "analysis", "brief")):
+        return ExecutorClass.HTTP_RESEARCH
     if any(term in tokens for term in ("documentation", "docs", "readme")):
         return ExecutorClass.DOCS
     if any(term in tokens for term in ("extract", "scrape", "csv", "dataset", "data collection")):
         return ExecutorClass.DATA_EXTRACTION
-    if any(term in tokens for term in ("research", "fact check", "analysis", "brief")):
-        return ExecutorClass.HTTP_RESEARCH
     if any(term in tokens for term in ("write", "writing", "content", "summary", "translation")):
         return ExecutorClass.CONTENT_GENERATION
     if any(term in tokens for term in ("qa", "verify", "validation", "browser test")):
