@@ -23,7 +23,9 @@ jobs:
       - name: Deterministic universal radar tests
         env:
           PYTHONPATH: src
-        run: python -m unittest discover -s tests -p 'test_*radar.py' -v
+        run: |
+          python -m unittest discover -s tests -p 'test_*radar.py' -v
+          python -m unittest discover -s tests -p 'test_superteam_agent.py' -v
       - name: Zero-spend static contract
         shell: bash
         run: |
