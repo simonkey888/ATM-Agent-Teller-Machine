@@ -39,7 +39,7 @@ class Order006WorkerIntegrationTests(unittest.TestCase):
         self.assertTrue(zungun.registered)
         self.assertFalse(zungun.active)
         self.assertEqual(zungun.source_pin_ancestor, "c95002f94d5c5316e83bfca7215cf1d591a62739")
-        self.assertEqual(zungun.source_pin, "aadb42dcd1e24e52221a1e1f6c0e1f380f5f1f41")
+        self.assertEqual(zungun.source_pin, "2793b3e01f68b7fd0797a393486fb7db07fdeaf7")
         self.assertTrue(across.registered)
         self.assertFalse(across.active)
         self.assertEqual(across.source_pin_ancestor, "f65e597a650bfaa5b09824b299811c8da713249e")
