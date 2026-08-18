@@ -90,6 +90,7 @@ def _universal_swarm_shadow(config, adapters, board):
 
 atm_cloud.swarm_shadow = _universal_swarm_shadow
 _original_build_status = atm_cloud.build_status
+_original_sanitize_status = atm_cloud.sanitize_status
 
 
 def _public_radar_item(item):
@@ -153,7 +154,19 @@ def _fabric_build_status(core, state, ledger, targets, board, lease, control):
     return status
 
 
+def _fabric_sanitize_status(status):
+    sanitized = _original_sanitize_status(status)
+    radar = status.get("radar")
+    if isinstance(radar, dict):
+        sanitized["radar"] = radar
+    platform_health = status.get("platform_health")
+    if isinstance(platform_health, list):
+        sanitized["platform_health"] = platform_health[:32]
+    return sanitized
+
+
 atm_cloud.build_status = _fabric_build_status
+atm_cloud.sanitize_status = _fabric_sanitize_status
 
 
 def main() -> int:
