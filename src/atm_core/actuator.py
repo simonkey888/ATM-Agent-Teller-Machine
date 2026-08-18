@@ -6,9 +6,8 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -23,6 +22,7 @@ class ActuatorProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
     worker_id: str
     source_sha: str
+    task_entrypoint: str
     prepare_commands: list[list[str]] = Field(default_factory=list)
     execute_commands: list[list[str]]
     checker_commands: list[list[str]]
@@ -33,6 +33,17 @@ class ActuatorProfile(BaseModel):
         if not re.fullmatch(r"[0-9a-f]{40}", value):
             raise ValueError("actuator source_sha must be exact lowercase git SHA")
         return value
+
+    @field_validator("task_entrypoint")
+    @classmethod
+    def worker_owned_entrypoint(cls, value: str) -> str:
+        value = str(value).replace("\\", "/").strip()
+        path = PurePosixPath(value)
+        if not value or path.is_absolute() or ".." in path.parts or ".git" in path.parts:
+            raise ValueError("task entrypoint must be a safe worker-relative path")
+        if len(path.parts) < 2 or path.suffix not in {".js", ".mjs"}:
+            raise ValueError("task entrypoint must be a versioned worker JavaScript module")
+        return path.as_posix()
 
     @field_validator("prepare_commands", "execute_commands", "checker_commands")
     @classmethod
@@ -227,6 +238,58 @@ class CheckoutSubprocessActuator:
             raise ValueError("task result digest invalid")
         return value, canonical_hash(value)
 
+    @staticmethod
+    def _verify_worker_entrypoint(
+        checkout: Path,
+        profile: ActuatorProfile,
+        env: dict[str, str],
+    ) -> tuple[Path, str, str]:
+        root = checkout.resolve()
+        relative = PurePosixPath(profile.task_entrypoint)
+        entrypoint = (checkout / Path(*relative.parts)).resolve()
+        if entrypoint == root or root not in entrypoint.parents:
+            raise ValueError("worker task entrypoint escapes pinned checkout")
+        if not entrypoint.is_file() or entrypoint.is_symlink():
+            raise ValueError("worker task entrypoint missing or unsafe")
+
+        tracked = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", profile.task_entrypoint],
+            cwd=str(checkout),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            shell=False,
+        )
+        if tracked.returncode != 0:
+            raise ValueError("worker task entrypoint is not tracked by pinned source")
+
+        committed = subprocess.run(
+            ["git", "rev-parse", f"{profile.source_sha}:{profile.task_entrypoint}"],
+            cwd=str(checkout),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            shell=False,
+        )
+        actual = subprocess.run(
+            ["git", "hash-object", profile.task_entrypoint],
+            cwd=str(checkout),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            shell=False,
+        )
+        if committed.returncode != 0 or actual.returncode != 0:
+            raise ValueError("worker task entrypoint provenance unavailable")
+        committed_blob = committed.stdout.decode("utf-8").strip()
+        actual_blob = actual.stdout.decode("utf-8").strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", committed_blob) or committed_blob != actual_blob:
+            raise ValueError("worker task entrypoint differs from pinned source bytes")
+        return entrypoint, committed_blob, _sha256_bytes(entrypoint.read_bytes())
+
     def dispatch(
         self,
         spec: WorkerJobSpec,
@@ -257,18 +320,24 @@ class CheckoutSubprocessActuator:
                 job_spec_path=job_spec_path,
                 task_result_path=task_result_path,
             )
+            env["ATM_WORKER_SOURCE_SHA"] = profile.source_sha
             self._checkout(manifest, profile, checkout, env)
             source_hash = self._git_head(checkout, env)
             if source_hash != profile.source_sha:
                 return self.store.fail(job.execution_job_id, ExecutionStatus.QUARANTINED, "STALE_WORKER_SOURCE")
+            entrypoint_path, entrypoint_blob, entrypoint_sha256 = self._verify_worker_entrypoint(checkout, profile, env)
             self._progress(
                 job.execution_job_id,
                 objective_hash=spec.scope_hash,
                 before="0" * 64,
                 after=source_hash,
                 tests=[],
-                evidence=[f"worker-source:{source_hash}", f"job-spec:{job.job_spec_hash}"],
-                delta="pinned worker source and frozen job contract materialized",
+                evidence=[
+                    f"worker-source:{source_hash}",
+                    f"job-spec:{job.job_spec_hash}",
+                    f"worker-entrypoint:{profile.task_entrypoint}:{entrypoint_blob}:{entrypoint_sha256}",
+                ],
+                delta="pinned worker source, worker-owned task entrypoint, and frozen job contract materialized",
             )
             last_hash = source_hash
             for command in profile.prepare_commands:
@@ -286,7 +355,7 @@ class CheckoutSubprocessActuator:
                 )
                 last_hash = receipt.hash
 
-            task_command = [sys.executable, str(Path(__file__).with_name("task_worker.py"))]
+            task_command = ["node", str(entrypoint_path)]
             task_receipt = _run_first_with_ack(
                 task_command,
                 checkout,
@@ -299,14 +368,23 @@ class CheckoutSubprocessActuator:
             if task_receipt.returncode != 0:
                 return self.store.fail(job.execution_job_id, ExecutionStatus.DISPATCH_FAILED, "FROZEN_TASK_CONSUMER_FAILED")
             task_result, task_result_hash = self._load_bound_task_result(task_result_path, current, spec, lease)
+            producer = task_result.get("producer")
+            if not isinstance(producer, dict):
+                return self.store.fail(job.execution_job_id, ExecutionStatus.DISPATCH_FAILED, "WORKER_PRODUCER_BINDING_MISSING")
+            if producer.get("worker_source_sha") != profile.source_sha or producer.get("worker_entrypoint") != profile.task_entrypoint:
+                return self.store.fail(job.execution_job_id, ExecutionStatus.DISPATCH_FAILED, "WORKER_PRODUCER_BINDING_MISMATCH")
             self._progress(
                 job.execution_job_id,
                 objective_hash=spec.scope_hash,
                 before=last_hash,
                 after=task_result_hash,
                 tests=["worker:frozen-job-consumer"],
-                evidence=["worker-command:" + task_receipt.hash, "task-result:" + task_result_hash],
-                delta="worker consumed exact frozen job and materialized task-specific result",
+                evidence=[
+                    "worker-command:" + task_receipt.hash,
+                    "task-result:" + task_result_hash,
+                    f"worker-entrypoint-blob:{entrypoint_blob}",
+                ],
+                delta="pinned worker-owned entrypoint consumed exact frozen job and materialized task-specific result",
             )
             last_hash = task_result_hash
 
@@ -352,6 +430,12 @@ class CheckoutSubprocessActuator:
                 "work_lease_id": lease.lease_id,
                 "scope_hash": spec.scope_hash,
                 "job_spec_hash": job.job_spec_hash,
+                "task_entrypoint_provenance": {
+                    "path": profile.task_entrypoint,
+                    "git_blob_oid": entrypoint_blob,
+                    "sha256": entrypoint_sha256,
+                    "worker_source_sha": profile.source_sha,
+                },
                 "task_result": task_result,
                 "task_result_hash": task_result_hash,
                 "command_receipts": [receipt.__dict__ for receipt in execution_receipts],
