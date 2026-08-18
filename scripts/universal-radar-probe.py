@@ -4,12 +4,12 @@ from __future__ import annotations
 import json
 from decimal import Decimal
 
-from atm_core.radar_sources import build_default_registry
+from atm_core.radar_registry import build_canonical_registry
 from atm_core.universal_radar import UniversalRadar
 
 
 def main() -> int:
-    registry = build_default_registry()
+    registry = build_canonical_registry()
     snapshot = UniversalRadar(registry, floor_usd=Decimal("5"), per_source_timeout=4).scan()
     health = {
         row.source: {
