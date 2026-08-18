@@ -323,27 +323,30 @@ def phase_work(config: dict[str, Any], state: RuntimeState) -> None:
         }
         return
 
-    # Qualification fixtures may use the immutable pinned worker commit as a deterministic deliverable.
-    # Real economic jobs must materialize a task-specific HTTPS deliverable before SUBMIT can become reachable.
+    # Non-economic qualification fixtures expose the exact checked task artifact as an internal
+    # content-addressed deliverable. It is intentionally not HTTPS, so CHECK cannot submit it.
     if job_spec.external_source == "fixture":
-        opp.deliverable_url = f"{manifest.repo_url}/commit/{profile.source_sha}"
+        opp.deliverable_url = f"atm-artifact://sha256/{job.result_hash}"
         state.active_opportunity = opp
         state.last_result = {
-            "status": "WORKER_ARTIFACT_READY",
+            "status": "WORKER_TASK_ARTIFACT_READY_INTERNAL",
             "execution_job_id": job.execution_job_id,
             "worker_id": manifest.worker_id,
             "work_lease_id": lease.lease_id,
             "result_hash": job.result_hash,
+            "task_result_hash": checker.task_result_hash,
             "checker_hash": checker.receipt_hash,
             "launch_count": job.launch_count,
         }
         state.phase = Phase.CHECK
         return
 
+    # Real economic jobs still require an externally deliverable HTTPS artifact before SUBMIT.
     state.last_result = {
         "status": "EXECUTION_CHECKED_TASK_DELIVERABLE_NOT_MATERIALIZED",
         "execution_job_id": job.execution_job_id,
         "result_hash": job.result_hash,
+        "task_result_hash": checker.task_result_hash,
         "checker_hash": checker.receipt_hash,
         "launch_count": job.launch_count,
     }
@@ -375,7 +378,7 @@ def phase_check(config: dict[str, Any], state: RuntimeState) -> None:
         "checker_id": receipt.checker_id,
         "execution_job_id": execution_job_id,
         "receipt_hash": receipt.receipt_hash,
-        "evidence_refs": [f"artifact:{receipt.artifact_hash}", *[f"progress:{value}" for value in receipt.progress_receipt_hashes]],
+        "evidence_refs": [f"artifact:{receipt.artifact_hash}", f"task-result:{receipt.task_result_hash}", *[f"progress:{value}" for value in receipt.progress_receipt_hashes]],
     }
     state.phase = Phase.SUBMIT
 
