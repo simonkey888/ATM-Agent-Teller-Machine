@@ -44,7 +44,7 @@ jobs:
           echo 'WORKER_ACTIVATION=0'
       - name: Install ATM only
         run: python -m pip install --disable-pip-version-check -e .
-      - name: ORDER-006 R3 canonical actuator and integrity gate
+      - name: ORDER-006 R4 canonical actuator and integrity gate
         if: ${{ github.event_name == 'pull_request' && github.head_ref == 'order-006-worker-integration-r1' }}
         env:
           PYTHONPATH: src
@@ -52,16 +52,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/qualify-order006-workers.py
-          echo 'VNEXT_CANONICAL_ACTUATOR_ORDER006_R3=PASS'
+          python scripts/qualify-order006-r4.py
+          echo 'VNEXT_CANONICAL_ACTUATOR_ORDER006_R4=PASS'
           echo 'F010_F012=CLOSED'
+          echo 'F013=PASS'
+          echo 'F014=PASS'
+          echo 'LEASE_EXPIRY_NEGATIVE=PASS'
+          echo 'ACTIVE=NO'
           echo 'OUTGOING_SPEND_USD=0'
-      - name: Legacy generic actuator fixture outside ORDER-006 R3
+      - name: Legacy generic actuator fixture outside ORDER-006 R4
         if: ${{ github.event_name != 'pull_request' || github.head_ref != 'order-006-worker-integration-r1' }}
         env:
           PYTHONPATH: src
         run: python scripts/qualify-vnext-actuator.py
-      - name: ORDER-005 real production phase path outside ORDER-006 R3
+      - name: ORDER-005 real production phase path outside ORDER-006 R4
         if: ${{ github.event_name != 'pull_request' || github.head_ref != 'order-006-worker-integration-r1' }}
         env:
           PYTHONPATH: src
