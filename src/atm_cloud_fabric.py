@@ -4,9 +4,14 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+import atm as v1
 import atm_cloud
 import atm_fabric
+import atm_v2 as core_runtime
+from atm_core.execution_router import UniversalExecutionRouter, legacy_to_universal
 from atm_core.funding_gate import install_workprotocol_chain_funding_gate
+from atm_core.models import Phase
+from atm_core.opportunities import external_state_hash
 from atm_core.radar_sources import build_default_registry
 from atm_core.swarm_runtime import current_pass_swarm_shadow
 from atm_core.universal_radar import RadarDisposition, UniversalRadar, load_snapshot, persist_snapshot
@@ -22,6 +27,50 @@ atm_cloud.STATE_ALLOWLIST.add("immune-memory.sqlite3")
 atm_cloud.STATE_ALLOWLIST.add("vnext-learning.sqlite3")
 atm_cloud.STATE_ALLOWLIST.add("universal-radar.json")
 install_workprotocol_chain_funding_gate()
+
+# Capability routing is a pre-CLAIM gate on the existing single supervisor. Existing
+# specialist worker code remains preserved as a deferred backend; it no longer gets a
+# chance to claim merely because a worker manifest can match a task.
+_original_phase_verify_v2 = core_runtime.phase_verify_v2
+
+
+def _capability_first_phase_verify(config, state, adapters):
+    _original_phase_verify_v2(config, state, adapters)
+    opp = state.active_opportunity
+    if not opp or state.phase != Phase.CLAIM:
+        return
+    adapter = v1.adapter_for(adapters, opp)
+    snapshot = adapter.fetch_authoritative(opp)
+    if external_state_hash(snapshot) != str(opp.external_state_hash or ""):
+        state.phase = Phase.VERIFY
+        state.last_result = {"status": "EXECUTOR_PREFLIGHT_RETRY_EXTERNAL_CHANGED"}
+        return
+    normalized = legacy_to_universal(opp, snapshot, config)
+    allowed, availability = UniversalExecutionRouter().claim_allowed(normalized)
+    opp.executor_class = normalized.executor_class.value
+    opp.executor_availability = availability.model_dump(mode="json")
+    opp.universal_source_state_hash = normalized.source_state_hash
+    if not allowed:
+        state.last_result = {
+            "status": "DO_NOT_CLAIM_EXECUTOR_UNAVAILABLE",
+            "opportunity_id": opp.canonical_opportunity_id,
+            "executor_class": normalized.executor_class.value,
+            "executor_reason": availability.reason,
+            "outgoing_spend_usd": "0",
+        }
+        state.active_opportunity = None
+        state.phase = Phase.DISCOVER
+        return
+    state.active_opportunity = opp
+    state.last_result = {
+        **(state.last_result or {}),
+        "executor_class": normalized.executor_class.value,
+        "executor_preclaim_proof": availability.model_dump(mode="json"),
+        "outgoing_spend_usd": "0",
+    }
+
+
+core_runtime.phase_verify_v2 = _capability_first_phase_verify
 atm_fabric.install()
 
 
@@ -122,6 +171,8 @@ def _fabric_build_status(core, state, ledger, targets, board, lease, control):
             {
                 "selector": getattr(opp, "selection_provenance", None),
                 "same_pass_rediscovered": bool(getattr(opp, "same_pass_rediscovered", False)),
+                "executor_class": getattr(opp, "executor_class", None),
+                "executor_availability": getattr(opp, "executor_availability", None),
                 "worker_id": getattr(opp, "worker_id", None),
                 "work_lease_id": getattr(opp, "worker_lease_id", None),
                 "worker_commit_sha": getattr(opp, "worker_commit_sha", None),
