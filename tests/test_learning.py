@@ -8,6 +8,21 @@ from atm_core.learning import CalibrationObservation, HighTicketCandidate, HighT
 
 
 class LearningTests(unittest.TestCase):
+    def _advance_to_canary(self, store: LearningStore, skill_id: str, *, baseline: float = 10.0) -> SkillCapsule:
+        skill = store.put_skill(SkillCapsule(
+            skill_id=skill_id,
+            capability="ci_triage",
+            code_refs=[f"code:{skill_id}"],
+            test_refs=[f"test:{skill_id}"],
+            fixture_refs=[f"fixture:{skill_id}"],
+            baseline_metric=baseline,
+            metric_name="median_time_to_valid_artifact",
+        ))
+        for stage in SKILL_PIPELINE[1:-1]:
+            skill = store.advance_skill(skill.skill_id, supervisor="ATM_SUPERVISOR_TEST", evidence_ref=f"{skill_id}:{stage}")
+        self.assertEqual(skill.stage, SkillStage.LOW_RISK_CANARY)
+        return skill
+
     def test_skill_pipeline_exact_and_no_self_promotion(self):
         self.assertEqual(SKILL_PIPELINE, ["SOLVE", "DISTILL", "REPLAY", "ADVERSARIAL_TEST", "SHADOW_LIVE", "LOW_RISK_CANARY", "PROMOTE"])
         with tempfile.TemporaryDirectory() as directory:
@@ -41,6 +56,28 @@ class LearningTests(unittest.TestCase):
             self.assertEqual(promoted.promoted_by, "ATM_SUPERVISOR_TEST")
             self.assertEqual(promoted.candidate_metric, 8.0)
             self.assertEqual(len(store.history(skill.skill_id)), 6)
+            store.close()
+
+    def test_durable_canary_without_measurable_improvement_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LearningStore(Path(directory) / "learning.sqlite3")
+            skill = self._advance_to_canary(store, "skill-no-improvement", baseline=10.0)
+            store.record_canary_result(
+                skill.skill_id,
+                supervisor="ATM_SUPERVISOR_TEST",
+                evidence_ref="canary-measured-but-worse",
+                sample_size=2,
+                success_count=2,
+                candidate_metric=11.0,
+            )
+            with self.assertRaisesRegex(ValueError, "measurable improvement"):
+                store.advance_skill(
+                    skill.skill_id,
+                    supervisor="ATM_SUPERVISOR_TEST",
+                    evidence_ref="reject-non-improving-canary",
+                    candidate_metric=11.0,
+                )
+            self.assertEqual(store.get_skill(skill.skill_id).stage, SkillStage.LOW_RISK_CANARY)
             store.close()
 
     def test_skill_requires_code_tests_fixtures(self):
