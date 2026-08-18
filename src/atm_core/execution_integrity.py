@@ -26,6 +26,7 @@ class IndependentCheckerReceipt(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     checker_id: str = "ATM_INDEPENDENT_CHECKER_V1"
+    checker_boundary: str = "ATM_SUPERVISOR_INDEPENDENT_VERIFIER_V1"
     execution_job_id: str
     worker_id: str
     work_lease_id: str
@@ -69,9 +70,17 @@ def assert_lease_executable(lease: WorkLease, now: datetime | None = None) -> No
 class ProductionExecutionIntegrity:
     """Canonical production integrity layer around the landed CheckoutSubprocessActuator.
 
-    The compatibility actuator may still be used by qualification tests, but production
-    WORK is not complete until this layer persists an ATM-owned independent checker receipt.
+    Production WORK is not complete until this supervisor-owned layer re-reads the
+    immutable acceptance contract and exact result artifact and persists a distinct
+    checker receipt. The worker checkout never gets access to this receipt table.
     """
+
+    FORBIDDEN_WORKER_SELF_CERT_FIELDS = {
+        "checker_independent",
+        "checker_verdict",
+        "acceptance_passed",
+        "externally_accepted",
+    }
 
     def __init__(self, store: ExecutionJobStore, workspace_root: Path, artifact_root: Path):
         self.store = store
@@ -124,7 +133,7 @@ class ProductionExecutionIntegrity:
                 raise ValueError("frozen acceptance contract mutation detected")
         else:
             path.write_bytes(raw)
-        return canonical_hash({"criteria": list(spec.frozen_acceptance_criteria)})
+        return self.acceptance_contract_hash(spec)
 
     def checker_receipt(self, execution_job_id: str) -> IndependentCheckerReceipt | None:
         row = self.store.conn.execute(
@@ -156,6 +165,25 @@ class ProductionExecutionIntegrity:
         )
         return receipt
 
+    @staticmethod
+    def _validate_bindings(
+        job: ExecutionJob,
+        spec: WorkerJobSpec,
+        lease: WorkLease,
+        manifest: WorkerManifest,
+        profile: ActuatorProfile,
+    ) -> None:
+        if manifest.worker_id != job.worker_id or profile.worker_id != job.worker_id:
+            raise ValueError("execution worker identity mismatch")
+        if profile.source_sha != job.worker_version_or_source_sha:
+            raise ValueError("execution worker source mismatch")
+        if lease.lease_id != job.work_lease_id or lease.scope_hash != job.scope_hash:
+            raise ValueError("execution lease/scope mismatch")
+        if lease.canonical_opportunity_id != job.opportunity_id:
+            raise ValueError("execution opportunity binding mismatch")
+        if canonical_hash(spec.model_dump(mode="json")) != job.job_spec_hash:
+            raise ValueError("execution job spec hash mismatch")
+
     def independently_check(
         self,
         job: ExecutionJob,
@@ -164,19 +192,19 @@ class ProductionExecutionIntegrity:
         manifest: WorkerManifest,
         profile: ActuatorProfile,
     ) -> IndependentCheckerReceipt:
-        """Re-read immutable ATM-owned criteria and exact artifact bytes outside worker output semantics."""
-        if manifest.worker_id != job.worker_id or profile.worker_id != job.worker_id:
-            raise ValueError("checker worker identity mismatch")
-        if lease.lease_id != job.work_lease_id or lease.scope_hash != job.scope_hash:
-            raise ValueError("checker lease/scope mismatch")
-        if canonical_hash(spec.model_dump(mode="json")) != job.job_spec_hash:
-            raise ValueError("checker job spec hash mismatch")
+        """Re-read ATM-owned criteria and exact artifact bytes outside worker execution context."""
+        self._validate_bindings(job, spec, lease, manifest, profile)
 
         acceptance_path = self.acceptance_path(job.execution_job_id)
         if not acceptance_path.exists():
             raise ValueError("frozen acceptance contract missing")
-        acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
+        acceptance_raw = acceptance_path.read_bytes()
+        acceptance = json.loads(acceptance_raw.decode("utf-8"))
         expected_acceptance_hash = self.acceptance_contract_hash(spec)
+        if acceptance.get("schema") != "ATM_FROZEN_ACCEPTANCE_V1":
+            raise ValueError("checker acceptance schema mismatch")
+        if acceptance.get("execution_job_id") != job.execution_job_id:
+            raise ValueError("checker acceptance execution identity mismatch")
         if acceptance.get("criteria") != list(spec.frozen_acceptance_criteria):
             raise ValueError("checker acceptance criteria mismatch")
         if acceptance.get("scope_hash") != job.scope_hash or acceptance.get("job_spec_hash") != job.job_spec_hash:
@@ -189,6 +217,8 @@ class ProductionExecutionIntegrity:
         if artifact_hash != job.result_hash:
             raise ValueError("checker result artifact hash mismatch")
         artifact: dict[str, Any] = json.loads(artifact_path.read_text(encoding="utf-8"))
+        if self.FORBIDDEN_WORKER_SELF_CERT_FIELDS.intersection({str(key).lower() for key in artifact}):
+            raise ValueError("worker self-certification field forbidden")
         expected = {
             "schema": "ATM_EXECUTION_ARTIFACT_V1",
             "execution_job_id": job.execution_job_id,
@@ -202,11 +232,14 @@ class ProductionExecutionIntegrity:
         for key, value in expected.items():
             if artifact.get(key) != value:
                 raise ValueError(f"checker artifact binding mismatch: {key}")
+        command_receipts = artifact.get("command_receipts")
+        if not isinstance(command_receipts, list) or not command_receipts:
+            raise ValueError("checker requires concrete worker command receipts")
 
         progress = self.store.progress(job.execution_job_id)
         if len(progress) < 2:
             raise ValueError("checker requires at least two durable progress receipts")
-        if any(not receipt.measurable_progress for receipt in progress[:2]):
+        if any(not receipt.measurable_progress for receipt in progress):
             raise ValueError("checker progress is not measurable")
         receipt = IndependentCheckerReceipt(
             execution_job_id=job.execution_job_id,
@@ -218,9 +251,13 @@ class ProductionExecutionIntegrity:
             artifact_hash=artifact_hash,
             progress_receipt_hashes=[row.receipt_hash for row in progress],
             verdict="PASS",
-            reason="ATM_REVALIDATED_FROZEN_ACCEPTANCE_BINDINGS_AND_EXACT_ARTIFACT",
+            reason="ATM_REVALIDATED_FROZEN_ACCEPTANCE_BINDINGS_EXACT_ARTIFACT_AND_PROGRESS",
         )
         return self._persist_checker(receipt)
+
+    def _checker_fail_closed(self, job: ExecutionJob, reason: str) -> tuple[ExecutionJob, RecoveryOutcome]:
+        failed = self.store.fail(job.execution_job_id, ExecutionStatus.QUARANTINED, reason)
+        return failed, RecoveryOutcome.CANCEL
 
     def recover(
         self,
@@ -234,10 +271,17 @@ class ProductionExecutionIntegrity:
     ) -> tuple[ExecutionJob, RecoveryOutcome]:
         """Deterministic restart reconciliation. Never launches a second worker process."""
         now = now or datetime.now(timezone.utc)
+        try:
+            self._validate_bindings(job, spec, lease, manifest, profile)
+        except Exception:
+            return self._checker_fail_closed(job, "RECOVERY_BINDING_MISMATCH")
+
         status = job.status
         artifact_path = self.artifact_path(job.execution_job_id)
 
         if status == ExecutionStatus.CREATED:
+            if not lease_is_executable(lease, now):
+                return self.store.fail(job.execution_job_id, ExecutionStatus.EXPIRED, "LEASE_EXPIRED_BEFORE_DISPATCH"), RecoveryOutcome.FAIL_EXPIRE
             return job, RecoveryOutcome.RESUME
 
         if status in {ExecutionStatus.DISPATCHING, ExecutionStatus.ACKNOWLEDGED, ExecutionStatus.RUNNING}:
@@ -248,7 +292,10 @@ class ProductionExecutionIntegrity:
         if status in {ExecutionStatus.RESULT_READY, ExecutionStatus.CHECKING}:
             if not job.result_hash or not artifact_path.exists() or self._sha256_file(artifact_path) != job.result_hash:
                 return self.store.fail(job.execution_job_id, ExecutionStatus.CANCELLED, "RECOVERY_RESULT_ARTIFACT_MISSING_OR_MISMATCH"), RecoveryOutcome.CANCEL
-            receipt = self.independently_check(job, spec, lease, manifest, profile)
+            try:
+                receipt = self.independently_check(job, spec, lease, manifest, profile)
+            except Exception:
+                return self._checker_fail_closed(job, "RECOVERY_INDEPENDENT_CHECK_FAILED")
             reconciled = self.store.terminal(
                 job.execution_job_id,
                 checker_hash=receipt.receipt_hash,
@@ -261,14 +308,17 @@ class ProductionExecutionIntegrity:
             if receipt and receipt.verdict == "PASS" and receipt.receipt_hash == job.checker_hash:
                 return job, RecoveryOutcome.RECONCILE_RESULT
             if job.result_hash and artifact_path.exists() and self._sha256_file(artifact_path) == job.result_hash:
-                receipt = self.independently_check(job, spec, lease, manifest, profile)
+                try:
+                    receipt = self.independently_check(job, spec, lease, manifest, profile)
+                except Exception:
+                    return self._checker_fail_closed(job, "TERMINAL_INDEPENDENT_CHECK_FAILED")
                 reconciled = self.store.terminal(
                     job.execution_job_id,
                     checker_hash=receipt.receipt_hash,
                     reason="INDEPENDENT_CHECKER_PASS_RECONCILED",
                 )
                 return reconciled, RecoveryOutcome.RECONCILE_RESULT
-            return self.store.fail(job.execution_job_id, ExecutionStatus.QUARANTINED, "TERMINAL_WITHOUT_INDEPENDENT_CHECKER_PROOF"), RecoveryOutcome.CANCEL
+            return self._checker_fail_closed(job, "TERMINAL_WITHOUT_INDEPENDENT_CHECKER_PROOF")
 
         if status in TERMINAL_STATUSES:
             return job, RecoveryOutcome.CANCEL
@@ -295,11 +345,20 @@ class ProductionExecutionIntegrity:
             return self.recover(job, spec, lease, manifest, profile)
 
         # P0-B boundary: reject expired/equal lease before CheckoutSubprocessActuator can spawn anything.
-        assert_lease_executable(lease)
+        if not lease_is_executable(lease):
+            self.store.fail(job.execution_job_id, ExecutionStatus.EXPIRED, "LEASE_EXPIRED_BEFORE_DISPATCH")
+            raise ValueError("WorkLease expired or expires exactly now")
+        if lease.terminal_state is not None:
+            self.store.fail(job.execution_job_id, ExecutionStatus.CANCELLED, "TERMINAL_WORK_LEASE")
+            raise ValueError("terminal WorkLease cannot execute")
+
         actuator = CheckoutSubprocessActuator(self.store, self.workspace_root, self.artifact_root)
         job = actuator.dispatch(spec, lease, manifest, profile)
         if job.status in {ExecutionStatus.RESULT_READY, ExecutionStatus.CHECKING, ExecutionStatus.TERMINAL}:
-            receipt = self.independently_check(job, spec, lease, manifest, profile)
+            try:
+                receipt = self.independently_check(job, spec, lease, manifest, profile)
+            except Exception:
+                return self._checker_fail_closed(job, "INDEPENDENT_CHECK_FAILED_AFTER_DISPATCH")
             job = self.store.terminal(
                 job.execution_job_id,
                 checker_hash=receipt.receipt_hash,
