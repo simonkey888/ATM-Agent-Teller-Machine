@@ -41,20 +41,25 @@ class EconomicSemantics(BaseModel):
     @classmethod
     def from_structured(cls, payload: dict[str, Any]) -> "EconomicSemantics":
         requester = str(payload.get("requester_id") or payload.get("requesterId") or "").strip()
+        # Buyer identity must be supplied as an economic field. Requester/repo identity never aliases into it.
         buyer = str(payload.get("economic_buyer_id") or payload.get("buyer_id") or payload.get("buyerId") or "").strip()
         payer_verified = payload.get("payer_authority_verified") is True
-        funding_verified = payload.get("funding_verified") is True
+        evidence_refs = [str(value) for value in payload.get("economic_evidence_refs", []) if str(value).strip()]
+        funding_verified_claim = payload.get("funding_verified") is True
         external_funding_ref = str(payload.get("external_funding_ref") or payload.get("funding_tx_hash") or "").strip()
         budget_amount = payload.get("budget_amount")
         budget_currency = str(payload.get("budget_currency") or "").strip()
-        if funding_verified:
+
+        # FUNDING_VERIFIED is impossible without an explicit authoritative evidence reference.
+        if funding_verified_claim and evidence_refs:
             budget = BudgetEvidence.FUNDING_VERIFIED
-        elif external_funding_ref:
+        elif external_funding_ref or funding_verified_claim:
             budget = BudgetEvidence.FUNDING_SIGNAL_EXTERNAL_UNVERIFIED
         elif budget_amount not in (None, "") and budget_currency:
             budget = BudgetEvidence.BUDGET_MENTION_UNVERIFIED
         else:
             budget = BudgetEvidence.NO_BUDGET_EVIDENCE
+
         community = bool(payload.get("community_signal") or payload.get("reputation_signal"))
         return cls(
             requester_identified=EvidenceState.PROVEN if requester and requester.lower() != "anonymous" else EvidenceState.UNKNOWN,
@@ -64,7 +69,7 @@ class EconomicSemantics(BaseModel):
             community_or_reputation_signal=community,
             non_economic_shadow=community and budget != BudgetEvidence.FUNDING_VERIFIED,
             price_hypothesis_usd=(Decimal(str(payload["price_hypothesis_usd"])) if payload.get("price_hypothesis_usd") not in (None, "") else None),
-            evidence_refs=[str(value) for value in payload.get("economic_evidence_refs", [])],
+            evidence_refs=evidence_refs,
         )
 
     @property
@@ -87,55 +92,89 @@ class SupplyCandidate(BaseModel):
 
 
 class SupplyAdequacySnapshot(BaseModel):
+    """Evidence-bounded supply ledger. None means UNKNOWN, never synthetic zero."""
+
     model_config = ConfigDict(extra="forbid")
-    VISIBLE_USD: Decimal
-    FRESH_USD: Decimal
-    FUNDED_USD: Decimal
-    ELIGIBLE_USD: Decimal
-    CLAIMABLE_UNDER_CURRENT_AUTHORITY_USD: Decimal
+    VISIBLE_USD: Decimal | None
+    FRESH_USD: Decimal | None
+    FUNDED_USD: Decimal | None
+    ELIGIBLE_USD: Decimal | None
+    CLAIMABLE_UNDER_CURRENT_AUTHORITY_USD: Decimal | None
     EXPECTED_WITHDRAWABLE_USD: Decimal | None
-    OPEN_COUNT: int
-    FRESH_COUNT: int
-    FUNDED_COUNT: int
-    ELIGIBLE_COUNT: int
-    STALE_RATIO: Decimal
+    OPEN_CANDIDATE_COUNT: int | None
+    FRESH_CANDIDATE_COUNT: int | None
+    FUNDED_CANDIDATE_COUNT: int | None
+    ELIGIBLE_CANDIDATE_COUNT: int | None
+    STALE_RATIO: Decimal | None
     MAX_TICKET_USD: Decimal | None
     MEDIAN_TICKET_USD: Decimal | None
     TOP_BLOCKER_REASONS: list[str]
     EVIDENCE_AS_OF: str
+    INVENTORY_STATE: EvidenceState
     REALIZED_REVENUE_CREDITED: Decimal = Decimal("0")
 
 
-def build_supply_adequacy(candidates: Iterable[SupplyCandidate], *, evidence_as_of: str) -> SupplyAdequacySnapshot:
+def build_supply_adequacy(
+    candidates: Iterable[SupplyCandidate],
+    *,
+    evidence_as_of: str,
+    inventory_state: EvidenceState = EvidenceState.UNKNOWN,
+) -> SupplyAdequacySnapshot:
     rows = list(candidates)
+    if not rows and inventory_state != EvidenceState.PROVEN:
+        return SupplyAdequacySnapshot(
+            VISIBLE_USD=None,
+            FRESH_USD=None,
+            FUNDED_USD=None,
+            ELIGIBLE_USD=None,
+            CLAIMABLE_UNDER_CURRENT_AUTHORITY_USD=None,
+            EXPECTED_WITHDRAWABLE_USD=None,
+            OPEN_CANDIDATE_COUNT=None,
+            FRESH_CANDIDATE_COUNT=None,
+            FUNDED_CANDIDATE_COUNT=None,
+            ELIGIBLE_CANDIDATE_COUNT=None,
+            STALE_RATIO=None,
+            MAX_TICKET_USD=None,
+            MEDIAN_TICKET_USD=None,
+            TOP_BLOCKER_REASONS=[],
+            EVIDENCE_AS_OF=evidence_as_of,
+            INVENTORY_STATE=inventory_state,
+        )
+
     open_rows = [row for row in rows if row.is_open]
     fresh = [row for row in open_rows if row.is_fresh]
+    funding_unknown = any(row.funding_verified is None for row in fresh)
     funded = [row for row in fresh if row.funding_verified is True]
+    eligibility_unknown = funding_unknown or any(row.eligible is None for row in funded)
     eligible = [row for row in funded if row.eligible is True]
+    claimability_unknown = eligibility_unknown or any(row.claimable_under_current_authority is None for row in eligible)
     claimable = [row for row in eligible if row.claimable_under_current_authority is True]
-    expected_values = [row.expected_withdrawable_usd for row in claimable if row.expected_withdrawable_usd is not None]
+    expected_unknown = claimability_unknown or any(row.expected_withdrawable_usd is None for row in claimable)
+
     blockers: dict[str, int] = {}
     for row in open_rows:
         for reason in row.blocker_reasons:
             blockers[reason] = blockers.get(reason, 0) + 1
     rewards = [row.reward_usd for row in open_rows]
     stale_count = len([row for row in open_rows if not row.is_fresh])
+
     return SupplyAdequacySnapshot(
         VISIBLE_USD=sum((row.reward_usd for row in open_rows), Decimal("0")),
         FRESH_USD=sum((row.reward_usd for row in fresh), Decimal("0")),
-        FUNDED_USD=sum((row.reward_usd for row in funded), Decimal("0")),
-        ELIGIBLE_USD=sum((row.reward_usd for row in eligible), Decimal("0")),
-        CLAIMABLE_UNDER_CURRENT_AUTHORITY_USD=sum((row.reward_usd for row in claimable), Decimal("0")),
-        EXPECTED_WITHDRAWABLE_USD=(sum(expected_values, Decimal("0")) if len(expected_values) == len(claimable) else None),
-        OPEN_COUNT=len(open_rows),
-        FRESH_COUNT=len(fresh),
-        FUNDED_COUNT=len(funded),
-        ELIGIBLE_COUNT=len(eligible),
+        FUNDED_USD=None if funding_unknown else sum((row.reward_usd for row in funded), Decimal("0")),
+        ELIGIBLE_USD=None if eligibility_unknown else sum((row.reward_usd for row in eligible), Decimal("0")),
+        CLAIMABLE_UNDER_CURRENT_AUTHORITY_USD=None if claimability_unknown else sum((row.reward_usd for row in claimable), Decimal("0")),
+        EXPECTED_WITHDRAWABLE_USD=(None if expected_unknown else sum((row.expected_withdrawable_usd or Decimal("0") for row in claimable), Decimal("0"))),
+        OPEN_CANDIDATE_COUNT=len(open_rows),
+        FRESH_CANDIDATE_COUNT=len(fresh),
+        FUNDED_CANDIDATE_COUNT=None if funding_unknown else len(funded),
+        ELIGIBLE_CANDIDATE_COUNT=None if eligibility_unknown else len(eligible),
         STALE_RATIO=(Decimal(stale_count) / Decimal(len(open_rows)) if open_rows else Decimal("0")),
         MAX_TICKET_USD=max(rewards) if rewards else None,
         MEDIAN_TICKET_USD=(Decimal(str(statistics.median([float(value) for value in rewards]))) if rewards else None),
         TOP_BLOCKER_REASONS=[key for key, _ in sorted(blockers.items(), key=lambda item: (-item[1], item[0]))[:5]],
         EVIDENCE_AS_OF=evidence_as_of,
+        INVENTORY_STATE=EvidenceState.PROVEN if rows else inventory_state,
     )
 
 
@@ -267,6 +306,13 @@ class RadarCandidate(BaseModel):
             raise ValueError("radar authoritative_url must use https")
         return value
 
+    @field_validator("read_only")
+    @classmethod
+    def must_be_read_only(cls, value: bool) -> bool:
+        if value is not True:
+            raise ValueError("ORDER-005 radar candidates are read-only")
+        return value
+
     def money_board_payload(self) -> dict[str, Any]:
         return {
             "canonical_opportunity_id": self.canonical_opportunity_id,
@@ -285,9 +331,35 @@ class RadarCandidate(BaseModel):
         }
 
 
-class SuperteamRadar:
+class _ReadOnlyMutationLock:
+    @staticmethod
+    def _forbid(action: str) -> None:
+        raise ValueError(f"ORDER-005 read-only radar forbids external action: {action}")
+
+    @classmethod
+    def claim(cls, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        cls._forbid("CLAIM")
+
+    @classmethod
+    def submit(cls, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        cls._forbid("SUBMIT")
+
+    @classmethod
+    def vote(cls, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        cls._forbid("VOTE")
+
+    @classmethod
+    def bid(cls, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        cls._forbid("BID")
+
+
+class SuperteamRadar(_ReadOnlyMutationLock):
     SOURCE = "superteam-radar"
-    SURFACE = "https://superteam.fun/earn/agents"
+    SURFACE = "https://superteam.fun/skill.md"
 
     @classmethod
     def normalize_listing(cls, listing: dict[str, Any]) -> RadarCandidate:
@@ -299,11 +371,12 @@ class SuperteamRadar:
         reward = Decimal(str(listing.get("reward_usd") or listing.get("reward") or 0))
         semantics = EconomicSemantics.from_structured({
             "requester_id": listing.get("requester_id") or listing.get("sponsor"),
-            "economic_buyer_id": listing.get("buyer_id") or listing.get("sponsor"),
+            "economic_buyer_id": listing.get("economic_buyer_id") or listing.get("buyer_id"),
             "budget_amount": reward if reward > 0 else None,
-            "budget_currency": "USD" if reward > 0 else None,
-            "payer_authority_verified": False,
-            "economic_evidence_refs": [cls.SURFACE],
+            "budget_currency": str(listing.get("currency") or "USD") if reward > 0 else None,
+            "payer_authority_verified": listing.get("payer_authority_verified") is True,
+            "funding_verified": listing.get("funding_verified") is True,
+            "economic_evidence_refs": listing.get("economic_evidence_refs", []),
         })
         return RadarCandidate(
             canonical_opportunity_id=f"superteam:{listing_id}",
@@ -316,14 +389,15 @@ class SuperteamRadar:
             acceptance=str(listing.get("acceptance") or "LISTING_RULES"),
             payout="HUMAN_CLAIM_REQUIRED",
             competition=(int(listing["submissions"]) if listing.get("submissions") is not None else None),
-            evidence_refs=[cls.SURFACE, "https://superteam.fun/skill.md"],
+            evidence_refs=[cls.SURFACE],
             economic_semantics=semantics,
         )
 
 
-class WorkProtocolEvaluatorRadar:
+class WorkProtocolEvaluatorRadar(_ReadOnlyMutationLock):
     SOURCE = "workprotocol-evaluator-radar"
     SURFACE = "https://workprotocol.ai/for-verifiers"
+    DOCS = "https://workprotocol.ai/docs/reference"
     DISPUTES_API = "https://workprotocol.ai/api/disputes"
     ARBITRATORS_API = "https://workprotocol.ai/api/arbitrators"
 
@@ -331,15 +405,20 @@ class WorkProtocolEvaluatorRadar:
     def surface_status(cls, *, open_disputes: int, active_arbitrators: int) -> dict[str, Any]:
         return {
             "source": cls.SOURCE,
-            "role_exists": True,
-            "open_disputes": int(open_disputes),
-            "active_arbitrators": int(active_arbitrators),
-            "reward_model": "SHARE_OF_5_PERCENT_PROTOCOL_FEE_ON_DISPUTES",
-            "claimability": "BLOCKED_ZERO_SPEND_STAKE_REQUIREMENT",
+            "ROLE_EXISTS": True,
+            "CURRENT_ELIGIBILITY_REQUIREMENTS": "verifier expertise; agent arbitrators require reputation >= 10",
+            "REPUTATION_REQUIREMENT": "AGENT_ARBITRATOR_REPUTATION_GTE_10",
+            "ACTIVE_CASE_SUPPLY": int(open_disputes),
+            "ACTIVE_ARBITRATORS": int(active_arbitrators),
+            "REWARD_FEE_MECHANISM": "portion of 5% protocol fee on disputed jobs",
+            "PAYOUT_PATH": "USDC_PER_VERDICT_ADVERTISED",
+            "WITHDRAWABILITY_EVIDENCE": "UNPROVEN",
+            "HUMAN_GATE": "STAKE_REQUIRED_PROHIBITED_BY_ZERO_SPEND",
+            "EVALUATOR_REVENUE": "UNPROVEN",
             "read_only": True,
             "vote_actions": 0,
             "claim_actions": 0,
-            "evidence_refs": [cls.SURFACE, cls.DISPUTES_API, cls.ARBITRATORS_API],
+            "evidence_refs": [cls.SURFACE, cls.DOCS, cls.DISPUTES_API, cls.ARBITRATORS_API],
         }
 
     @classmethod
@@ -349,7 +428,8 @@ class WorkProtocolEvaluatorRadar:
             raise ValueError("WorkProtocol dispute identity required")
         semantics = EconomicSemantics.from_structured({
             "requester_id": dispute.get("requesterId"),
-            "economic_buyer_id": dispute.get("requesterId"),
+            # A dispute requester is not automatically the evaluator's economic buyer or payer.
+            "economic_buyer_id": dispute.get("economic_buyer_id"),
             "payer_authority_verified": False,
             "economic_evidence_refs": [cls.DISPUTES_API],
         })
@@ -361,14 +441,14 @@ class WorkProtocolEvaluatorRadar:
             human_gate="STAKE_REQUIRED_PROHIBITED_BY_OWNER_ORDER",
             acceptance="ARBITRATION_RULES",
             payout="UNPROVEN_UNTIL_AUTHORITATIVE_RELEASE_WITHDRAWABLE_PROOF",
-            evidence_refs=[cls.SURFACE, cls.DISPUTES_API],
+            evidence_refs=[cls.SURFACE, cls.DOCS, cls.DISPUTES_API],
             economic_semantics=semantics,
         )
 
 
-class DealworkProviderRadar:
+class DealworkProviderRadar(_ReadOnlyMutationLock):
     SOURCE = "dealwork-provider-radar"
-    SURFACE = "https://dealwork.ai/how-it-works"
+    SURFACE = "https://dealwork.ai/skill.md"
 
     @classmethod
     def normalize_provider_job(cls, job: dict[str, Any]) -> RadarCandidate:
@@ -377,15 +457,18 @@ class DealworkProviderRadar:
             raise ValueError("Dealwork job identity required")
         if str(job.get("role") or "provider").lower() not in {"provider", "worker", "seller"}:
             raise ValueError("Dealwork radar is provider-only")
+        if bool(job.get("requires_downstream_payment") or job.get("hire_required") or job.get("subcontract_required")):
+            raise ValueError("Dealwork downstream payment/hire/subcontract is constitutionally ineligible")
         reward = Decimal(str(job.get("reward_usd") or job.get("budget") or 0))
         semantics = EconomicSemantics.from_structured({
             "requester_id": job.get("requester_id") or job.get("buyer_id"),
-            "economic_buyer_id": job.get("buyer_id") or job.get("requester_id"),
+            "economic_buyer_id": job.get("buyer_id"),
             "budget_amount": reward if reward > 0 else None,
-            "budget_currency": "USD" if reward > 0 else None,
+            "budget_currency": str(job.get("currency") or "USD") if reward > 0 else None,
             "funding_verified": job.get("funding_verified") is True,
             "payer_authority_verified": job.get("payer_authority_verified") is True,
-            "economic_evidence_refs": [cls.SURFACE],
+            "external_funding_ref": job.get("external_funding_ref"),
+            "economic_evidence_refs": job.get("economic_evidence_refs", []),
         })
         return RadarCandidate(
             canonical_opportunity_id=f"dealwork:{job_id}",
@@ -397,7 +480,7 @@ class DealworkProviderRadar:
             human_gate=str(job.get("human_gate") or "KYA_OR_CREDENTIAL_AUTHORITY_UNKNOWN"),
             acceptance=str(job.get("acceptance") or "PLATFORM_CONTRACT"),
             payout="ESCROW_PLATFORM_CLAIM_REQUIRES_SEPARATE_PROOF",
-            evidence_refs=[cls.SURFACE, "https://dealwork.ai/skill.md"],
+            evidence_refs=[cls.SURFACE],
             economic_semantics=semantics,
         )
 
@@ -407,11 +490,53 @@ class DealworkProviderRadar:
         raise ValueError("Dealwork client/hire/subcontract action forbidden in ORDER-005")
 
 
-class DemandFoundryShadowRecord(BaseModel):
+class PainEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source_url: str
     source_id: str
-    artifact_type: str = "STRUCTURED_RESEARCH_SHADOW"
+    reproducibility_evidence: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class BuyerContractSpecShadow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_identity: str
+    source_url: str
+    proposed_deliverable: str
+    objective_acceptance_predicate: str
+    requester_identity_status: EvidenceState
+    buyer_identity_status: EvidenceState
+    payer_authority_status: EvidenceState
+    budget_funding_status: BudgetEvidence
+    price_hypothesis_usd: Decimal | None = None
+    external_action_requirement: str
+    human_gate: str
+    legal_policy_uncertainty: str
+    confidence: str
+    evidence_refs: list[str] = Field(default_factory=list)
+    disposition: str
+
+    @field_validator("disposition")
+    @classmethod
+    def disposition_enum(cls, value: str) -> str:
+        value = value.upper()
+        if value not in {"KILL", "SHADOW_WATCH", "RESEARCH_CANDIDATE"}:
+            raise ValueError("invalid Demand Foundry disposition")
+        return value
+
+    @field_validator("external_action_requirement")
+    @classmethod
+    def no_executable_transition(cls, value: str) -> str:
+        forbidden = {"CONTACT", "OUTREACH", "PROPOSE", "CLAIM", "SIGN", "INVOICE", "ESCROW_CREATE"}
+        if value.upper() in forbidden:
+            raise ValueError("Demand Foundry executable external action forbidden")
+        return value
+
+
+class DemandFoundryShadowRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    pain: PainEvidence
+    contract: BuyerContractSpecShadow
     economic_semantics: EconomicSemantics
     outreach_actions: list[str] = Field(default_factory=list)
     claim_actions: list[str] = Field(default_factory=list)
@@ -433,7 +558,8 @@ class DemandFoundryShadow:
         identity = str(issue.get("id") or issue.get("number") or "").strip()
         if not identity:
             raise ValueError("Demand Foundry source identity required")
-        # The body/title are intentionally not parsed for money words. Only structured external evidence can upgrade economics.
+
+        # Title/body are deliberately excluded from economic inference. Structured evidence only.
         semantics = EconomicSemantics.from_structured({
             "requester_id": issue.get("requester_id"),
             "economic_buyer_id": issue.get("economic_buyer_id"),
@@ -442,11 +568,44 @@ class DemandFoundryShadow:
             "external_funding_ref": issue.get("external_funding_ref"),
             "budget_amount": issue.get("budget_amount"),
             "budget_currency": issue.get("budget_currency"),
+            "price_hypothesis_usd": issue.get("price_hypothesis_usd"),
             "economic_evidence_refs": issue.get("economic_evidence_refs", []),
         })
-        return DemandFoundryShadowRecord(
+        reproduction = [str(value) for value in issue.get("reproducibility_evidence", []) if str(value).strip()]
+        evidence_refs = [url, *[str(value) for value in issue.get("evidence_refs", []) if str(value).strip()]]
+        if semantics.funded_for_admission and semantics.economic_buyer_identified == EvidenceState.PROVEN:
+            disposition = "RESEARCH_CANDIDATE"
+        elif reproduction:
+            disposition = "SHADOW_WATCH"
+        else:
+            disposition = "KILL"
+
+        pain = PainEvidence(
             source_url=url,
             source_id=identity,
+            reproducibility_evidence=reproduction,
+            evidence_refs=evidence_refs,
+        )
+        contract = BuyerContractSpecShadow(
+            source_identity=identity,
+            source_url=url,
+            proposed_deliverable=str(issue.get("proposed_deliverable") or "UNKNOWN"),
+            objective_acceptance_predicate=str(issue.get("objective_acceptance_predicate") or "UNKNOWN"),
+            requester_identity_status=semantics.requester_identified,
+            buyer_identity_status=semantics.economic_buyer_identified,
+            payer_authority_status=semantics.payer_authority_verified,
+            budget_funding_status=semantics.budget_evidence,
+            price_hypothesis_usd=semantics.price_hypothesis_usd,
+            external_action_requirement="NONE_AUTHORIZED_ORDER_005",
+            human_gate=str(issue.get("human_gate") or "UNKNOWN"),
+            legal_policy_uncertainty=str(issue.get("legal_policy_uncertainty") or "UNKNOWN"),
+            confidence="EVIDENCE_BOUNDED",
+            evidence_refs=evidence_refs,
+            disposition=disposition,
+        )
+        return DemandFoundryShadowRecord(
+            pain=pain,
+            contract=contract,
             economic_semantics=semantics,
             evidence_as_of=evidence_as_of,
         )
