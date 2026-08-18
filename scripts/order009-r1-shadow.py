@@ -272,16 +272,6 @@ def probe_executor() -> dict[str, Any]:
         result["owner_action"] = "Replace GEMINI_API_KEY with a free Google AI Studio key that exposes Gemma 4."
         return result
 
-    probe = _gemma_generate(
-        api_key,
-        model,
-        "Respond briefly to confirm this inference request was processed.",
-        max_tokens=32,
-    )
-    result["live_inference_probe"] = bool(probe.strip())
-    result["live_probe_response_sha256"] = hashlib.sha256(probe.encode()).hexdigest()
-    result["live_probe_response_chars"] = len(probe)
-
     task_spec = (ROOT / "deliverables/workprotocol_gha_log_parser/README.md").read_text(encoding="utf-8")
     source = (ROOT / "deliverables/workprotocol_gha_log_parser/cli.py").read_text(encoding="utf-8")
     prompt = f"""You are the zero-cost execution route for a real shadow coding job. No claim or submission is allowed.
@@ -299,9 +289,14 @@ README:
 SOURCE:
 {source}
 """
+    # The actual bounded shadow execution is itself the live inference probe.
+    # A second synthetic inference is unnecessary and can consume free-tier RPM.
     review_text = _gemma_generate(api_key, model, prompt, max_tokens=384)
-    result["shadow_review_response_sha256"] = hashlib.sha256(review_text.encode()).hexdigest()
-    result["shadow_review_response_chars"] = len(review_text)
+    result["live_inference_probe"] = bool(review_text.strip())
+    result["live_probe_response_sha256"] = hashlib.sha256(review_text.encode()).hexdigest()
+    result["live_probe_response_chars"] = len(review_text)
+    result["shadow_review_response_sha256"] = result["live_probe_response_sha256"]
+    result["shadow_review_response_chars"] = result["live_probe_response_chars"]
     review = _parse_json_object(review_text)
     result["shadow_review"] = review
     result["status"] = "PASS" if str(review.get("verdict") or "").upper() == "PASS" else "FAIL"
