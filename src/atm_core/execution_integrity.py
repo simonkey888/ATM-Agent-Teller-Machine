@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -22,11 +23,12 @@ class RecoveryOutcome(StrEnum):
 
 
 class IndependentCheckerReceipt(BaseModel):
-    """ATM-owned checker proof. Worker payloads cannot mint or influence its verdict."""
+    """ATM-owned material checker proof. Worker payloads cannot mint its verdict."""
 
     model_config = ConfigDict(extra="forbid")
     checker_id: str = "ATM_INDEPENDENT_CHECKER_V1"
-    checker_boundary: str = "ATM_SUPERVISOR_INDEPENDENT_VERIFIER_V1"
+    checker_boundary: str = "ATM_SUPERVISOR_INDEPENDENT_VERIFIER_V2"
+    checker_workspace_id: str
     execution_job_id: str
     worker_id: str
     work_lease_id: str
@@ -34,7 +36,9 @@ class IndependentCheckerReceipt(BaseModel):
     job_spec_hash: str
     acceptance_contract_hash: str
     artifact_hash: str
+    task_result_hash: str
     progress_receipt_hashes: list[str] = Field(default_factory=list)
+    predicate_results: list[dict[str, Any]] = Field(default_factory=list)
     verdict: str
     reason: str
     checked_at: str = Field(default_factory=utcnow_iso)
@@ -68,11 +72,13 @@ def assert_lease_executable(lease: WorkLease, now: datetime | None = None) -> No
 
 
 class ProductionExecutionIntegrity:
-    """Canonical production integrity layer around the landed CheckoutSubprocessActuator.
+    """Canonical supervisor integrity around the landed CheckoutSubprocessActuator.
 
-    Production WORK is not complete until this supervisor-owned layer re-reads the
-    immutable acceptance contract and exact result artifact and persists a distinct
-    checker receipt. The worker checkout never gets access to this receipt table.
+    Worker execution and ATM acceptance checking are deliberately distinct. The
+    worker subprocess receives only a frozen job path/result path and zero-secret
+    environment. The checker runs afterwards in a supervisor-owned workspace,
+    rehydrates the exact result by hash, recomputes deterministic task truth from
+    the frozen contract, and persists PASS/FAIL without trusting worker self-tests.
     """
 
     FORBIDDEN_WORKER_SELF_CERT_FIELDS = {
@@ -114,17 +120,32 @@ class ProductionExecutionIntegrity:
     def acceptance_path(self, execution_job_id: str) -> Path:
         return self.artifact_root / f"{execution_job_id}.acceptance.json"
 
+    def checker_workspace(self, execution_job_id: str) -> Path:
+        path = self.artifact_root / "checker-workspaces" / execution_job_id
+        worker_path = (self.workspace_root / execution_job_id).resolve()
+        checker_path = path.resolve()
+        if checker_path == worker_path or checker_path in worker_path.parents or worker_path in checker_path.parents:
+            raise ValueError("checker workspace overlaps worker execution boundary")
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     @staticmethod
     def acceptance_contract_hash(spec: WorkerJobSpec) -> str:
-        return canonical_hash({"criteria": list(spec.frozen_acceptance_criteria)})
+        return canonical_hash(
+            {
+                "criteria": list(spec.frozen_acceptance_criteria),
+                "deterministic_checks": list(spec.deterministic_checks),
+            }
+        )
 
     def freeze_acceptance(self, job: ExecutionJob, spec: WorkerJobSpec) -> str:
         payload = {
-            "schema": "ATM_FROZEN_ACCEPTANCE_V1",
+            "schema": "ATM_FROZEN_ACCEPTANCE_V2",
             "execution_job_id": job.execution_job_id,
             "job_spec_hash": job.job_spec_hash,
             "scope_hash": job.scope_hash,
             "criteria": list(spec.frozen_acceptance_criteria),
+            "deterministic_checks": list(spec.deterministic_checks),
         }
         raw = (canonical_json(payload) + "\n").encode("utf-8")
         path = self.acceptance_path(job.execution_job_id)
@@ -184,6 +205,117 @@ class ProductionExecutionIntegrity:
         if canonical_hash(spec.model_dump(mode="json")) != job.job_spec_hash:
             raise ValueError("execution job spec hash mismatch")
 
+    @staticmethod
+    def _evaluate_acceptance(
+        spec: WorkerJobSpec,
+        acceptance: dict[str, Any],
+        task_result: dict[str, Any],
+    ) -> tuple[str, str, list[dict[str, Any]]]:
+        results: list[dict[str, Any]] = []
+        output = task_result.get("task_output")
+        if not isinstance(output, dict):
+            return "FAIL", "TASK_OUTPUT_MISSING", results
+
+        if spec.task_type != "deterministic_digest_v1":
+            return "FAIL", "UNSUPPORTED_MATERIAL_ACCEPTANCE_TASK", results
+        frozen_input = spec.repository_or_input.encode("utf-8")
+        recomputed_sha = hashlib.sha256(frozen_input).hexdigest()
+        actual_sha = str(output.get("sha256") or "")
+        actual_length = output.get("byte_length")
+        recomputed_ok = actual_sha == recomputed_sha and actual_length == len(frozen_input)
+        results.append(
+            {
+                "predicate": "ATM_RECOMPUTE_SHA256_UTF8_INPUT_V1",
+                "expected": recomputed_sha,
+                "actual": actual_sha,
+                "passed": recomputed_ok,
+            }
+        )
+        if not recomputed_ok:
+            return "FAIL", "TASK_RESULT_MATERIALLY_WRONG", results
+
+        predicates = acceptance.get("deterministic_checks")
+        if not isinstance(predicates, list) or not predicates:
+            return "FAIL", "NO_ATM_MATERIAL_ACCEPTANCE_PREDICATE", results
+        for raw in predicates:
+            predicate = str(raw)
+            sha_match = re.fullmatch(r"TASK_RESULT_SHA256_EQ:([0-9a-f]{64})", predicate)
+            length_match = re.fullmatch(r"TASK_RESULT_BYTE_LENGTH_EQ:([0-9]+)", predicate)
+            if sha_match:
+                expected = sha_match.group(1)
+                passed = actual_sha == expected
+                results.append(
+                    {
+                        "predicate": predicate,
+                        "expected": expected,
+                        "actual": actual_sha,
+                        "passed": passed,
+                    }
+                )
+            elif length_match:
+                expected_int = int(length_match.group(1))
+                passed = actual_length == expected_int
+                results.append(
+                    {
+                        "predicate": predicate,
+                        "expected": expected_int,
+                        "actual": actual_length,
+                        "passed": passed,
+                    }
+                )
+            else:
+                results.append(
+                    {
+                        "predicate": predicate,
+                        "expected": "SUPPORTED_ATM_PREDICATE",
+                        "actual": "UNSUPPORTED",
+                        "passed": False,
+                    }
+                )
+                passed = False
+            if not passed:
+                return "FAIL", "FROZEN_ACCEPTANCE_PREDICATE_FAILED", results
+        return "PASS", "ATM_MATERIAL_ACCEPTANCE_PREDICATES_SATISFIED", results
+
+    def _rehydrate_task_result(
+        self,
+        artifact: dict[str, Any],
+        job: ExecutionJob,
+        spec: WorkerJobSpec,
+        lease: WorkLease,
+    ) -> tuple[dict[str, Any], str, str]:
+        task_result = artifact.get("task_result")
+        task_result_hash = str(artifact.get("task_result_hash") or "")
+        if not isinstance(task_result, dict):
+            raise ValueError("checker requires task-specific result")
+        if canonical_hash(task_result) != task_result_hash:
+            raise ValueError("checker task result hash mismatch")
+        expected = {
+            "schema": "ATM_TASK_RESULT_V1",
+            "execution_job_id": job.execution_job_id,
+            "work_lease_id": lease.lease_id,
+            "scope_hash": spec.scope_hash,
+            "job_spec_hash": job.job_spec_hash,
+            "task_type": spec.task_type,
+            "outgoing_spend_usd": 0,
+        }
+        for key, value in expected.items():
+            if task_result.get(key) != value:
+                raise ValueError(f"checker task result binding mismatch: {key}")
+
+        checker_dir = self.checker_workspace(job.execution_job_id)
+        checker_input = checker_dir / "task-result.json"
+        raw = (canonical_json(task_result) + "\n").encode("utf-8")
+        if checker_input.exists():
+            if checker_input.read_bytes() != raw:
+                raise ValueError("checker workspace task result conflict")
+        else:
+            checker_input.write_bytes(raw)
+        rehydrated = json.loads(checker_input.read_text(encoding="utf-8"))
+        if canonical_hash(rehydrated) != task_result_hash:
+            raise ValueError("checker rehydrated result hash mismatch")
+        return rehydrated, task_result_hash, f"checker:{job.execution_job_id}"
+
     def independently_check(
         self,
         job: ExecutionJob,
@@ -192,21 +324,22 @@ class ProductionExecutionIntegrity:
         manifest: WorkerManifest,
         profile: ActuatorProfile,
     ) -> IndependentCheckerReceipt:
-        """Re-read ATM-owned criteria and exact artifact bytes outside worker execution context."""
+        """Recompute material acceptance outside the worker execution boundary."""
         self._validate_bindings(job, spec, lease, manifest, profile)
 
         acceptance_path = self.acceptance_path(job.execution_job_id)
         if not acceptance_path.exists():
             raise ValueError("frozen acceptance contract missing")
-        acceptance_raw = acceptance_path.read_bytes()
-        acceptance = json.loads(acceptance_raw.decode("utf-8"))
+        acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
         expected_acceptance_hash = self.acceptance_contract_hash(spec)
-        if acceptance.get("schema") != "ATM_FROZEN_ACCEPTANCE_V1":
+        if acceptance.get("schema") != "ATM_FROZEN_ACCEPTANCE_V2":
             raise ValueError("checker acceptance schema mismatch")
         if acceptance.get("execution_job_id") != job.execution_job_id:
             raise ValueError("checker acceptance execution identity mismatch")
         if acceptance.get("criteria") != list(spec.frozen_acceptance_criteria):
             raise ValueError("checker acceptance criteria mismatch")
+        if acceptance.get("deterministic_checks") != list(spec.deterministic_checks):
+            raise ValueError("checker deterministic acceptance mismatch")
         if acceptance.get("scope_hash") != job.scope_hash or acceptance.get("job_spec_hash") != job.job_spec_hash:
             raise ValueError("checker frozen acceptance binding mismatch")
 
@@ -241,7 +374,20 @@ class ProductionExecutionIntegrity:
             raise ValueError("checker requires at least two durable progress receipts")
         if any(not receipt.measurable_progress for receipt in progress):
             raise ValueError("checker progress is not measurable")
+
+        task_result, task_result_hash, checker_workspace_id = self._rehydrate_task_result(
+            artifact, job, spec, lease
+        )
+        verdict, reason, predicate_results = self._evaluate_acceptance(spec, acceptance, task_result)
+
+        existing = self.checker_receipt(job.execution_job_id)
+        if existing is not None:
+            if existing.artifact_hash != artifact_hash or existing.task_result_hash != task_result_hash:
+                raise ValueError("existing checker receipt does not bind current result")
+            return existing
+
         receipt = IndependentCheckerReceipt(
+            checker_workspace_id=checker_workspace_id,
             execution_job_id=job.execution_job_id,
             worker_id=job.worker_id,
             work_lease_id=job.work_lease_id,
@@ -249,9 +395,11 @@ class ProductionExecutionIntegrity:
             job_spec_hash=job.job_spec_hash,
             acceptance_contract_hash=expected_acceptance_hash,
             artifact_hash=artifact_hash,
+            task_result_hash=task_result_hash,
             progress_receipt_hashes=[row.receipt_hash for row in progress],
-            verdict="PASS",
-            reason="ATM_REVALIDATED_FROZEN_ACCEPTANCE_BINDINGS_EXACT_ARTIFACT_AND_PROGRESS",
+            predicate_results=predicate_results,
+            verdict=verdict,
+            reason=reason,
         )
         return self._persist_checker(receipt)
 
@@ -296,10 +444,12 @@ class ProductionExecutionIntegrity:
                 receipt = self.independently_check(job, spec, lease, manifest, profile)
             except Exception:
                 return self._checker_fail_closed(job, "RECOVERY_INDEPENDENT_CHECK_FAILED")
+            if receipt.verdict != "PASS":
+                return self._checker_fail_closed(job, "RECOVERY_MATERIAL_ACCEPTANCE_FAILED")
             reconciled = self.store.terminal(
                 job.execution_job_id,
                 checker_hash=receipt.receipt_hash,
-                reason="INDEPENDENT_CHECKER_PASS_RECONCILED",
+                reason="INDEPENDENT_MATERIAL_CHECKER_PASS_RECONCILED",
             )
             return reconciled, RecoveryOutcome.RECONCILE_RESULT
 
@@ -307,15 +457,19 @@ class ProductionExecutionIntegrity:
             receipt = self.checker_receipt(job.execution_job_id)
             if receipt and receipt.verdict == "PASS" and receipt.receipt_hash == job.checker_hash:
                 return job, RecoveryOutcome.RECONCILE_RESULT
+            if receipt and receipt.verdict == "FAIL":
+                return self._checker_fail_closed(job, "TERMINAL_MATERIAL_CHECKER_FAIL")
             if job.result_hash and artifact_path.exists() and self._sha256_file(artifact_path) == job.result_hash:
                 try:
                     receipt = self.independently_check(job, spec, lease, manifest, profile)
                 except Exception:
                     return self._checker_fail_closed(job, "TERMINAL_INDEPENDENT_CHECK_FAILED")
+                if receipt.verdict != "PASS":
+                    return self._checker_fail_closed(job, "TERMINAL_MATERIAL_ACCEPTANCE_FAILED")
                 reconciled = self.store.terminal(
                     job.execution_job_id,
                     checker_hash=receipt.receipt_hash,
-                    reason="INDEPENDENT_CHECKER_PASS_RECONCILED",
+                    reason="INDEPENDENT_MATERIAL_CHECKER_PASS_RECONCILED",
                 )
                 return reconciled, RecoveryOutcome.RECONCILE_RESULT
             return self._checker_fail_closed(job, "TERMINAL_WITHOUT_INDEPENDENT_CHECKER_PROOF")
@@ -331,7 +485,7 @@ class ProductionExecutionIntegrity:
         manifest: WorkerManifest,
         profile: ActuatorProfile,
     ) -> tuple[ExecutionJob, RecoveryOutcome]:
-        """Create identity before dispatch, recover re-entry, then require independent checker proof."""
+        """Create identity before dispatch, recover re-entry, then require material checker proof."""
         job = self.store.create_or_get(
             opportunity_id=spec.canonical_opportunity_id,
             worker_id=manifest.worker_id,
@@ -344,7 +498,6 @@ class ProductionExecutionIntegrity:
         if job.status != ExecutionStatus.CREATED:
             return self.recover(job, spec, lease, manifest, profile)
 
-        # P0-B boundary: reject expired/equal lease before CheckoutSubprocessActuator can spawn anything.
         if not lease_is_executable(lease):
             self.store.fail(job.execution_job_id, ExecutionStatus.EXPIRED, "LEASE_EXPIRED_BEFORE_DISPATCH")
             raise ValueError("WorkLease expired or expires exactly now")
@@ -359,10 +512,12 @@ class ProductionExecutionIntegrity:
                 receipt = self.independently_check(job, spec, lease, manifest, profile)
             except Exception:
                 return self._checker_fail_closed(job, "INDEPENDENT_CHECK_FAILED_AFTER_DISPATCH")
+            if receipt.verdict != "PASS":
+                return self._checker_fail_closed(job, "MATERIAL_ACCEPTANCE_FAILED_AFTER_DISPATCH")
             job = self.store.terminal(
                 job.execution_job_id,
                 checker_hash=receipt.receipt_hash,
-                reason="INDEPENDENT_CHECKER_PASS",
+                reason="INDEPENDENT_MATERIAL_CHECKER_PASS",
             )
             return job, RecoveryOutcome.RECONCILE_RESULT
         return job, RecoveryOutcome.CANCEL
