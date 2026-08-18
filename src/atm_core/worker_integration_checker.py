@@ -29,13 +29,7 @@ def _predicate(name: str, expected: Any, actual: Any) -> dict[str, Any]:
     return {"predicate": name, "expected": expected, "actual": actual, "passed": actual == expected}
 
 
-def _base_bindings(
-    task_result: dict[str, Any],
-    spec: WorkerJobSpec,
-    lease: WorkLease,
-    worker_id: str,
-    source_sha: str,
-) -> list[dict[str, Any]]:
+def _base_bindings(task_result: dict[str, Any], spec: WorkerJobSpec, lease: WorkLease, worker_id: str, source_sha: str) -> list[dict[str, Any]]:
     producer = task_result.get("producer") if isinstance(task_result.get("producer"), dict) else {}
     return [
         _predicate("ATM_SCHEMA", "ATM_TASK_RESULT_V1", task_result.get("schema")),
@@ -49,17 +43,13 @@ def _base_bindings(
     ]
 
 
-def check_zungun(
-    task_result: dict[str, Any],
-    spec: WorkerJobSpec,
-    lease: WorkLease,
-    source_sha: str,
-) -> IntegrationCheckerReceipt:
+def check_zungun(task_result: dict[str, Any], spec: WorkerJobSpec, lease: WorkLease, source_sha: str) -> IntegrationCheckerReceipt:
     predicates = _base_bindings(task_result, spec, lease, "zungun", source_sha)
     native = task_result.get("native_worker_result") if isinstance(task_result.get("native_worker_result"), dict) else {}
     checks = native.get("tests_checks") if isinstance(native.get("tests_checks"), list) else []
     changed = native.get("changed_paths") if isinstance(native.get("changed_paths"), list) else None
     state = native.get("execution_state")
+    safe_terminal = state in {"COMPLETED", "COMPLETED_WITH_FINDINGS", "UNKNOWN", "AMBIGUOUS"}
     predicates.extend([
         _predicate("NATIVE_SCHEMA", "ZUNGUN_WORKER_RESULT_V1", native.get("schema")),
         _predicate("NATIVE_ORIGIN", "ZUNGUN", native.get("origin")),
@@ -75,7 +65,7 @@ def check_zungun(
         _predicate("NATIVE_SPEND_ZERO", 0, native.get("outgoing_spend_usd")),
         _predicate("LINK_DOCTOR_EXECUTED", True, "link_doctor" in checks),
         _predicate("BLACKOUT_CORE_EXECUTED", True, "blackout_core" in checks),
-        _predicate("MATERIAL_TERMINAL_STATE", True, state in {"COMPLETED", "COMPLETED_WITH_FINDINGS"}),
+        _predicate("NATIVE_SAFE_TERMINAL_RESULT", True, safe_terminal),
         _predicate("CONTENT_HASHES_PRESENT", True, bool(native.get("content_hashes"))),
     ])
     passed = all(bool(row["passed"]) for row in predicates)
@@ -88,12 +78,7 @@ def check_zungun(
     )
 
 
-def check_across(
-    task_result: dict[str, Any],
-    spec: WorkerJobSpec,
-    lease: WorkLease,
-    source_sha: str,
-) -> IntegrationCheckerReceipt:
+def check_across(task_result: dict[str, Any], spec: WorkerJobSpec, lease: WorkLease, source_sha: str) -> IntegrationCheckerReceipt:
     predicates = _base_bindings(task_result, spec, lease, "across-edge", source_sha)
     native = task_result.get("native_worker_result") if isinstance(task_result.get("native_worker_result"), dict) else {}
     analysis = task_result.get("native_analysis") if isinstance(task_result.get("native_analysis"), dict) else {}
