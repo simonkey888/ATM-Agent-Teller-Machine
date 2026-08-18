@@ -73,7 +73,9 @@ class R1HardeningTests(unittest.TestCase):
         for key in ("pending_usd", "accepted_usd", "settled_usd", "withdrawable_usd"):
             self.assertIn(key, text)
         self.assertIn("request.arrayBuffer()", text)
-        self.assertIn("SAFE_MONEY", text)
+        self.assertIn("SAFE_BOARD", text)
+        for evidence_key in ("active_leases", "eligible_provenance", "states"):
+            self.assertIn(evidence_key, text)
         self.assertNotIn("seed phrase", text.lower())
 
     def test_superteam_uses_documented_listing_and_comment_monitoring_surfaces(self):
