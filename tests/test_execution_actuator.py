@@ -34,7 +34,7 @@ class ExecutionActuatorContractTests(unittest.TestCase):
         boqa = load_actuator_profile(PROFILES, "boqa")
         zungun = load_actuator_profile(PROFILES, "zungun")
         self.assertEqual(boqa.source_sha, "797dbf53e1cccf9521d3e2af9b8dc723fc7d1ca1")
-        self.assertEqual(zungun.source_sha, "f3f59767cbc5f10b78d838b2ab8fbc28f9559a7b")
+        self.assertEqual(zungun.source_sha, "7c407cc5e39ec0698a6763ea621eba5e87d832b8")
         self.assertEqual(boqa.task_entrypoint, "tools/atm-worker-entrypoint.mjs")
         self.assertEqual(zungun.task_entrypoint, "tools/atm-worker-entrypoint.mjs")
         for worker_id in ("boqa", "zungun"):
