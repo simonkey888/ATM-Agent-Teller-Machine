@@ -1,0 +1,12 @@
+{
+  "worker_id": "across-edge",
+  "registered": true,
+  "active": false,
+  "source_pin": "372db5843da4a67b4b66e87579d91375657d9272",
+  "source_pin_ancestor": "f65e597a650bfaa5b09824b299811c8da713249e",
+  "integration_audit_ref": "https://github.com/simonkey888/ATM-Agent-Teller-Machine/issues/31",
+  "claim_authority": false,
+  "submission_authority": false,
+  "financial_authority": false,
+  "max_spend_usd": 0
+}
