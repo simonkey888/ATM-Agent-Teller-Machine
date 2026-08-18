@@ -92,6 +92,8 @@ jobs:
           PYTHONPATH: src:.
         run: python scripts/order009-r1-check.py
       - name: Fresh WorkProtocol + zero-cost Gemma 4 shadow
+        id: shadow
+        continue-on-error: true
         env:
           PYTHONPATH: src:.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -99,51 +101,70 @@ jobs:
           GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI_API_KEY }}
         run: python scripts/order009-r1-shadow.py
       - name: Publish sanitized R1 evidence
+        if: always()
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          SHADOW_OUTCOME: ${{ steps.shadow.outcome }}
         run: |
           python - <<'PY'
           import json, os, urllib.request
           from pathlib import Path
 
-          evidence = json.loads(Path("order009-r1-shadow-evidence.json").read_text())
-          check = json.loads(Path("order009-r1-check-evidence.json").read_text())
-          wp = evidence["workprotocol"]
-          executor = evidence["executor"]
-          safe = {
-              "schema": "ATM_ORDER009_R1_EVIDENCE_V1",
-              "head": evidence["head"],
-              "workprotocol_job": evidence["workprotocol_job"],
-              "job_live_verified": all(wp["checks"].values()),
-              "escrow_75_usdc": wp["checks"]["escrow_75_usdc"],
-              "active_slot_available": wp["checks"]["active_slot_available"],
-              "workprotocol_open_total": wp["open_total"],
-              "workprotocol_source_payload_sha256": wp["source_payload_sha256"],
-              "workprotocol_etag": wp["etag"],
-              "escrow_tx": wp["escrow_tx"],
-              "claims_total": wp["claims_total"],
-              "rejected_claims": len(wp["rejected_claims"]),
-              "executor_provider": executor["provider"],
-              "credential_present": executor["credential_present"],
-              "model": executor["model"],
-              "model_currently_available": executor["model_currently_available"],
-              "zero_cost_currently_proven": executor["zero_cost_currently_proven"],
-              "live_inference_probe": executor["live_inference_probe"],
-              "paid_fallback": executor["paid_fallback"],
-              "executor_status": executor["status"],
-              "owner_action": executor.get("owner_action"),
-              "shadow_artifact_sha256": evidence["artifact_sha256"],
-              "independent_check": "PASS",
-              "representative_json_sha256": check["representative_json_sha256"],
-              "terminal": evidence["terminal"],
-              "claim_performed": False,
-              "submission_performed": False,
-              "merge": False,
-              "outgoing_spend_usd": "0",
-              "realized_withdrawable_usd": "0",
-              "run_id": os.environ["GITHUB_RUN_ID"],
-              "run_url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
-          }
+          evidence_path = Path("order009-r1-shadow-evidence.json")
+          check_path = Path("order009-r1-check-evidence.json")
+          if evidence_path.exists() and check_path.exists():
+              evidence = json.loads(evidence_path.read_text())
+              check = json.loads(check_path.read_text())
+              wp = evidence["workprotocol"]
+              executor = evidence["executor"]
+              safe = {
+                  "schema": "ATM_ORDER009_R1_EVIDENCE_V1",
+                  "head": evidence["head"],
+                  "workprotocol_job": evidence["workprotocol_job"],
+                  "job_live_verified": all(wp["checks"].values()),
+                  "escrow_75_usdc": wp["checks"]["escrow_75_usdc"],
+                  "active_slot_available": wp["checks"]["active_slot_available"],
+                  "workprotocol_open_total": wp["open_total"],
+                  "workprotocol_source_payload_sha256": wp["source_payload_sha256"],
+                  "workprotocol_etag": wp["etag"],
+                  "escrow_tx": wp["escrow_tx"],
+                  "claims_total": wp["claims_total"],
+                  "rejected_claims": len(wp["rejected_claims"]),
+                  "executor_provider": executor["provider"],
+                  "credential_present": executor["credential_present"],
+                  "model": executor["model"],
+                  "model_currently_available": executor["model_currently_available"],
+                  "zero_cost_currently_proven": executor["zero_cost_currently_proven"],
+                  "live_inference_probe": executor["live_inference_probe"],
+                  "paid_fallback": executor["paid_fallback"],
+                  "executor_status": executor["status"],
+                  "owner_action": executor.get("owner_action"),
+                  "shadow_artifact_sha256": evidence["artifact_sha256"],
+                  "independent_check": "PASS",
+                  "representative_json_sha256": check["representative_json_sha256"],
+                  "terminal": evidence["terminal"],
+                  "claim_performed": False,
+                  "submission_performed": False,
+                  "merge": False,
+                  "outgoing_spend_usd": "0",
+                  "realized_withdrawable_usd": "0",
+                  "evidence_file": True,
+              }
+          else:
+              safe = {
+                  "schema": "ATM_ORDER009_R1_EVIDENCE_V1",
+                  "head": os.environ["GITHUB_SHA"],
+                  "terminal": "FAIL_CLOSED",
+                  "shadow_step_outcome": os.environ.get("SHADOW_OUTCOME", "unknown"),
+                  "evidence_file": False,
+                  "claim_performed": False,
+                  "submission_performed": False,
+                  "merge": False,
+                  "outgoing_spend_usd": "0",
+                  "realized_withdrawable_usd": "0",
+              }
+          safe["run_id"] = os.environ["GITHUB_RUN_ID"]
+          safe["run_url"] = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
           body = "ORDER-009-R1 SHADOW EVIDENCE\n```json\n" + json.dumps(safe, sort_keys=True) + "\n```"
           request = urllib.request.Request(
               f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/issues/38/comments",
@@ -160,6 +181,20 @@ jobs:
               posted = json.loads(response.read().decode())
           print("ORDER009_R1_EVIDENCE_COMMENT=" + str(posted.get("html_url")))
           print("ORDER009_R1_TERMINAL=" + safe["terminal"])
+          PY
+      - name: Enforce R1 terminal
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("order009-r1-shadow-evidence.json")
+          if not path.exists():
+              raise SystemExit("ORDER009_R1_FAIL_CLOSED_NO_EVIDENCE")
+          terminal = json.loads(path.read_text()).get("terminal")
+          if terminal not in {"READY_FOR_AUD_MUTATION", "OWNER_SECRET_REQUIRED"}:
+              raise SystemExit(f"ORDER009_R1_FAIL_CLOSED:{terminal}")
+          print("ORDER009_R1_TERMINAL=" + str(terminal))
           PY
 
   publish-live-radar:
