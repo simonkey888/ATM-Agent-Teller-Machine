@@ -25,8 +25,69 @@ class BudgetEvidence(StrEnum):
     FUNDING_VERIFIED = "FUNDING_VERIFIED"
 
 
+_ATM_FUNDING_PROOF_TOKEN = object()
+
+
+class AuthoritativeFundingProof:
+    """Non-serializable ATM-owned proof capability for funding admission.
+
+    Raw source payloads can copy every visible field but cannot acquire the private
+    in-process capability token. ORDER-005 R2 deliberately exposes only a fixed
+    deterministic fixture producer; production rail verifiers may later return the
+    same typed capability after performing their existing authoritative checks.
+    """
+
+    __slots__ = ("verifier_id", "rail", "evidence_ref", "evidence_hash", "verdict", "_authority_token")
+
+    def __init__(
+        self,
+        *,
+        verifier_id: str,
+        rail: str,
+        evidence_ref: str,
+        evidence_hash: str,
+        verdict: EvidenceState,
+        _authority_token: object,
+    ) -> None:
+        if _authority_token is not _ATM_FUNDING_PROOF_TOKEN:
+            raise ValueError("AuthoritativeFundingProof may only be minted by ATM verifier")
+        if verifier_id != "ATM_AUTHORITATIVE_FUNDING_VERIFIER_V1":
+            raise ValueError("unexpected funding verifier identity")
+        if verdict != EvidenceState.PROVEN:
+            raise ValueError("authoritative funding proof must prove funding")
+        self.verifier_id = verifier_id
+        self.rail = str(rail)
+        self.evidence_ref = str(evidence_ref)
+        self.evidence_hash = str(evidence_hash)
+        self.verdict = verdict
+        self._authority_token = _authority_token
+
+    @property
+    def is_atm_authoritative(self) -> bool:
+        return self._authority_token is _ATM_FUNDING_PROOF_TOKEN and self.verdict == EvidenceState.PROVEN
+
+
+def order005_authoritative_funding_fixture() -> AuthoritativeFundingProof:
+    """Deterministic zero-action fixture proving the typed authority boundary only."""
+    evidence = {
+        "schema": "ATM_AUTHORITATIVE_FUNDING_FIXTURE_V1",
+        "rail": "ORDER005_DETERMINISTIC_FIXTURE",
+        "funding_observed": True,
+        "economic_actions": 0,
+        "outgoing_spend_usd": 0,
+    }
+    return AuthoritativeFundingProof(
+        verifier_id="ATM_AUTHORITATIVE_FUNDING_VERIFIER_V1",
+        rail="ORDER005_DETERMINISTIC_FIXTURE",
+        evidence_ref="atm-proof://order005/deterministic-funding-fixture-v1",
+        evidence_hash=canonical_hash(evidence),
+        verdict=EvidenceState.PROVEN,
+        _authority_token=_ATM_FUNDING_PROOF_TOKEN,
+    )
+
+
 class EconomicSemantics(BaseModel):
-    """Structured economic identity/evidence. Free text never upgrades these fields."""
+    """Structured economic identity/evidence. Free text and raw source claims have zero funding authority."""
 
     model_config = ConfigDict(extra="forbid")
     requester_identified: EvidenceState
@@ -39,7 +100,12 @@ class EconomicSemantics(BaseModel):
     evidence_refs: list[str] = Field(default_factory=list)
 
     @classmethod
-    def from_structured(cls, payload: dict[str, Any]) -> "EconomicSemantics":
+    def from_structured(
+        cls,
+        payload: dict[str, Any],
+        *,
+        authoritative_funding_proof: AuthoritativeFundingProof | None = None,
+    ) -> "EconomicSemantics":
         requester = str(payload.get("requester_id") or payload.get("requesterId") or "").strip()
         # Buyer identity must be supplied as an economic field. Requester/repo identity never aliases into it.
         buyer = str(payload.get("economic_buyer_id") or payload.get("buyer_id") or payload.get("buyerId") or "").strip()
@@ -50,9 +116,13 @@ class EconomicSemantics(BaseModel):
         budget_amount = payload.get("budget_amount")
         budget_currency = str(payload.get("budget_currency") or "").strip()
 
-        # FUNDING_VERIFIED is impossible without an explicit authoritative evidence reference.
-        if funding_verified_claim and evidence_refs:
+        # F009: source booleans/URLs/strings never mint FUNDING_VERIFIED. Only an ATM-owned typed proof can.
+        if authoritative_funding_proof is not None:
+            if not isinstance(authoritative_funding_proof, AuthoritativeFundingProof) or not authoritative_funding_proof.is_atm_authoritative:
+                raise ValueError("invalid authoritative funding proof capability")
             budget = BudgetEvidence.FUNDING_VERIFIED
+            if authoritative_funding_proof.evidence_ref not in evidence_refs:
+                evidence_refs.append(authoritative_funding_proof.evidence_ref)
         elif external_funding_ref or funding_verified_claim:
             budget = BudgetEvidence.FUNDING_SIGNAL_EXTERNAL_UNVERIFIED
         elif budget_amount not in (None, "") and budget_currency:
@@ -171,7 +241,7 @@ def build_supply_adequacy(
         ELIGIBLE_CANDIDATE_COUNT=None if eligibility_unknown else len(eligible),
         STALE_RATIO=(Decimal(stale_count) / Decimal(len(open_rows)) if open_rows else Decimal("0")),
         MAX_TICKET_USD=max(rewards) if rewards else None,
-        MEDIAN_TICKET_USD=(Decimal(str(statistics.median([float(value) for value in rewards]))) if rewards else None),
+        MEDIAN_TICKET_USD=(Decimal(str(statistics.median([float(value) for value in rewards]))) if rewards else None,
         TOP_BLOCKER_REASONS=[key for key, _ in sorted(blockers.items(), key=lambda item: (-item[1], item[0]))[:5]],
         EVIDENCE_AS_OF=evidence_as_of,
         INVENTORY_STATE=EvidenceState.PROVEN if rows else inventory_state,
