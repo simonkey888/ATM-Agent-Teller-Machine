@@ -241,7 +241,7 @@ def build_supply_adequacy(
         ELIGIBLE_CANDIDATE_COUNT=None if eligibility_unknown else len(eligible),
         STALE_RATIO=(Decimal(stale_count) / Decimal(len(open_rows)) if open_rows else Decimal("0")),
         MAX_TICKET_USD=max(rewards) if rewards else None,
-        MEDIAN_TICKET_USD=(Decimal(str(statistics.median([float(value) for value in rewards]))) if rewards else None,
+        MEDIAN_TICKET_USD=(Decimal(str(statistics.median([float(value) for value in rewards]))) if rewards else None),
         TOP_BLOCKER_REASONS=[key for key, _ in sorted(blockers.items(), key=lambda item: (-item[1], item[0]))[:5]],
         EVIDENCE_AS_OF=evidence_as_of,
         INVENTORY_STATE=EvidenceState.PROVEN if rows else inventory_state,
