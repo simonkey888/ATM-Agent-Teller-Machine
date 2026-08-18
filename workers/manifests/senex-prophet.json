@@ -3,28 +3,29 @@
   "repo_url": "https://github.com/simonkey888/SeneX-Prophet",
   "enabled": false,
   "capabilities": [
-    "model",
-    "git",
-    "github",
-    "filesystem",
-    "shell",
-    "python",
-    "evidence",
-    "data_analysis",
     "deterministic_replay",
-    "research"
+    "causal_cutoff_validation",
+    "provenance_hash_validation",
+    "statistical_evaluation",
+    "robustness_regime_stress",
+    "bounded_python_data_pipeline_repair"
   ],
   "execution_backend": "github_repository_worker",
   "entrypoint": "repository-contract",
   "max_concurrency": 1,
   "timeout_seconds": 1800,
-  "network_policy": "public-data-readonly-github-zero-spend",
+  "network_policy": "no-worker-network-zero-spend-isolated-data-only",
   "expected_artifacts": [
-    "commit_sha",
-    "test_results",
-    "evidence_refs",
+    "native_completion",
+    "canonical_worker_result",
+    "provenance",
     "content_hashes"
   ],
   "cost_ceiling_usd": "0",
-  "financial_authority": false
+  "financial_authority": false,
+  "claim_authority": false,
+  "submission_authority": false,
+  "model_authority": false,
+  "worker_class": "STATISTICAL_CAUSAL_DATA_RESEARCH_SPECIALIST",
+  "worker_version": "aud067.r2-atm-worker.v1"
 }
