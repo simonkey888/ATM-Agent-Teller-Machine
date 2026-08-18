@@ -21,6 +21,7 @@ READINESS = {
     "zungun": "c95002f94d5c5316e83bfca7215cf1d591a62739",
     "across-edge": "f65e597a650bfaa5b09824b299811c8da713249e",
 }
+SENEX_ORDER007_ACCEPTED_SOURCE = "b8dd6666f2113ab2689594d4afc4a6771e56b753"
 
 
 def command(argv: list[str], cwd: Path, timeout: int = 180) -> str:
@@ -227,10 +228,13 @@ def main() -> int:
             raise RuntimeError(f"registration_activation_or_pin_boundary:{worker_id}")
         if manifest.max_concurrency != 1 or record.claim_authority or record.submission_authority or record.financial_authority or record.max_spend_usd != 0:
             raise RuntimeError(f"authority_concurrency_spend_boundary:{worker_id}")
-    for worker_id in ("boqa", "senex-prophet"):
-        record = integrations.get(worker_id)
-        if record.registered or record.active or record.source_pin is not None or manifests.get(worker_id).enabled:
-            raise RuntimeError(f"placeholder_boundary:{worker_id}")
+    boqa = integrations.get("boqa")
+    if boqa.registered or boqa.active or boqa.source_pin is not None or manifests.get("boqa").enabled:
+        raise RuntimeError("placeholder_boundary:boqa")
+    senex = integrations.get("senex-prophet")
+    if (not senex.registered or senex.active or senex.source_pin != SENEX_ORDER007_ACCEPTED_SOURCE
+            or senex.source_pin_ancestor != SENEX_ORDER007_ACCEPTED_SOURCE or manifests.get("senex-prophet").enabled):
+        raise RuntimeError("successor_registration_boundary:senex-prophet")
 
     matrix = routing(manifests, integrations)
     with tempfile.TemporaryDirectory(prefix="atm-order006-") as td:
@@ -253,7 +257,7 @@ def main() -> int:
             "BROKEN_OR_MISSING_WORKER_ENTRYPOINT_FAILS_CLOSED": "PASS",
             "MIDFLIGHT_RECOVERY_ZERO_DUPLICATE_LAUNCH": "PASS",
             "INDEPENDENT_CHECKER_MATERIAL_RESULT": "PASS",
-            "BOQA_PLACEHOLDER_INACTIVE_UNPINNED": "PASS", "SENEX_PLACEHOLDER_INACTIVE_UNPINNED": "PASS",
+            "BOQA_PLACEHOLDER_INACTIVE_UNPINNED": "PASS", "SENEX_SUCCESSOR_REGISTRATION_INACTIVE_EXACT_PIN": "PASS",
             "EXTERNAL_CLAIMS": 0, "EXTERNAL_SUBMISSIONS": 0, "OUTGOING_SPEND_USD": 0,
             "router_matrix": matrix, "zungun": ze, "zungun_broken": zb, "across_edge": ae, "across_broken": ab,
         }
