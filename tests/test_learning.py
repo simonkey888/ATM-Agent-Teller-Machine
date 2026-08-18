@@ -21,11 +21,25 @@ class LearningTests(unittest.TestCase):
             for stage in SKILL_PIPELINE[1:-1]:
                 skill = store.advance_skill(skill.skill_id, supervisor="ATM_SUPERVISOR_TEST", evidence_ref=stage)
                 self.assertEqual(skill.stage.value, stage)
-            with self.assertRaisesRegex(ValueError, "measurable improvement"):
-                store.advance_skill(skill.skill_id, supervisor="ATM_SUPERVISOR_TEST", evidence_ref="canary", candidate_metric=11.0)
-            promoted = store.advance_skill(skill.skill_id, supervisor="ATM_SUPERVISOR_TEST", evidence_ref="canary-pass", candidate_metric=8.0)
+            self.assertEqual(skill.stage, SkillStage.LOW_RISK_CANARY)
+            with self.assertRaisesRegex(ValueError, "durable measured canary"):
+                store.advance_skill(skill.skill_id, supervisor="ATM_SUPERVISOR_TEST", evidence_ref="no-canary", candidate_metric=8.0)
+            with self.assertRaisesRegex(ValueError, "all bounded samples"):
+                store.record_canary_result(
+                    skill.skill_id, supervisor="ATM_SUPERVISOR_TEST", evidence_ref="failed-canary",
+                    sample_size=2, success_count=1, candidate_metric=8.0,
+                )
+            canary = store.record_canary_result(
+                skill.skill_id, supervisor="ATM_SUPERVISOR_TEST", evidence_ref="canary-pass",
+                sample_size=2, success_count=2, candidate_metric=8.0,
+            )
+            self.assertEqual(canary.success_count, 2)
+            with self.assertRaisesRegex(ValueError, "match durable canary"):
+                store.advance_skill(skill.skill_id, supervisor="ATM_SUPERVISOR_TEST", evidence_ref="metric-mismatch", candidate_metric=7.0)
+            promoted = store.advance_skill(skill.skill_id, supervisor="ATM_SUPERVISOR_TEST", evidence_ref="promote", candidate_metric=8.0)
             self.assertEqual(promoted.stage, SkillStage.PROMOTE)
             self.assertEqual(promoted.promoted_by, "ATM_SUPERVISOR_TEST")
+            self.assertEqual(promoted.candidate_metric, 8.0)
             self.assertEqual(len(store.history(skill.skill_id)), 6)
             store.close()
 
