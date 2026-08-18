@@ -37,11 +37,15 @@ class Order006WorkerIntegrationTests(unittest.TestCase):
             self.assertFalse(record.claim_authority); self.assertFalse(record.submission_authority); self.assertFalse(record.financial_authority)
             self.assertEqual(str(record.max_spend_usd), "0")
 
-    def test_boqa_and_senex_are_placeholders_without_final_source_pin(self):
-        for worker_id in ("boqa", "senex-prophet"):
-            record = self.integrations.get(worker_id)
-            self.assertFalse(record.registered); self.assertFalse(record.active); self.assertIsNone(record.source_pin); self.assertIsNone(record.source_pin_ancestor)
-            self.assertFalse(self.manifests.get(worker_id).enabled)
+    def test_order006_boqa_placeholder_and_successor_senex_registration_remain_inactive(self):
+        boqa = self.integrations.get("boqa")
+        self.assertFalse(boqa.registered); self.assertFalse(boqa.active); self.assertIsNone(boqa.source_pin); self.assertIsNone(boqa.source_pin_ancestor)
+        self.assertFalse(self.manifests.get("boqa").enabled)
+        senex = self.integrations.get("senex-prophet")
+        self.assertTrue(senex.registered); self.assertFalse(senex.active)
+        self.assertEqual(senex.source_pin, "b8dd6666f2113ab2689594d4afc4a6771e56b753")
+        self.assertEqual(senex.source_pin_ancestor, "b8dd6666f2113ab2689594d4afc4a6771e56b753")
+        self.assertFalse(self.manifests.get("senex-prophet").enabled)
 
     def test_structured_router_positive_negative_matrix(self):
         zungun_job = self._spec(name="network_reliability", capabilities=["git", "filesystem", "shell", "node", "evidence", "zungun.network_resilience", "zungun.reconciliation"])
