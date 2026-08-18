@@ -43,7 +43,7 @@ class Order006WorkerIntegrationTests(unittest.TestCase):
         self.assertTrue(across.registered)
         self.assertFalse(across.active)
         self.assertEqual(across.source_pin_ancestor, "f65e597a650bfaa5b09824b299811c8da713249e")
-        self.assertEqual(across.source_pin, "372db5843da4a67b4b66e87579d91375657d9272")
+        self.assertEqual(across.source_pin, "88197f2c128871033cd5bcf9f720f67440f6b229")
         for worker_id in ("zungun", "across-edge"):
             manifest = self.manifests.get(worker_id)
             record = self.integrations.get(worker_id)
