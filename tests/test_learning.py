@@ -26,6 +26,7 @@ class LearningTests(unittest.TestCase):
             promoted = store.advance_skill(skill.skill_id, supervisor="ATM_SUPERVISOR_TEST", evidence_ref="canary-pass", candidate_metric=8.0)
             self.assertEqual(promoted.stage, SkillStage.PROMOTE)
             self.assertEqual(promoted.promoted_by, "ATM_SUPERVISOR_TEST")
+            self.assertEqual(len(store.history(skill.skill_id)), 6)
             store.close()
 
     def test_skill_requires_code_tests_fixtures(self):
@@ -35,17 +36,40 @@ class LearningTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 SkillCapsule(**values)
 
-    def test_calibration_preserves_unknown_until_evidence(self):
+    def test_direct_canary_registration_and_baseline_reregistration_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LearningStore(Path(directory) / "learning.sqlite3")
+            with self.assertRaisesRegex(ValueError, "begin at SOLVE"):
+                store.put_skill(SkillCapsule(
+                    skill_id="skip", capability="ci_triage", code_refs=["c"], test_refs=["t"], fixture_refs=["f"],
+                    stage=SkillStage.LOW_RISK_CANARY, baseline_metric=10, metric_name="error_rate"
+                ))
+            original = store.put_skill(SkillCapsule(
+                skill_id="stable", capability="ci_triage", code_refs=["c"], test_refs=["t"], fixture_refs=["f"],
+                baseline_metric=10, metric_name="error_rate"
+            ))
+            with self.assertRaisesRegex(ValueError, "identity/baseline mutation forbidden"):
+                store.put_skill(original.model_copy(update={"baseline_metric": 999}))
+            with self.assertRaisesRegex(ValueError, "re-registration cannot reset or advance"):
+                store.put_skill(original.model_copy(update={"stage": SkillStage.LOW_RISK_CANARY}))
+            self.assertEqual(store.get_skill("stable").baseline_metric, 10)
+            self.assertEqual(store.get_skill("stable").stage, SkillStage.SOLVE)
+            store.close()
+
+    def test_calibration_preserves_unknown_until_real_evidence_and_excludes_synthetic(self):
         with tempfile.TemporaryDirectory() as directory:
             store = LearningStore(Path(directory) / "learning.sqlite3")
             for i in range(3):
                 store.observe(CalibrationObservation(
                     observation_id=f"o{i}", source="fixture", opportunity_class="qa",
-                    predicted_band="UNKNOWN", observed_outcome="NO_VALID_INGRESS", evidence_refs=[f"e:{i}"]
+                    predicted_band="UNKNOWN", observed_outcome="NO_VALID_INGRESS", evidence_refs=[f"e:{i}"], synthetic=True
                 ))
             summary = store.calibration_summary("qa")
-            self.assertEqual(summary["sample_size"], 3)
+            self.assertEqual(summary["sample_size"], 0)
+            self.assertEqual(summary["synthetic_sample_size"], 3)
             self.assertEqual(summary["posterior_band"], "UNKNOWN")
+            self.assertEqual(summary["outcomes"], {})
+            self.assertTrue(summary["synthetic_excluded_from_production_metrics"])
             self.assertFalse(summary["fake_precision"])
             store.close()
 
