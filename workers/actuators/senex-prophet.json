@@ -1,0 +1,11 @@
+{
+  "worker_id": "senex-prophet",
+  "source_sha": "b8dd6666f2113ab2689594d4afc4a6771e56b753",
+  "task_entrypoint": "senecio_polymarket/atm_worker/__main__.py",
+  "task_module": "atm_worker",
+  "task_cwd": "senecio_polymarket",
+  "protocol": "atm-worker.v1",
+  "supporting_commands": [
+    ["python", "-m", "compileall", "-q", "atm_worker"]
+  ]
+}
