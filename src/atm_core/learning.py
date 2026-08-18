@@ -6,7 +6,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .workers import canonical_json
 
@@ -26,6 +26,7 @@ class SkillStage(StrEnum):
 
 
 SKILL_PIPELINE = [stage.value for stage in SkillStage]
+MIN_CANARY_SAMPLE_SIZE = 1
 
 
 class SkillCapsule(BaseModel):
@@ -50,6 +51,38 @@ class SkillCapsule(BaseModel):
         if not values:
             raise ValueError("SkillCapsule requires code, tests and fixtures")
         return values
+
+
+class CanaryEvidence(BaseModel):
+    """Durable measured LOW_RISK_CANARY result required before PROMOTE."""
+
+    model_config = ConfigDict(extra="forbid")
+    skill_id: str
+    evidence_ref: str
+    sample_size: int
+    success_count: int
+    candidate_metric: float
+    recorded_by: str
+    created_at: str = Field(default_factory=utcnow_iso)
+
+    @field_validator("sample_size")
+    @classmethod
+    def sample_positive(cls, value: int) -> int:
+        if value < MIN_CANARY_SAMPLE_SIZE:
+            raise ValueError("canary sample size below enforced minimum")
+        return value
+
+    @model_validator(mode="after")
+    def successful_bounded_canary(self) -> "CanaryEvidence":
+        if self.success_count < 0 or self.success_count > self.sample_size:
+            raise ValueError("canary success_count outside sample")
+        if self.success_count != self.sample_size:
+            raise ValueError("promotion canary requires all bounded samples to pass")
+        if not self.recorded_by.startswith("ATM_SUPERVISOR"):
+            raise ValueError("canary evidence must be recorded by ATM supervisor")
+        if not self.evidence_ref.strip():
+            raise ValueError("canary evidence_ref required")
+        return self
 
 
 class CalibrationObservation(BaseModel):
@@ -139,6 +172,13 @@ class LearningStore:
               created_at TEXT NOT NULL,
               PRIMARY KEY(skill_id,seq)
             );
+            CREATE TABLE IF NOT EXISTS skill_canary_evidence(
+              skill_id TEXT NOT NULL,
+              evidence_ref TEXT NOT NULL,
+              evidence_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY(skill_id,evidence_ref)
+            );
             CREATE TABLE IF NOT EXISTS calibration(
               observation_id TEXT PRIMARY KEY,
               observation_json TEXT NOT NULL,
@@ -172,7 +212,6 @@ class LearningStore:
                 raise ValueError(f"skill identity/baseline mutation forbidden: {field}")
         if skill.stage != existing.stage or skill.promoted_by != existing.promoted_by:
             raise ValueError("skill re-registration cannot reset or advance promotion stage")
-        # Idempotent registration may add no new semantic state.
         if skill.candidate_metric != existing.candidate_metric or skill.failure_signature_refs != existing.failure_signature_refs:
             raise ValueError("skill semantic mutation requires supervisor advance_skill")
         return existing
@@ -196,6 +235,49 @@ class LearningStore:
             "INSERT INTO skill_history VALUES(?,?,?,?,?,?,?)",
             (skill_id, seq, from_stage.value, to_stage.value, evidence_ref, supervisor, utcnow_iso()),
         )
+
+    def record_canary_result(
+        self,
+        skill_id: str,
+        *,
+        supervisor: str,
+        evidence_ref: str,
+        sample_size: int,
+        success_count: int,
+        candidate_metric: float,
+    ) -> CanaryEvidence:
+        skill = self.get_skill(skill_id)
+        if skill.stage != SkillStage.LOW_RISK_CANARY:
+            raise ValueError("canary evidence may only be recorded at LOW_RISK_CANARY")
+        evidence = CanaryEvidence(
+            skill_id=skill_id,
+            evidence_ref=evidence_ref,
+            sample_size=sample_size,
+            success_count=success_count,
+            candidate_metric=candidate_metric,
+            recorded_by=supervisor,
+        )
+        existing = self.conn.execute(
+            "SELECT evidence_json FROM skill_canary_evidence WHERE skill_id=? AND evidence_ref=?",
+            (skill_id, evidence_ref),
+        ).fetchone()
+        if existing:
+            prior = CanaryEvidence.model_validate_json(str(existing["evidence_json"]))
+            if prior != evidence:
+                raise ValueError("conflicting canary evidence")
+            return prior
+        self.conn.execute(
+            "INSERT INTO skill_canary_evidence VALUES(?,?,?,?)",
+            (skill_id, evidence_ref, canonical_json(evidence.model_dump(mode="json")), evidence.created_at),
+        )
+        return evidence
+
+    def latest_canary(self, skill_id: str) -> CanaryEvidence | None:
+        row = self.conn.execute(
+            "SELECT evidence_json FROM skill_canary_evidence WHERE skill_id=? ORDER BY created_at DESC LIMIT 1",
+            (skill_id,),
+        ).fetchone()
+        return CanaryEvidence.model_validate_json(str(row["evidence_json"])) if row else None
 
     def advance_skill(self, skill_id: str, *, supervisor: str, evidence_ref: str, candidate_metric: float | None = None) -> SkillCapsule:
         if not supervisor.startswith("ATM_SUPERVISOR"):
@@ -224,12 +306,21 @@ class LearningStore:
             actual = [(row["from_stage"], row["to_stage"]) for row in history]
             if actual != expected:
                 raise ValueError("promotion requires complete durable canary history")
-            if skill.baseline_metric is None or candidate_metric is None or not skill.metric_name:
+            canary = self.latest_canary(skill_id)
+            if canary is None:
+                raise ValueError("promotion requires durable measured canary evidence")
+            if candidate_metric is not None and candidate_metric != canary.candidate_metric:
+                raise ValueError("promotion metric must match durable canary evidence")
+            measured_metric = canary.candidate_metric
+            if skill.baseline_metric is None or not skill.metric_name:
                 raise ValueError("promotion requires measured baseline and candidate metric")
-            improved = candidate_metric > skill.baseline_metric if "success" in skill.metric_name.lower() else candidate_metric < skill.baseline_metric
+            improved = measured_metric > skill.baseline_metric if "success" in skill.metric_name.lower() else measured_metric < skill.baseline_metric
             if not improved:
                 raise ValueError("promotion requires measurable improvement against baseline")
+            update["candidate_metric"] = measured_metric
             update["promoted_by"] = supervisor
+            failures.append(f"canary-evidence:{canary.evidence_ref}:{canary.success_count}/{canary.sample_size}")
+            update["failure_signature_refs"] = failures
         updated = self._write_skill(skill.model_copy(update=update))
         self._append_history(skill_id, skill.stage, next_stage, evidence_ref, supervisor)
         return updated
