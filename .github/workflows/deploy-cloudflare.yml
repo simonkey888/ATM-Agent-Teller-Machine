@@ -2,7 +2,7 @@ name: ATM Cloudflare Deploy
 
 on:
   push:
-    branches: [main, agent/atm-v1]
+    branches: [main, agent/atm-v1, pivot/universal-money-radar-r1]
   workflow_dispatch:
 
 permissions:
@@ -15,10 +15,12 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.11'
@@ -30,16 +32,27 @@ jobs:
         env:
           PYTHONPATH: src
         run: python -m unittest discover -s tests -v
+      - name: Worker syntax
+        run: node --check worker/src/index.js
 
   deploy:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/agent/atm-v1' || github.ref == 'refs/heads/pivot/universal-money-radar-r1')
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 12
     environment: atm-production
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
+      - name: Reject stale deployment run
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_sha="$(git ls-remote origin "refs/heads/${GITHUB_REF_NAME}" | awk '{print $1}')"
+          test -n "$remote_sha"
+          test "$remote_sha" = "$GITHUB_SHA"
+          echo "ATM_CLOUDFLARE_STALE_RUN_GUARD=PASS sha=$GITHUB_SHA"
       - name: Require Cloudflare deployment credentials
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -47,37 +60,69 @@ jobs:
         run: |
           test -n "$CLOUDFLARE_API_TOKEN"
           test -n "$CLOUDFLARE_ACCOUNT_ID"
-      - name: Deploy exact SHA
+      - name: Deploy exact SHA to canonical Worker
         uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: deploy --var ATM_GIT_SHA:${{ github.sha }}
-      - name: Exact-SHA smoke test
+      - name: Canonical exact-SHA E2E smoke
         env:
           EXPECTED_SHA: ${{ github.sha }}
+          REQUIRE_LIVE_RADAR: ${{ github.ref == 'refs/heads/pivot/universal-money-radar-r1' && '1' || '0' }}
         run: |
           python - <<'PY'
           import json, os, subprocess, time, urllib.parse
-          base = "https://atm.simondalmasso44.workers.dev/health"
+          base = "https://atm.simondalmasso44.workers.dev"
           expected = os.environ["EXPECTED_SHA"]
-          last = None
-          # Use curl with a normal explicit UA: workers.dev can reject the default
-          # Python urllib user-agent even while the public endpoint is healthy.
-          for attempt in range(60):
-              url = base + "?" + urllib.parse.urlencode({"sha": expected, "attempt": attempt})
+          require_radar = os.environ.get("REQUIRE_LIVE_RADAR") == "1"
+          ua = "ATM-Order009-Exact-SHA/1.0"
+
+          def get(path, attempt):
+              sep = "&" if "?" in path else "?"
+              url = base + path + sep + urllib.parse.urlencode({"sha": expected, "attempt": attempt})
+              return subprocess.check_output(
+                  ["curl", "-fsS", "--max-time", "15", "-A", ua, "-H", "Cache-Control: no-cache", url],
+                  text=True, timeout=20,
+              )
+
+          last = {}
+          for attempt in range(80):
               try:
-                  raw = subprocess.check_output(
-                      ["curl", "-fsS", "--max-time", "15", "-A", "ATM-CI-Exact-SHA/1.0", "-H", "Cache-Control: no-cache", url],
-                      text=True,
-                      timeout=20,
-                  )
-                  last = json.loads(raw)
-                  if last.get("ok") is True and last.get("git_sha") == expected:
-                      print(json.dumps(last, sort_keys=True))
+                  health = json.loads(get("/health", attempt))
+                  if health.get("ok") is not True or health.get("git_sha") != expected:
+                      raise RuntimeError(f"health_sha={health.get('git_sha')}")
+                  if not require_radar:
+                      print(json.dumps({"health": health, "e2e": "NON_PIVOT_EXACT_SHA_PASS"}, sort_keys=True))
                       raise SystemExit(0)
+
+                  status = json.loads(get("/api/status", attempt))
+                  opps = json.loads(get("/api/opportunities", attempt))
+                  platforms = json.loads(get("/api/platform-health", attempt))
+                  money = json.loads(get("/api/money-board", attempt))
+                  page = get("/", attempt)
+                  radar = status.get("radar") or {}
+                  if radar.get("source_sha") != expected or opps.get("source_sha") != expected or platforms.get("source_sha") != expected:
+                      raise RuntimeError(f"radar_sha={radar.get('source_sha')} opp_sha={opps.get('source_sha')}")
+                  if not isinstance(platforms.get("platforms"), list) or len(platforms["platforms"]) < 7:
+                      raise RuntimeError("platform_health_not_material")
+                  stages = money.get("stages") or {}
+                  if set(stages) != {"pending_usd", "accepted_usd", "settled_usd", "withdrawable_usd"}:
+                      raise RuntimeError("money_stages_missing")
+                  for marker in ("ATM Universal Money Radar", "ATTACK NOW", "PAID", "PLATFORM HEALTH", "Radar source SHA", "Deployed Worker SHA"):
+                      if marker not in page:
+                          raise RuntimeError(f"ui_marker_missing:{marker}")
+                  last = {
+                      "health_sha": health.get("git_sha"), "radar_sha": radar.get("source_sha"),
+                      "source_count": radar.get("source_count"), "opportunity_count": radar.get("opportunity_count"),
+                      "platform_count": len(platforms["platforms"]), "money": stages,
+                  }
+                  print(json.dumps({"ATM_ORDER009_LIVE_E2E": "PASS", **last}, sort_keys=True))
+                  raise SystemExit(0)
+              except SystemExit:
+                  raise
               except Exception as exc:
                   last = {"error": str(exc)}
               time.sleep(3)
-          raise SystemExit(f"Cloudflare exact-SHA smoke failed: {last}")
+          raise SystemExit(f"Canonical exact-SHA E2E smoke failed: {last}")
           PY
