@@ -24,7 +24,7 @@ from atm_core.economic_ingress import (
 from atm_swarm import MoneyBoard
 
 
-AS_OF = "2026-08-18T08:45:00Z"
+AS_OF = "2026-08-18T09:27:00Z"
 
 
 class Order005EconomicIngressTests(unittest.TestCase):
@@ -40,6 +40,16 @@ class Order005EconomicIngressTests(unittest.TestCase):
             self.assertEqual(semantics.payer_authority_verified, EvidenceState.UNKNOWN)
             self.assertFalse(semantics.funded_for_admission)
 
+    def test_requester_and_repo_identity_do_not_alias_to_buyer_or_payer(self):
+        semantics = EconomicSemantics.from_structured({
+            "requester_id": "issue-author",
+            "repo_owner": "maintainer",
+            "repository": "owner/repo",
+        })
+        self.assertEqual(semantics.requester_identified, EvidenceState.PROVEN)
+        self.assertEqual(semantics.economic_buyer_identified, EvidenceState.UNKNOWN)
+        self.assertEqual(semantics.payer_authority_verified, EvidenceState.UNKNOWN)
+
     def test_price_hypothesis_and_community_signal_never_become_funding(self):
         semantics = EconomicSemantics.from_structured({
             "price_hypothesis_usd": "1000",
@@ -51,11 +61,21 @@ class Order005EconomicIngressTests(unittest.TestCase):
         self.assertEqual(semantics.budget_evidence, BudgetEvidence.NO_BUDGET_EVIDENCE)
         self.assertFalse(semantics.funded_for_admission)
 
-    def test_funding_admission_requires_verified_funding_and_payer_authority(self):
-        funding_only = EconomicSemantics.from_structured({"funding_verified": True})
-        self.assertEqual(funding_only.budget_evidence, BudgetEvidence.FUNDING_VERIFIED)
-        self.assertFalse(funding_only.funded_for_admission)
-        both = EconomicSemantics.from_structured({"funding_verified": True, "payer_authority_verified": True})
+    def test_funding_admission_requires_authoritative_evidence_and_payer_authority(self):
+        unverifiable_claim = EconomicSemantics.from_structured({"funding_verified": True})
+        self.assertEqual(unverifiable_claim.budget_evidence, BudgetEvidence.FUNDING_SIGNAL_EXTERNAL_UNVERIFIED)
+        self.assertFalse(unverifiable_claim.funded_for_admission)
+        evidence_without_payer = EconomicSemantics.from_structured({
+            "funding_verified": True,
+            "economic_evidence_refs": ["https://authoritative.example/escrow/1"],
+        })
+        self.assertEqual(evidence_without_payer.budget_evidence, BudgetEvidence.FUNDING_VERIFIED)
+        self.assertFalse(evidence_without_payer.funded_for_admission)
+        both = EconomicSemantics.from_structured({
+            "funding_verified": True,
+            "payer_authority_verified": True,
+            "economic_evidence_refs": ["https://authoritative.example/escrow/1"],
+        })
         self.assertTrue(both.funded_for_admission)
 
     def test_current_workprotocol_supply_snapshot_stays_nonrealized_and_fail_closed(self):
@@ -72,17 +92,28 @@ class Order005EconomicIngressTests(unittest.TestCase):
                 expected_withdrawable_usd=None,
                 blocker_reasons=["STALE_GT_30D", "FUNDING_UNVERIFIED_BASE_TX_NOT_FOUND"],
             )
-        ], evidence_as_of=AS_OF)
+        ], evidence_as_of=AS_OF, inventory_state=EvidenceState.PROVEN)
         self.assertEqual(snapshot.VISIBLE_USD, Decimal("75"))
         self.assertEqual(snapshot.FRESH_USD, Decimal("0"))
         self.assertEqual(snapshot.FUNDED_USD, Decimal("0"))
         self.assertEqual(snapshot.ELIGIBLE_USD, Decimal("0"))
         self.assertEqual(snapshot.CLAIMABLE_UNDER_CURRENT_AUTHORITY_USD, Decimal("0"))
+        self.assertEqual(snapshot.OPEN_CANDIDATE_COUNT, 1)
+        self.assertEqual(snapshot.FRESH_CANDIDATE_COUNT, 0)
         self.assertEqual(snapshot.STALE_RATIO, Decimal("1"))
         self.assertEqual(snapshot.MAX_TICKET_USD, Decimal("75"))
         self.assertEqual(snapshot.MEDIAN_TICKET_USD, Decimal("75.0"))
         self.assertEqual(snapshot.REALIZED_REVENUE_CREDITED, Decimal("0"))
         self.assertIn("FUNDING_UNVERIFIED_BASE_TX_NOT_FOUND", snapshot.TOP_BLOCKER_REASONS)
+
+    def test_supply_unknown_is_never_coerced_to_zero(self):
+        unknown = build_supply_adequacy([], evidence_as_of=AS_OF, inventory_state=EvidenceState.UNKNOWN)
+        self.assertIsNone(unknown.VISIBLE_USD)
+        self.assertIsNone(unknown.FUNDED_USD)
+        self.assertIsNone(unknown.OPEN_CANDIDATE_COUNT)
+        proven_empty = build_supply_adequacy([], evidence_as_of=AS_OF, inventory_state=EvidenceState.PROVEN)
+        self.assertEqual(proven_empty.VISIBLE_USD, Decimal("0"))
+        self.assertEqual(proven_empty.OPEN_CANDIDATE_COUNT, 0)
 
     def test_gate_feasibility_distinguishes_blocked_from_unknown(self):
         blocked = build_gate_feasibility(GateInputs(
@@ -100,8 +131,8 @@ class Order005EconomicIngressTests(unittest.TestCase):
         self.assertEqual(blocked.PAYMENT_FEASIBLE.state, EvidenceState.BLOCKED)
         self.assertEqual(blocked.WITHDRAWAL_FEASIBLE.state, EvidenceState.UNKNOWN)
 
-    def test_rail_health_classifies_authoritative_external_payer_failure(self):
-        health = build_rail_health(
+    def test_rail_health_separates_platform_and_authority_failures_from_worker(self):
+        payer = build_rail_health(
             source_reachable=True,
             claimability=False,
             failure_domain=FailureDomain.EXTERNAL_PAYER,
@@ -109,11 +140,29 @@ class Order005EconomicIngressTests(unittest.TestCase):
             evidence_refs=["https://basescan.org/tx/example"],
             evidence_as_of=AS_OF,
         )
-        self.assertEqual(health.RAIL_HEALTH.value, "DEGRADED")
-        self.assertEqual(health.CLAIMABILITY.value, "BLOCKED")
-        self.assertEqual(health.FAILURE_DOMAIN, FailureDomain.EXTERNAL_PAYER)
+        self.assertEqual(payer.RAIL_HEALTH.value, "DEGRADED")
+        self.assertEqual(payer.CLAIMABILITY.value, "BLOCKED")
+        self.assertEqual(payer.FAILURE_DOMAIN, FailureDomain.EXTERNAL_PAYER)
+        platform = build_rail_health(
+            source_reachable=True,
+            claimability=False,
+            failure_domain=FailureDomain.PLATFORM,
+            reason="claim endpoint unavailable",
+            evidence_refs=["https://example.invalid/claim-status"],
+            evidence_as_of=AS_OF,
+        )
+        self.assertEqual(platform.FAILURE_DOMAIN, FailureDomain.PLATFORM)
+        authority = build_rail_health(
+            source_reachable=True,
+            claimability=False,
+            failure_domain=FailureDomain.AUTHORITY,
+            reason="outgoing spend required and prohibited",
+            evidence_refs=["owner-order:zero-spend"],
+            evidence_as_of=AS_OF,
+        )
+        self.assertEqual(authority.FAILURE_DOMAIN, FailureDomain.AUTHORITY)
 
-    def test_read_only_radars_normalize_into_existing_money_board(self):
+    def test_read_only_radars_normalize_into_existing_money_board_and_cannot_mutate(self):
         superteam = SuperteamRadar.normalize_listing({
             "slug": "order005-agent-sample",
             "url": "https://superteam.fun/earn/listing/order005-agent-sample",
@@ -133,6 +182,8 @@ class Order005EconomicIngressTests(unittest.TestCase):
             "budget": "25",
             "buyer_id": "buyer-1",
         })
+        self.assertEqual(superteam.economic_semantics.economic_buyer_identified, EvidenceState.UNKNOWN)
+        self.assertEqual(dispute.economic_semantics.economic_buyer_identified, EvidenceState.UNKNOWN)
         with tempfile.TemporaryDirectory() as directory:
             board = MoneyBoard(Path(directory) / "board.sqlite3")
             ids = normalize_radar_to_money_board(board, [superteam, dispute, dealwork])
@@ -147,16 +198,20 @@ class Order005EconomicIngressTests(unittest.TestCase):
                 self.assertEqual(row["status"], "NORMALIZED")
             board.close()
         self.assertEqual(superteam.human_gate, "HUMAN_CLAIMS_PAYOUT")
-        self.assertTrue(superteam.read_only)
-        self.assertTrue(dispute.read_only)
-        self.assertTrue(dealwork.read_only)
+        for fn in (SuperteamRadar.submit, WorkProtocolEvaluatorRadar.vote, WorkProtocolEvaluatorRadar.claim, DealworkProviderRadar.bid):
+            with self.assertRaisesRegex(ValueError, "read-only radar forbids"):
+                fn("x")
         with self.assertRaisesRegex(ValueError, "client/hire/subcontract"):
             DealworkProviderRadar.client_action("hire")
+        with self.assertRaisesRegex(ValueError, "downstream payment"):
+            DealworkProviderRadar.normalize_provider_job({"id": "bad", "role": "provider", "requires_downstream_payment": True})
 
     def test_workprotocol_evaluator_surface_is_read_only_and_zero_action(self):
         status = WorkProtocolEvaluatorRadar.surface_status(open_disputes=0, active_arbitrators=3)
-        self.assertTrue(status["role_exists"])
-        self.assertEqual(status["claimability"], "BLOCKED_ZERO_SPEND_STAKE_REQUIREMENT")
+        self.assertTrue(status["ROLE_EXISTS"])
+        self.assertEqual(status["ACTIVE_CASE_SUPPLY"], 0)
+        self.assertEqual(status["REPUTATION_REQUIREMENT"], "AGENT_ARBITRATOR_REPUTATION_GTE_10")
+        self.assertEqual(status["EVALUATOR_REVENUE"], "UNPROVEN")
         self.assertEqual(status["vote_actions"], 0)
         self.assertEqual(status["claim_actions"], 0)
 
@@ -164,12 +219,18 @@ class Order005EconomicIngressTests(unittest.TestCase):
         record = DemandFoundryShadow.from_public_issue({
             "number": 23,
             "html_url": "https://github.com/simonkey888/ATM-Agent-Teller-Machine/issues/23",
+            "requester_id": "simonkey888",
             "title": "USD $PATH unpaid budget-looking words",
             "body": "This is a technical issue, not buyer funding evidence.",
         }, evidence_as_of=AS_OF)
         self.assertEqual(record.state, "SHADOW_ONLY")
         self.assertFalse(record.funded_opportunity)
+        self.assertEqual(record.economic_semantics.requester_identified, EvidenceState.PROVEN)
+        self.assertEqual(record.economic_semantics.economic_buyer_identified, EvidenceState.UNKNOWN)
+        self.assertEqual(record.economic_semantics.payer_authority_verified, EvidenceState.UNKNOWN)
         self.assertEqual(record.economic_semantics.budget_evidence, BudgetEvidence.NO_BUDGET_EVIDENCE)
+        self.assertEqual(record.contract.disposition, "KILL")
+        self.assertEqual(record.contract.external_action_requirement, "NONE_AUTHORIZED_ORDER_005")
         self.assertEqual(record.outreach_actions, [])
         self.assertEqual(record.claim_actions, [])
         self.assertEqual(record.executable_actions, [])
