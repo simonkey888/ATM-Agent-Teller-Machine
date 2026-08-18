@@ -35,3 +35,7 @@ jobs:
         env:
           PYTHONPATH: src
         run: python scripts/qualify-vnext-actuator.py
+      - name: ORDER-005 real production phase path
+        env:
+          PYTHONPATH: src
+        run: python scripts/qualify-order005-production-path.py
