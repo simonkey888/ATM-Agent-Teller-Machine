@@ -17,7 +17,7 @@ class Order006WorkerIntegrationTests(unittest.TestCase):
         self.manifests = WorkerRegistry.from_directory(MANIFESTS)
         self.integrations = WorkerIntegrationRegistry.from_directory(INTEGRATIONS)
 
-    def _spec(self, *, name: str, capabilities: list[str]) -> WorkerJobSpec:
+    def _spec(self, *, name: str, capabilities: list[str], max_spend_usd: int = 0) -> WorkerJobSpec:
         return WorkerJobSpec(
             job_id=f"order006-{name}",
             canonical_opportunity_id=f"fixture:order006:{name}",
@@ -26,7 +26,7 @@ class Order006WorkerIntegrationTests(unittest.TestCase):
             task_type=f"order006_{name}",
             frozen_acceptance_criteria=["registered router dry-run only"],
             repository_or_input="order006-structured-fixture",
-            max_spend_usd=0,
+            max_spend_usd=max_spend_usd,
             required_capabilities=capabilities,
             structured_requirements=[name],
             expected_deliverable="routing decision only; no WorkLease",
@@ -104,7 +104,7 @@ class Order006WorkerIntegrationTests(unittest.TestCase):
 
     def test_nonzero_spend_and_signing_or_broadcast_reject(self):
         with self.assertRaisesRegex(ValueError, "max_spend_usd"):
-            self._spec(name="paid", capabilities=["web3_readonly"]).model_copy(update={"max_spend_usd": 1}, revalidate_instances="always")
+            self._spec(name="paid", capabilities=["web3_readonly"], max_spend_usd=1)
         with self.assertRaisesRegex(ValueError, "reserved disabled"):
             self._spec(name="signing", capabilities=["web3_signer"])
         broadcast = self._spec(name="broadcast", capabilities=["blockchain_broadcast"])
