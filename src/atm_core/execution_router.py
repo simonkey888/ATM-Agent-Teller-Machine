@@ -14,10 +14,10 @@ from .universal_radar import (
     FundingStatus,
     RadarDisposition,
     UniversalOpportunity,
-    ZeroCostProviderGate,
     qualify,
     source_hash,
 )
+from .zero_cost_model import ZeroCostModelGate
 
 
 class ExecutorAvailability(BaseModel):
@@ -123,11 +123,11 @@ class UniversalExecutionRouter:
     def __init__(
         self,
         *,
-        provider_gate: ZeroCostProviderGate | None = None,
+        provider_gate: ZeroCostModelGate | None = None,
         github_executor: BoundedGitHubExecutor | None = None,
         gcp_backend: GcpReadOnlyBackend | None = None,
     ):
-        self.provider_gate = provider_gate or ZeroCostProviderGate()
+        self.provider_gate = provider_gate or ZeroCostModelGate()
         self.github_executor = github_executor or BoundedGitHubExecutor()
         self.gcp_backend = gcp_backend or GcpReadOnlyBackend()
 
