@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -9,8 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import atm_fabric
+import atm_core.actuator as actuator_module
 import atm_core.execution_integrity as execution_integrity_module
-from atm_core.actuator import ActuatorProfile, CheckoutSubprocessActuator
+from atm_core.actuator import ActuatorProfile, CheckoutSubprocessActuator, CommandReceipt
 from atm_core.execution_integrity import ProductionExecutionIntegrity, RecoveryOutcome, lease_is_executable
 from atm_core.execution_jobs import ExecutionAck, ExecutionJobStore, ExecutionStatus, ProgressReceipt, utcnow_iso
 from atm_core.models import Opportunity, Phase, RuntimeState
@@ -41,27 +43,36 @@ class Order005ExecutionIntegrityTests(unittest.TestCase):
         return ActuatorProfile(
             worker_id="fixture-worker",
             source_sha=SOURCE,
-            execute_commands=[["python", "-c", "print('execute')"]],
-            checker_commands=[["python", "-c", "print('check')"]],
+            execute_commands=[[sys.executable, "-c", "print('supporting-worker-check')"]],
+            checker_commands=[[sys.executable, "-c", "print('worker-self-check')"]],
         )
 
-    def _spec(self) -> WorkerJobSpec:
+    def _spec(self, frozen_input: str = "order005-material-task") -> WorkerJobSpec:
+        expected = hashlib.sha256(frozen_input.encode("utf-8")).hexdigest()
         return WorkerJobSpec(
-            job_id="fixture-job",
-            canonical_opportunity_id="fixture:fixture-job",
+            job_id="fixture-job-" + expected[:8],
+            canonical_opportunity_id="fixture:fixture-job:" + expected[:8],
             external_source="fixture",
-            external_url="https://example.invalid/fixture-job",
-            task_type="fixture",
-            frozen_acceptance_criteria=["exact artifact binding", "independent checker proof"],
-            repository_or_input="https://github.com/example/fixture-worker",
+            external_url="https://example.invalid/fixture-job/" + expected[:8],
+            task_type="deterministic_digest_v1",
+            frozen_acceptance_criteria=[
+                "worker consumes exact frozen input",
+                "ATM checker recomputes output independently",
+            ],
+            repository_or_input=frozen_input,
             max_spend_usd=0,
             required_capabilities=["git", "github", "filesystem", "shell", "evidence"],
+            expected_deliverable="content-addressed digest result",
+            deterministic_checks=[
+                f"TASK_RESULT_SHA256_EQ:{expected}",
+                f"TASK_RESULT_BYTE_LENGTH_EQ:{len(frozen_input.encode('utf-8'))}",
+            ],
         )
 
-    def _lease(self, spec: WorkerJobSpec, *, expires_at: datetime | None = None) -> WorkLease:
+    def _lease(self, spec: WorkerJobSpec, *, expires_at: datetime | None = None, lease_id: str = "lease-order005") -> WorkLease:
         now = datetime.now(timezone.utc)
         return WorkLease(
-            lease_id="lease-order005",
+            lease_id=lease_id,
             canonical_opportunity_id=spec.canonical_opportunity_id,
             worker_id="fixture-worker",
             scope_hash=spec.scope_hash,
@@ -72,7 +83,70 @@ class Order005ExecutionIntegrityTests(unittest.TestCase):
         )
 
     @staticmethod
-    def _fake_dispatch(self_actuator, spec, lease, manifest, profile):
+    def _task_result(job, spec, lease, *, wrong: bool = False) -> dict[str, object]:
+        digest = hashlib.sha256(spec.repository_or_input.encode("utf-8")).hexdigest()
+        if wrong:
+            digest = ("0" if digest[0] != "0" else "1") + digest[1:]
+        return {
+            "schema": "ATM_TASK_RESULT_V1",
+            "execution_job_id": job.execution_job_id,
+            "work_lease_id": lease.lease_id,
+            "scope_hash": spec.scope_hash,
+            "job_spec_hash": canonical_hash(spec.model_dump(mode="json")),
+            "task_type": spec.task_type,
+            "consumed_contract": {"fixture": True},
+            "task_output": {
+                "kind": "SHA256_UTF8_INPUT_V1",
+                "sha256": digest,
+                "byte_length": len(spec.repository_or_input.encode("utf-8")),
+            },
+            "outgoing_spend_usd": 0,
+        }
+
+    def _seed_progress(self, store: ExecutionJobStore, job, spec: WorkerJobSpec) -> None:
+        before = "0" * 64
+        for seq, after in ((1, "c" * 64), (2, "d" * 64)):
+            store.add_progress(ProgressReceipt(
+                execution_job_id=job.execution_job_id,
+                checkpoint_seq=seq,
+                objective_hash=spec.scope_hash,
+                artifact_before_hash=before,
+                artifact_after_hash=after,
+                tests_run=[f"material-{seq}"],
+                new_evidence_refs=[f"material:{seq}"],
+                uncertainty_or_acceptance_delta="measurable",
+                created_at=utcnow_iso(),
+            ))
+            before = after
+
+    def _seed_result(self, integrity, store, job, spec, lease, manifest, profile, *, wrong=False, self_cert=False, with_task=True):
+        integrity.freeze_acceptance(job, spec)
+        if store.get(job.execution_job_id).checkpoint_seq == 0:
+            self._seed_progress(store, job, spec)
+        artifact = {
+            "schema": "ATM_EXECUTION_ARTIFACT_V1",
+            "execution_job_id": job.execution_job_id,
+            "worker_id": manifest.worker_id,
+            "worker_source_sha": profile.source_sha,
+            "work_lease_id": lease.lease_id,
+            "scope_hash": spec.scope_hash,
+            "job_spec_hash": canonical_hash(spec.model_dump(mode="json")),
+            "command_receipts": [{"argv": ["frozen-task-consumer"], "returncode": 0}],
+            "worker_self_check_receipts": [{"argv": ["canned-self-test"], "returncode": 0}],
+            "outgoing_spend_usd": 0,
+        }
+        if with_task:
+            task_result = self._task_result(job, spec, lease, wrong=wrong)
+            artifact["task_result"] = task_result
+            artifact["task_result_hash"] = canonical_hash(task_result)
+        if self_cert:
+            artifact["checker_independent"] = True
+        raw = (canonical_json(artifact) + "\n").encode("utf-8")
+        integrity.artifact_path(job.execution_job_id).write_bytes(raw)
+        store.result_ready(job.execution_job_id, hashlib.sha256(raw).hexdigest())
+        return hashlib.sha256(raw).hexdigest()
+
+    def _fake_dispatch(self, self_actuator, spec, lease, manifest, profile):
         store = self_actuator.store
         job = store.create_or_get(
             opportunity_id=spec.canonical_opportunity_id,
@@ -94,68 +168,9 @@ class Order005ExecutionIntegrityTests(unittest.TestCase):
             acknowledged_at=utcnow_iso(),
         ))
         store.running(job.execution_job_id)
-        before = "0" * 64
-        for seq, after in ((1, "a" * 64), (2, "b" * 64)):
-            store.add_progress(ProgressReceipt(
-                execution_job_id=job.execution_job_id,
-                checkpoint_seq=seq,
-                objective_hash=spec.scope_hash,
-                artifact_before_hash=before,
-                artifact_after_hash=after,
-                tests_run=[f"fixture-step-{seq}"],
-                new_evidence_refs=[f"fixture:evidence:{seq}"],
-                blocker_class="NONE",
-                uncertainty_or_acceptance_delta=f"progress-{seq}",
-                recommendation="CONTINUE",
-                created_at=utcnow_iso(),
-            ))
-            before = after
-        artifact = {
-            "schema": "ATM_EXECUTION_ARTIFACT_V1",
-            "execution_job_id": job.execution_job_id,
-            "worker_id": manifest.worker_id,
-            "worker_source_sha": profile.source_sha,
-            "work_lease_id": lease.lease_id,
-            "scope_hash": spec.scope_hash,
-            "job_spec_hash": canonical_hash(spec.model_dump(mode="json")),
-            "command_receipts": [{"argv": ["fixture"], "returncode": 0}],
-            "outgoing_spend_usd": 0,
-        }
-        raw = (canonical_json(artifact) + "\n").encode("utf-8")
-        (self_actuator.artifact_root / f"{job.execution_job_id}.json").write_bytes(raw)
-        store.result_ready(job.execution_job_id, hashlib.sha256(raw).hexdigest())
-        return store.terminal(job.execution_job_id, checker_hash="weak-fixture-checker", reason="FIXTURE_BASE_CHECKER")
-
-    def _seed_recovery_artifact(self, integrity, store, job, spec, lease, manifest, profile):
-        integrity.freeze_acceptance(job, spec)
-        before = "0" * 64
-        for seq, after in ((1, "c" * 64), (2, "d" * 64)):
-            store.add_progress(ProgressReceipt(
-                execution_job_id=job.execution_job_id,
-                checkpoint_seq=seq,
-                objective_hash=spec.scope_hash,
-                artifact_before_hash=before,
-                artifact_after_hash=after,
-                tests_run=[f"recovery-{seq}"],
-                new_evidence_refs=[f"recovery:{seq}"],
-                uncertainty_or_acceptance_delta="measurable",
-                created_at=utcnow_iso(),
-            ))
-            before = after
-        artifact = {
-            "schema": "ATM_EXECUTION_ARTIFACT_V1",
-            "execution_job_id": job.execution_job_id,
-            "worker_id": manifest.worker_id,
-            "worker_source_sha": profile.source_sha,
-            "work_lease_id": lease.lease_id,
-            "scope_hash": spec.scope_hash,
-            "job_spec_hash": canonical_hash(spec.model_dump(mode="json")),
-            "command_receipts": [{"argv": ["recovery-fixture"], "returncode": 0}],
-            "outgoing_spend_usd": 0,
-        }
-        raw = (canonical_json(artifact) + "\n").encode("utf-8")
-        integrity.artifact_path(job.execution_job_id).write_bytes(raw)
-        return hashlib.sha256(raw).hexdigest()
+        integrity = ProductionExecutionIntegrity(store, self_actuator.workspace_root, self_actuator.artifact_root)
+        self._seed_result(integrity, store, job, spec, lease, manifest, profile)
+        return store.checking(job.execution_job_id)
 
     def test_lease_boundary_and_zero_launch_for_expired_equal(self):
         spec, manifest, profile = self._spec(), self._manifest(), self._profile()
@@ -181,6 +196,7 @@ class Order005ExecutionIntegrityTests(unittest.TestCase):
                         job, _ = integrity.execute(spec, lease, manifest, profile)
                         self.assertEqual(dispatch.call_count, 1)
                         self.assertEqual(job.launch_count, 1)
+                        self.assertEqual(job.status, ExecutionStatus.TERMINAL)
                     else:
                         with self.assertRaisesRegex(ValueError, "expired or expires exactly now"):
                             integrity.execute(spec, lease, manifest, profile)
@@ -194,7 +210,52 @@ class Order005ExecutionIntegrityTests(unittest.TestCase):
                         self.assertEqual(job.status, ExecutionStatus.EXPIRED)
                 store.close()
 
-    def test_actual_production_phase_uses_executionjob_actuator_and_recovery(self):
+    def test_real_actuator_consumes_materialized_frozen_job_and_result_is_task_specific(self):
+        manifest, profile = self._manifest(), self._profile()
+        outputs = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index, frozen_input in enumerate(("alpha-frozen-job", "beta-frozen-job")):
+                spec = self._spec(frozen_input)
+                lease = self._lease(spec, lease_id=f"lease-{index}")
+                store = ExecutionJobStore(root / f"execution-{index}.sqlite3")
+                integrity = ProductionExecutionIntegrity(store, root / "work", root / "artifacts")
+                with (
+                    patch.object(CheckoutSubprocessActuator, "_checkout", autospec=True, side_effect=lambda self_obj, m, p, checkout, env: checkout.mkdir(parents=True, exist_ok=True)),
+                    patch.object(CheckoutSubprocessActuator, "_git_head", return_value=SOURCE),
+                ):
+                    job, outcome = integrity.execute(spec, lease, manifest, profile)
+                self.assertEqual(job.status, ExecutionStatus.TERMINAL)
+                self.assertEqual(outcome, RecoveryOutcome.RECONCILE_RESULT)
+                artifact = json.loads(integrity.artifact_path(job.execution_job_id).read_text(encoding="utf-8"))
+                task_result = artifact["task_result"]
+                self.assertEqual(task_result["job_spec_hash"], job.job_spec_hash)
+                self.assertEqual(task_result["scope_hash"], spec.scope_hash)
+                self.assertEqual(task_result["task_output"]["sha256"], hashlib.sha256(frozen_input.encode()).hexdigest())
+                outputs.append((job.job_spec_hash, artifact["task_result_hash"], task_result["task_output"]["sha256"]))
+                store.close()
+        self.assertNotEqual(outputs[0], outputs[1])
+
+    def test_worker_that_ignores_frozen_job_and_only_self_tests_cannot_succeed(self):
+        spec, manifest, profile = self._spec(), self._manifest(), self._profile()
+        lease = self._lease(spec)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ExecutionJobStore(root / "execution.sqlite3")
+            integrity = ProductionExecutionIntegrity(store, root / "work", root / "artifacts")
+            fake_receipt = CommandReceipt(argv=["ignored-job"], returncode=0, stdout_sha256="a" * 64, stderr_sha256="b" * 64)
+            with (
+                patch.object(CheckoutSubprocessActuator, "_checkout", autospec=True, side_effect=lambda self_obj, m, p, checkout, env: checkout.mkdir(parents=True, exist_ok=True)),
+                patch.object(CheckoutSubprocessActuator, "_git_head", return_value=SOURCE),
+                patch.object(actuator_module, "_run_first_with_ack", return_value=fake_receipt),
+            ):
+                job, _ = integrity.execute(spec, lease, manifest, profile)
+            self.assertEqual(job.status, ExecutionStatus.DISPATCH_FAILED)
+            self.assertEqual(job.terminal_reason, "ValueError")
+            self.assertIsNone(integrity.checker_receipt(job.execution_job_id))
+            store.close()
+
+    def test_actual_production_phase_reaches_check_with_internal_task_artifact_and_never_submit(self):
         spec, manifest, profile = self._spec(), self._manifest(), self._profile()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -227,6 +288,7 @@ class Order005ExecutionIntegrityTests(unittest.TestCase):
             ):
                 atm_fabric.phase_work({}, state)
                 self.assertEqual(state.phase, Phase.CHECK)
+                self.assertTrue(str(state.active_opportunity.deliverable_url).startswith("atm-artifact://sha256/"))
                 self.assertEqual(dispatch.call_count, 1)
                 passive.assert_not_called()
                 execution_id = state.active_opportunity.execution_job_id
@@ -236,20 +298,75 @@ class Order005ExecutionIntegrityTests(unittest.TestCase):
                 checker = integrity.checker_receipt(execution_id)
                 self.assertEqual(job.launch_count, 1)
                 self.assertEqual(job.status, ExecutionStatus.TERMINAL)
-                self.assertGreaterEqual(len(store.progress(execution_id)), 2)
                 self.assertIsNotNone(checker)
-                self.assertEqual(checker.checker_id, "ATM_INDEPENDENT_CHECKER_V1")
+                self.assertEqual(checker.verdict, "PASS")
                 self.assertEqual(checker.receipt_hash, job.checker_hash)
                 store.close()
-                # Simulated supervisor re-entry uses the durable terminal identity; dispatch remains exactly once.
                 state.phase = Phase.WORK
                 atm_fabric.phase_work({}, state)
                 self.assertEqual(dispatch.call_count, 1)
                 self.assertEqual(state.active_opportunity.execution_recovery, RecoveryOutcome.RECONCILE_RESULT.value)
+                self.assertEqual(state.phase, Phase.CHECK)
                 atm_fabric.phase_check({}, state)
-                self.assertEqual(state.phase, Phase.SUBMIT)
+                self.assertEqual(state.phase, Phase.CHECK)
+                self.assertEqual(state.last_result["status"], "CHECKER_PASS_DELIVERABLE_UNMATERIALIZED")
 
-    def test_midflight_recovery_states_never_duplicate_launch_or_orphan(self):
+    def test_structurally_valid_but_materially_wrong_result_is_checker_fail_and_submit_unreachable(self):
+        spec, manifest, profile = self._spec(), self._manifest(), self._profile()
+        lease = self._lease(spec)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ExecutionJobStore(root / "execution.sqlite3")
+            integrity = ProductionExecutionIntegrity(store, root / "work", root / "artifacts")
+            job = store.create_or_get(
+                opportunity_id=spec.canonical_opportunity_id,
+                worker_id=manifest.worker_id,
+                worker_version_or_source_sha=profile.source_sha,
+                work_lease_id=lease.lease_id,
+                scope_hash=spec.scope_hash,
+                job_spec_hash=canonical_hash(spec.model_dump(mode="json")),
+            )
+            job, launched = store.begin_dispatch(job.execution_job_id)
+            self.assertTrue(launched)
+            self._seed_result(integrity, store, job, spec, lease, manifest, profile, wrong=True)
+            store.checking(job.execution_job_id)
+            receipt = integrity.independently_check(store.get(job.execution_job_id), spec, lease, manifest, profile)
+            self.assertEqual(receipt.verdict, "FAIL")
+            self.assertTrue(any(not item["passed"] for item in receipt.predicate_results))
+            recovered, outcome = integrity.recover(store.get(job.execution_job_id), spec, lease, manifest, profile)
+            self.assertEqual(outcome, RecoveryOutcome.CANCEL)
+            self.assertEqual(recovered.status, ExecutionStatus.QUARANTINED)
+            self.assertEqual(recovered.launch_count, 1)
+            store.close()
+
+    def test_materially_correct_result_passes_in_distinct_checker_workspace(self):
+        spec, manifest, profile = self._spec(), self._manifest(), self._profile()
+        lease = self._lease(spec)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ExecutionJobStore(root / "execution.sqlite3")
+            integrity = ProductionExecutionIntegrity(store, root / "work", root / "artifacts")
+            job = store.create_or_get(
+                opportunity_id=spec.canonical_opportunity_id,
+                worker_id=manifest.worker_id,
+                worker_version_or_source_sha=profile.source_sha,
+                work_lease_id=lease.lease_id,
+                scope_hash=spec.scope_hash,
+                job_spec_hash=canonical_hash(spec.model_dump(mode="json")),
+            )
+            job, _ = store.begin_dispatch(job.execution_job_id)
+            self._seed_result(integrity, store, job, spec, lease, manifest, profile)
+            receipt = integrity.independently_check(store.get(job.execution_job_id), spec, lease, manifest, profile)
+            self.assertEqual(receipt.verdict, "PASS")
+            self.assertTrue(all(item["passed"] for item in receipt.predicate_results))
+            checker_dir = integrity.checker_workspace(job.execution_job_id).resolve()
+            worker_dir = (root / "work" / job.execution_job_id).resolve()
+            self.assertNotEqual(checker_dir, worker_dir)
+            self.assertNotIn(checker_dir, worker_dir.parents)
+            self.assertNotIn(worker_dir, checker_dir.parents)
+            store.close()
+
+    def test_midflight_recovery_states_never_duplicate_launch_and_result_recovery_uses_material_checker(self):
         spec, manifest, profile = self._spec(), self._manifest(), self._profile()
         for wanted in (
             ExecutionStatus.DISPATCHING,
@@ -286,98 +403,54 @@ class Order005ExecutionIntegrityTests(unittest.TestCase):
                 if wanted == ExecutionStatus.RUNNING:
                     store.running(job.execution_job_id)
                 if wanted in {ExecutionStatus.RESULT_READY, ExecutionStatus.CHECKING}:
-                    result_hash = self._seed_recovery_artifact(integrity, store, store.get(job.execution_job_id), spec, lease, manifest, profile)
-                    store.result_ready(job.execution_job_id, result_hash)
+                    self._seed_result(integrity, store, store.get(job.execution_job_id), spec, lease, manifest, profile)
                     if wanted == ExecutionStatus.CHECKING:
                         store.checking(job.execution_job_id)
                 recovered, outcome = integrity.recover(store.get(job.execution_job_id), spec, lease, manifest, profile)
                 if wanted in {ExecutionStatus.RESULT_READY, ExecutionStatus.CHECKING}:
                     self.assertEqual(outcome, RecoveryOutcome.RECONCILE_RESULT)
                     self.assertEqual(recovered.status, ExecutionStatus.TERMINAL)
+                    self.assertEqual(integrity.checker_receipt(job.execution_job_id).verdict, "PASS")
                 else:
                     self.assertEqual(outcome, RecoveryOutcome.CANCEL)
                     self.assertEqual(recovered.status, ExecutionStatus.CANCELLED)
                 _, launch_again = store.begin_dispatch(job.execution_job_id)
                 self.assertFalse(launch_again)
                 self.assertEqual(store.get(job.execution_job_id).launch_count, 1)
-                self.assertIn(store.get(job.execution_job_id).status, {ExecutionStatus.TERMINAL, ExecutionStatus.CANCELLED})
                 store.close()
 
-    def test_checker_failure_quarantines_instead_of_orphaning_result(self):
+    def test_worker_self_check_pass_alone_and_forged_checker_cannot_bypass(self):
         spec, manifest, profile = self._spec(), self._manifest(), self._profile()
         lease = self._lease(spec)
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            store = ExecutionJobStore(root / "execution.sqlite3")
-            integrity = ProductionExecutionIntegrity(store, root / "work", root / "artifacts")
-            job = store.create_or_get(
-                opportunity_id=spec.canonical_opportunity_id,
-                worker_id=manifest.worker_id,
-                worker_version_or_source_sha=profile.source_sha,
-                work_lease_id=lease.lease_id,
-                scope_hash=spec.scope_hash,
-                job_spec_hash=canonical_hash(spec.model_dump(mode="json")),
-            )
-            integrity.freeze_acceptance(job, spec)
-            job, _ = store.begin_dispatch(job.execution_job_id)
-            artifact = {
-                "schema": "ATM_EXECUTION_ARTIFACT_V1",
-                "execution_job_id": job.execution_job_id,
-                "worker_id": manifest.worker_id,
-                "worker_source_sha": profile.source_sha,
-                "work_lease_id": lease.lease_id,
-                "scope_hash": spec.scope_hash,
-                "job_spec_hash": canonical_hash(spec.model_dump(mode="json")),
-                "command_receipts": [{"argv": ["x"], "returncode": 0}],
-                "outgoing_spend_usd": 0,
-            }
-            raw = (canonical_json(artifact) + "\n").encode()
-            integrity.artifact_path(job.execution_job_id).write_bytes(raw)
-            store.result_ready(job.execution_job_id, hashlib.sha256(raw).hexdigest())
-            recovered, outcome = integrity.recover(store.get(job.execution_job_id), spec, lease, manifest, profile)
-            self.assertEqual(outcome, RecoveryOutcome.CANCEL)
-            self.assertEqual(recovered.status, ExecutionStatus.QUARANTINED)
-            store.close()
-
-    def test_forged_checker_declaration_and_hash_mismatch_cannot_bypass_proof(self):
-        spec, manifest, profile = self._spec(), self._manifest(), self._profile()
-        lease = self._lease(spec)
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            store = ExecutionJobStore(root / "execution.sqlite3")
-            integrity = ProductionExecutionIntegrity(store, root / "work", root / "artifacts")
-            job = store.create_or_get(
-                opportunity_id=spec.canonical_opportunity_id,
-                worker_id=manifest.worker_id,
-                worker_version_or_source_sha=profile.source_sha,
-                work_lease_id=lease.lease_id,
-                scope_hash=spec.scope_hash,
-                job_spec_hash=canonical_hash(spec.model_dump(mode="json")),
-            )
-            integrity.freeze_acceptance(job, spec)
-            artifact = {
-                "schema": "ATM_EXECUTION_ARTIFACT_V1",
-                "execution_job_id": job.execution_job_id,
-                "worker_id": manifest.worker_id,
-                "worker_source_sha": profile.source_sha,
-                "work_lease_id": lease.lease_id,
-                "scope_hash": spec.scope_hash,
-                "job_spec_hash": canonical_hash(spec.model_dump(mode="json")),
-                "command_receipts": [{"argv": ["x"], "returncode": 0}],
-                "outgoing_spend_usd": 0,
-                "checker_independent": True,
-            }
-            raw = (json.dumps(artifact, sort_keys=True, separators=(",", ":")) + "\n").encode()
-            integrity.artifact_path(job.execution_job_id).write_bytes(raw)
-            store.result_ready(job.execution_job_id, hashlib.sha256(raw).hexdigest())
-            with self.assertRaisesRegex(ValueError, "self-certification"):
-                integrity.independently_check(store.get(job.execution_job_id), spec, lease, manifest, profile)
-            self.assertIsNone(integrity.checker_receipt(job.execution_job_id))
-            integrity.artifact_path(job.execution_job_id).write_text("tampered", encoding="utf-8")
-            recovered, outcome = integrity.recover(store.get(job.execution_job_id), spec, lease, manifest, profile)
-            self.assertEqual(outcome, RecoveryOutcome.CANCEL)
-            self.assertEqual(recovered.status, ExecutionStatus.CANCELLED)
-            store.close()
+        for self_cert in (False, True):
+            with self.subTest(self_cert=self_cert), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                store = ExecutionJobStore(root / "execution.sqlite3")
+                integrity = ProductionExecutionIntegrity(store, root / "work", root / "artifacts")
+                job = store.create_or_get(
+                    opportunity_id=spec.canonical_opportunity_id,
+                    worker_id=manifest.worker_id,
+                    worker_version_or_source_sha=profile.source_sha,
+                    work_lease_id=lease.lease_id,
+                    scope_hash=spec.scope_hash,
+                    job_spec_hash=canonical_hash(spec.model_dump(mode="json")),
+                )
+                job, _ = store.begin_dispatch(job.execution_job_id)
+                self._seed_result(
+                    integrity, store, job, spec, lease, manifest, profile,
+                    with_task=False, self_cert=self_cert,
+                )
+                if self_cert:
+                    with self.assertRaisesRegex(ValueError, "self-certification"):
+                        integrity.independently_check(store.get(job.execution_job_id), spec, lease, manifest, profile)
+                else:
+                    with self.assertRaisesRegex(ValueError, "task-specific result"):
+                        integrity.independently_check(store.get(job.execution_job_id), spec, lease, manifest, profile)
+                self.assertIsNone(integrity.checker_receipt(job.execution_job_id))
+                recovered, outcome = integrity.recover(store.get(job.execution_job_id), spec, lease, manifest, profile)
+                self.assertEqual(outcome, RecoveryOutcome.CANCEL)
+                self.assertEqual(recovered.status, ExecutionStatus.QUARANTINED)
+                store.close()
 
 
 if __name__ == "__main__":
