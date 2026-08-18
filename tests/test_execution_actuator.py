@@ -38,8 +38,10 @@ class ExecutionActuatorContractTests(unittest.TestCase):
     def test_profiles_are_pinned_zero_secret_workers(self):
         boqa = load_actuator_profile(PROFILES, "boqa")
         zungun = load_actuator_profile(PROFILES, "zungun")
-        self.assertEqual(boqa.source_sha, "f33015c55fe84508377528c2ff718f9c5b28efe7")
-        self.assertEqual(zungun.source_sha, "219d088ba235ae577f163021d91b42a403d8bc57")
+        self.assertEqual(boqa.source_sha, "797dbf53e1cccf9521d3e2af9b8dc723fc7d1ca1")
+        self.assertEqual(zungun.source_sha, "a63f78e0a065329b09965e7aa1367a7071c8b4f6")
+        self.assertEqual(boqa.task_entrypoint, "tools/atm-worker-entrypoint.mjs")
+        self.assertEqual(zungun.task_entrypoint, "tools/atm-worker-entrypoint.mjs")
         for worker_id in ("boqa", "zungun"):
             manifest = self.registry.get(worker_id)
             self.assertTrue(manifest.enabled)
@@ -53,10 +55,11 @@ class ExecutionActuatorContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = ExecutionJobStore(Path(directory) / "execution.sqlite3")
             spec = self._spec()
+            source = load_actuator_profile(PROFILES, "boqa").source_sha
             job = store.create_or_get(
                 opportunity_id=spec.canonical_opportunity_id,
                 worker_id="boqa",
-                worker_version_or_source_sha="f33015c55fe84508377528c2ff718f9c5b28efe7",
+                worker_version_or_source_sha=source,
                 work_lease_id="lease-1",
                 scope_hash=spec.scope_hash,
                 job_spec_hash=canonical_hash(spec.model_dump(mode="json")),

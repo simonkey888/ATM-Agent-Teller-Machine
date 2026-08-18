@@ -6,9 +6,9 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .workers import canonical_hash, canonical_json
+from .workers import canonical_json
 
 
 def utcnow_iso() -> str:
@@ -26,6 +26,7 @@ class SkillStage(StrEnum):
 
 
 SKILL_PIPELINE = [stage.value for stage in SkillStage]
+MIN_CANARY_SAMPLE_SIZE = 1
 
 
 class SkillCapsule(BaseModel):
@@ -52,6 +53,38 @@ class SkillCapsule(BaseModel):
         return values
 
 
+class CanaryEvidence(BaseModel):
+    """Durable measured LOW_RISK_CANARY result required before PROMOTE."""
+
+    model_config = ConfigDict(extra="forbid")
+    skill_id: str
+    evidence_ref: str
+    sample_size: int
+    success_count: int
+    candidate_metric: float
+    recorded_by: str
+    created_at: str = Field(default_factory=utcnow_iso)
+
+    @field_validator("sample_size")
+    @classmethod
+    def sample_positive(cls, value: int) -> int:
+        if value < MIN_CANARY_SAMPLE_SIZE:
+            raise ValueError("canary sample size below enforced minimum")
+        return value
+
+    @model_validator(mode="after")
+    def successful_bounded_canary(self) -> "CanaryEvidence":
+        if self.success_count < 0 or self.success_count > self.sample_size:
+            raise ValueError("canary success_count outside sample")
+        if self.success_count != self.sample_size:
+            raise ValueError("promotion canary requires all bounded samples to pass")
+        if not self.recorded_by.startswith("ATM_SUPERVISOR"):
+            raise ValueError("canary evidence must be recorded by ATM supervisor")
+        if not self.evidence_ref.strip():
+            raise ValueError("canary evidence_ref required")
+        return self
+
+
 class CalibrationObservation(BaseModel):
     model_config = ConfigDict(extra="forbid")
     observation_id: str
@@ -60,6 +93,7 @@ class CalibrationObservation(BaseModel):
     predicted_band: str
     observed_outcome: str
     evidence_refs: list[str]
+    synthetic: bool = False
     created_at: str = Field(default_factory=utcnow_iso)
 
     @field_validator("predicted_band")
@@ -101,6 +135,19 @@ class HighTicketRadar:
 
 
 class LearningStore:
+    """Canonical Skill Forge/calibration authority with immutable identity and promotion history."""
+
+    IMMUTABLE_SKILL_FIELDS = (
+        "skill_id",
+        "capability",
+        "code_refs",
+        "test_refs",
+        "fixture_refs",
+        "baseline_metric",
+        "metric_name",
+        "created_at",
+    )
+
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -115,6 +162,23 @@ class LearningStore:
               skill_json TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS skill_history(
+              skill_id TEXT NOT NULL,
+              seq INTEGER NOT NULL,
+              from_stage TEXT NOT NULL,
+              to_stage TEXT NOT NULL,
+              evidence_ref TEXT NOT NULL,
+              supervisor TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY(skill_id,seq)
+            );
+            CREATE TABLE IF NOT EXISTS skill_canary_evidence(
+              skill_id TEXT NOT NULL,
+              evidence_ref TEXT NOT NULL,
+              evidence_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY(skill_id,evidence_ref)
+            );
             CREATE TABLE IF NOT EXISTS calibration(
               observation_id TEXT PRIMARY KEY,
               observation_json TEXT NOT NULL,
@@ -127,7 +191,7 @@ class LearningStore:
         self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self.conn.close()
 
-    def put_skill(self, skill: SkillCapsule) -> SkillCapsule:
+    def _write_skill(self, skill: SkillCapsule) -> SkillCapsule:
         skill = skill.model_copy(update={"updated_at": utcnow_iso()})
         self.conn.execute(
             "INSERT INTO skills VALUES(?,?,?) ON CONFLICT(skill_id) DO UPDATE SET skill_json=excluded.skill_json,updated_at=excluded.updated_at",
@@ -135,15 +199,91 @@ class LearningStore:
         )
         return skill
 
+    def put_skill(self, skill: SkillCapsule) -> SkillCapsule:
+        """Register once. Re-registration cannot reset identity, baseline or promotion stage."""
+        row = self.conn.execute("SELECT skill_json FROM skills WHERE skill_id=?", (skill.skill_id,)).fetchone()
+        if row is None:
+            if skill.stage != SkillStage.SOLVE or skill.candidate_metric is not None or skill.promoted_by is not None:
+                raise ValueError("new skill registration must begin at SOLVE with no candidate/promoter state")
+            return self._write_skill(skill)
+        existing = SkillCapsule.model_validate_json(str(row["skill_json"]))
+        for field in self.IMMUTABLE_SKILL_FIELDS:
+            if getattr(existing, field) != getattr(skill, field):
+                raise ValueError(f"skill identity/baseline mutation forbidden: {field}")
+        if skill.stage != existing.stage or skill.promoted_by != existing.promoted_by:
+            raise ValueError("skill re-registration cannot reset or advance promotion stage")
+        if skill.candidate_metric != existing.candidate_metric or skill.failure_signature_refs != existing.failure_signature_refs:
+            raise ValueError("skill semantic mutation requires supervisor advance_skill")
+        return existing
+
     def get_skill(self, skill_id: str) -> SkillCapsule:
         row = self.conn.execute("SELECT skill_json FROM skills WHERE skill_id=?", (skill_id,)).fetchone()
         if row is None:
             raise KeyError(skill_id)
         return SkillCapsule.model_validate_json(str(row["skill_json"]))
 
+    def history(self, skill_id: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM skill_history WHERE skill_id=? ORDER BY seq ASC", (skill_id,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _append_history(self, skill_id: str, from_stage: SkillStage, to_stage: SkillStage, evidence_ref: str, supervisor: str) -> None:
+        row = self.conn.execute("SELECT COALESCE(MAX(seq),0) AS max_seq FROM skill_history WHERE skill_id=?", (skill_id,)).fetchone()
+        seq = int(row["max_seq"]) + 1
+        self.conn.execute(
+            "INSERT INTO skill_history VALUES(?,?,?,?,?,?,?)",
+            (skill_id, seq, from_stage.value, to_stage.value, evidence_ref, supervisor, utcnow_iso()),
+        )
+
+    def record_canary_result(
+        self,
+        skill_id: str,
+        *,
+        supervisor: str,
+        evidence_ref: str,
+        sample_size: int,
+        success_count: int,
+        candidate_metric: float,
+    ) -> CanaryEvidence:
+        skill = self.get_skill(skill_id)
+        if skill.stage != SkillStage.LOW_RISK_CANARY:
+            raise ValueError("canary evidence may only be recorded at LOW_RISK_CANARY")
+        evidence = CanaryEvidence(
+            skill_id=skill_id,
+            evidence_ref=evidence_ref,
+            sample_size=sample_size,
+            success_count=success_count,
+            candidate_metric=candidate_metric,
+            recorded_by=supervisor,
+        )
+        existing = self.conn.execute(
+            "SELECT evidence_json FROM skill_canary_evidence WHERE skill_id=? AND evidence_ref=?",
+            (skill_id, evidence_ref),
+        ).fetchone()
+        if existing:
+            prior = CanaryEvidence.model_validate_json(str(existing["evidence_json"]))
+            if prior != evidence:
+                raise ValueError("conflicting canary evidence")
+            return prior
+        self.conn.execute(
+            "INSERT INTO skill_canary_evidence VALUES(?,?,?,?)",
+            (skill_id, evidence_ref, canonical_json(evidence.model_dump(mode="json")), evidence.created_at),
+        )
+        return evidence
+
+    def latest_canary(self, skill_id: str) -> CanaryEvidence | None:
+        row = self.conn.execute(
+            "SELECT evidence_json FROM skill_canary_evidence WHERE skill_id=? ORDER BY created_at DESC LIMIT 1",
+            (skill_id,),
+        ).fetchone()
+        return CanaryEvidence.model_validate_json(str(row["evidence_json"])) if row else None
+
     def advance_skill(self, skill_id: str, *, supervisor: str, evidence_ref: str, candidate_metric: float | None = None) -> SkillCapsule:
         if not supervisor.startswith("ATM_SUPERVISOR"):
             raise ValueError("skills cannot self-promote")
+        if not evidence_ref:
+            raise ValueError("promotion evidence_ref required")
         skill = self.get_skill(skill_id)
         index = SKILL_PIPELINE.index(skill.stage.value)
         if index >= len(SKILL_PIPELINE) - 1:
@@ -155,14 +295,35 @@ class LearningStore:
         if candidate_metric is not None:
             update["candidate_metric"] = candidate_metric
         if next_stage == SkillStage.PROMOTE:
-            if skill.baseline_metric is None or candidate_metric is None or not skill.metric_name:
+            history = self.history(skill_id)
+            expected = [
+                (SkillStage.SOLVE.value, SkillStage.DISTILL.value),
+                (SkillStage.DISTILL.value, SkillStage.REPLAY.value),
+                (SkillStage.REPLAY.value, SkillStage.ADVERSARIAL_TEST.value),
+                (SkillStage.ADVERSARIAL_TEST.value, SkillStage.SHADOW_LIVE.value),
+                (SkillStage.SHADOW_LIVE.value, SkillStage.LOW_RISK_CANARY.value),
+            ]
+            actual = [(row["from_stage"], row["to_stage"]) for row in history]
+            if actual != expected:
+                raise ValueError("promotion requires complete durable canary history")
+            canary = self.latest_canary(skill_id)
+            if canary is None:
+                raise ValueError("promotion requires durable measured canary evidence")
+            if candidate_metric is not None and candidate_metric != canary.candidate_metric:
+                raise ValueError("promotion metric must match durable canary evidence")
+            measured_metric = canary.candidate_metric
+            if skill.baseline_metric is None or not skill.metric_name:
                 raise ValueError("promotion requires measured baseline and candidate metric")
-            # Lower is better for time/error metrics; explicitly named success_rate uses higher-is-better.
-            improved = candidate_metric > skill.baseline_metric if "success" in skill.metric_name.lower() else candidate_metric < skill.baseline_metric
+            improved = measured_metric > skill.baseline_metric if "success" in skill.metric_name.lower() else measured_metric < skill.baseline_metric
             if not improved:
                 raise ValueError("promotion requires measurable improvement against baseline")
+            update["candidate_metric"] = measured_metric
             update["promoted_by"] = supervisor
-        return self.put_skill(skill.model_copy(update=update))
+            failures.append(f"canary-evidence:{canary.evidence_ref}:{canary.success_count}/{canary.sample_size}")
+            update["failure_signature_refs"] = failures
+        updated = self._write_skill(skill.model_copy(update=update))
+        self._append_history(skill_id, skill.stage, next_stage, evidence_ref, supervisor)
+        return updated
 
     def observe(self, observation: CalibrationObservation) -> bool:
         cur = self.conn.execute(
@@ -175,13 +336,17 @@ class LearningStore:
         rows = self.conn.execute("SELECT observation_json FROM calibration").fetchall()
         observations = [CalibrationObservation.model_validate_json(str(row["observation_json"])) for row in rows]
         matched = [row for row in observations if row.opportunity_class == opportunity_class]
+        production = [row for row in matched if not row.synthetic]
+        synthetic = [row for row in matched if row.synthetic]
         outcomes: dict[str, int] = {}
-        for row in matched:
+        for row in production:
             outcomes[row.observed_outcome] = outcomes.get(row.observed_outcome, 0) + 1
         return {
             "opportunity_class": opportunity_class,
-            "sample_size": len(matched),
+            "sample_size": len(production),
+            "synthetic_sample_size": len(synthetic),
             "outcomes": outcomes,
-            "posterior_band": "UNKNOWN" if len(matched) < 5 else "EMPIRICAL_BOUNDED",
+            "posterior_band": "UNKNOWN" if len(production) < 5 else "EMPIRICAL_BOUNDED",
             "fake_precision": False,
+            "synthetic_excluded_from_production_metrics": True,
         }

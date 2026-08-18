@@ -1,6 +1,7 @@
 {
   "worker_id": "boqa",
-  "source_sha": "f33015c55fe84508377528c2ff718f9c5b28efe7",
+  "source_sha": "797dbf53e1cccf9521d3e2af9b8dc723fc7d1ca1",
+  "task_entrypoint": "tools/atm-worker-entrypoint.mjs",
   "prepare_commands": [],
   "execute_commands": [
     ["node", "scripts/syntax-check.js"]

@@ -14,7 +14,18 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Exact head binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          TESTED_SHA="$(git rev-parse HEAD)"
+          EXPECTED_SHA='${{ github.event.pull_request.head.sha || github.sha }}'
+          echo "TESTED_SHA=$TESTED_SHA"
+          echo "FINAL_PR_HEAD_SHA=$EXPECTED_SHA"
+          test "$TESTED_SHA" = "$EXPECTED_SHA"
+          echo 'TESTED_SHA_EQ_FINAL_PR_HEAD=PASS'
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.11'
@@ -35,3 +46,7 @@ jobs:
         env:
           PYTHONPATH: src
         run: python scripts/qualify-vnext-actuator.py
+      - name: ORDER-005 real production phase path
+        env:
+          PYTHONPATH: src
+        run: python scripts/qualify-order005-production-path.py

@@ -4,6 +4,7 @@ import json
 import re
 import urllib.error
 import urllib.request
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -11,16 +12,23 @@ from urllib.parse import urlparse
 
 import atm as v1
 import atm_v2 as core
+from atm_core.actuator import load_actuator_profile
 from atm_core.capabilities import CapabilityResolver
+from atm_core.execution_integrity import ProductionExecutionIntegrity, RecoveryOutcome
+from atm_core.execution_jobs import ExecutionJobStore, ExecutionStatus
 from atm_core.models import Phase, RuntimeState
 from atm_core.opportunities import OpportunityValidationError, external_state_hash
 from atm_core.payments import PaymentLedger
-from atm_core.workers import WorkerJobSpec, WorkerManifest, WorkerRegistry, WorkerResult, WorkLeaseStore, canonical_hash
+from atm_core.workers import WorkLease, WorkerJobSpec, WorkerManifest, WorkerRegistry, WorkerResult, WorkLeaseStore, canonical_hash
 from atm_core.zungun_worker import validate_worker_output_authority, validate_zungun_result_contract
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_DIR = ROOT / "workers" / "manifests"
+ACTUATOR_DIR = ROOT / "workers" / "actuators"
 FABRIC_DB = ROOT / ".atm" / "worker-fabric.sqlite3"
+EXECUTION_DB = ROOT / ".atm" / "execution-jobs.sqlite3"
+EXECUTION_WORKSPACE = ROOT / ".atm" / "execution-workspaces"
+EXECUTION_ARTIFACTS = ROOT / ".atm" / "execution-artifacts"
 BOQA_RAW_PREFIX = "https://raw.githubusercontent.com/simonkey888/boqa/"
 
 
@@ -56,6 +64,7 @@ def _worker_raw_prefix(manifest: WorkerManifest) -> str:
 
 
 def worker_result_locations(manifest: WorkerManifest, canonical_opportunity_id: str, source: str) -> tuple[str, str, str]:
+    """Compatibility-only public result locations; production WORK never trusts them as authority."""
     job_id = _safe_job_id(canonical_opportunity_id)
     source_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", str(source).strip().lower()).strip("-")
     if not source_slug or len(source_slug) > 64:
@@ -66,11 +75,12 @@ def worker_result_locations(manifest: WorkerManifest, canonical_opportunity_id: 
 
 
 def boqa_result_locations(canonical_opportunity_id: str) -> tuple[str, str, str]:
-    """Compatibility contract retained for existing BOQA tests and live jobs."""
+    """Compatibility contract retained for historical BOQA tests; not production WORK authority."""
     return worker_result_locations(_registry().get("boqa"), canonical_opportunity_id, "workprotocol")
 
 
 def _fetch_public_worker_json(url: str, manifest: WorkerManifest) -> dict[str, Any] | None:
+    """Compatibility reader. Production phase_work/phase_check do not call this function."""
     if not url.startswith(_worker_raw_prefix(manifest)):
         raise OpportunityValidationError("worker result URL outside selected worker allowlist")
     request = urllib.request.Request(url, headers={"User-Agent": "ATM-Worker-Fabric/1.0"})
@@ -174,6 +184,32 @@ def _build_worker_job(opp: Any, snapshot: dict[str, Any]) -> WorkerJobSpec:
     )
 
 
+def _load_active_work_lease(opp: Any, manifest: WorkerManifest) -> WorkLease:
+    lease_id = str(getattr(opp, "worker_lease_id", "") or "")
+    if not lease_id:
+        raise OpportunityValidationError("production WORK requires durable WorkLease identity")
+    store = WorkLeaseStore(FABRIC_DB)
+    try:
+        row = store.conn.execute(
+            "SELECT * FROM work_leases WHERE canonical_opportunity_id=? AND lease_id=? AND worker_id=?",
+            (opp.canonical_opportunity_id, lease_id, manifest.worker_id),
+        ).fetchone()
+        if row is None or row["released_at"] is not None or row["terminal_state"] is not None:
+            raise OpportunityValidationError("production WORK lease missing/released/terminal")
+        return WorkLease(
+            lease_id=str(row["lease_id"]),
+            canonical_opportunity_id=str(row["canonical_opportunity_id"]),
+            worker_id=str(row["worker_id"]),
+            scope_hash=str(row["scope_hash"]),
+            acquired_at=datetime.fromisoformat(str(row["acquired_at"]).replace("Z", "+00:00")),
+            expires_at=datetime.fromisoformat(str(row["expires_at"]).replace("Z", "+00:00")),
+            heartbeat_at=datetime.fromisoformat(str(row["heartbeat_at"]).replace("Z", "+00:00")),
+            terminal_state=None,
+        )
+    finally:
+        store.close()
+
+
 def phase_discover(config: dict[str, Any], state: RuntimeState, adapters: dict[str, Any]) -> None:
     core.phase_discover(config, state, adapters)
     if state.active_opportunity and state.phase == Phase.VERIFY:
@@ -206,6 +242,7 @@ def phase_verify(config: dict[str, Any], state: RuntimeState, adapters: dict[str
     opp.worker_id = manifest.worker_id
     opp.worker_manifest_hash = canonical_hash(manifest.model_dump(mode="json"))
     opp.worker_branch = branch
+    # Kept for compatibility/observability only. Production WORK never trusts these URLs as execution authority.
     opp.worker_result_url = result_url
     opp.worker_checker_url = checker_url
     state.active_opportunity = opp
@@ -249,6 +286,7 @@ def phase_claim(config: dict[str, Any], state: RuntimeState, adapters: dict[str,
 
 
 def phase_work(config: dict[str, Any], state: RuntimeState) -> None:
+    """Canonical production WORK: durable lease -> ExecutionJob -> actuator -> independent checker."""
     del config
     opp = state.active_opportunity
     if not opp or not getattr(opp, "worker_job_spec", None):
@@ -256,89 +294,91 @@ def phase_work(config: dict[str, Any], state: RuntimeState) -> None:
         return
     job_spec = WorkerJobSpec.model_validate(opp.worker_job_spec)
     manifest = _registry().get(str(opp.worker_id))
-    raw = _fetch_public_worker_json(str(opp.worker_result_url), manifest)
-    if raw is None:
+    profile = load_actuator_profile(ACTUATOR_DIR, manifest.worker_id)
+    lease = _load_active_work_lease(opp, manifest)
+
+    store = ExecutionJobStore(EXECUTION_DB)
+    try:
+        integrity = ProductionExecutionIntegrity(store, EXECUTION_WORKSPACE, EXECUTION_ARTIFACTS)
+        job, recovery = integrity.execute(job_spec, lease, manifest, profile)
+        checker = integrity.checker_receipt(job.execution_job_id)
+    finally:
+        store.close()
+
+    opp.execution_job_id = job.execution_job_id
+    opp.execution_status = job.status.value
+    opp.execution_recovery = recovery.value
+    opp.worker_commit_sha = profile.source_sha
+    opp.worker_result_hash = job.result_hash
+    opp.independent_checker_hash = checker.receipt_hash if checker else None
+    state.active_opportunity = opp
+
+    if job.status != ExecutionStatus.TERMINAL or checker is None or checker.verdict != "PASS":
         state.last_result = {
-            "status": "WORKER_PENDING",
-            "worker_id": opp.worker_id,
-            "work_lease_id": opp.worker_lease_id,
-            "scope_hash": job_spec.scope_hash,
+            "status": "WORKER_EXECUTION_NOT_READY",
+            "execution_job_id": job.execution_job_id,
+            "execution_status": job.status.value,
+            "recovery": recovery.value,
+            "launch_count": job.launch_count,
         }
         return
-    validate_worker_output_authority(raw)
-    raw = dict(raw)
-    raw_scope = str(raw.pop("scope_hash", ""))
-    raw_lease = str(raw.pop("lease_id", ""))
-    if raw_scope != job_spec.scope_hash or raw_lease != str(opp.worker_lease_id):
-        raise OpportunityValidationError("worker result scope/lease binding mismatch")
-    result = WorkerResult.model_validate(raw)
-    if result.worker_id != str(opp.worker_id) or result.job_id != job_spec.job_id:
-        raise OpportunityValidationError("worker result identity mismatch")
-    if manifest.worker_id == "zungun":
-        try:
-            validate_zungun_result_contract(result, job_spec, manifest, str(opp.worker_lease_id))
-        except ValueError as exc:
-            raise OpportunityValidationError(str(exc)) from exc
-    if result.status.upper() not in {"PASS", "READY_FOR_CHECK"}:
-        raise OpportunityValidationError("worker result not ready for checker")
-    if not result.commit_sha or not re.fullmatch(r"[0-9a-f]{40}", result.commit_sha):
-        raise OpportunityValidationError("worker result lacks exact commit SHA")
-    deliverable = result.pr_url or (result.artifact_urls[0] if result.artifact_urls else None) or str(result.delivery.get("candidate_url") or "")
-    worker_repo = manifest.repo_url.rstrip("/")
-    if not deliverable or not (deliverable.startswith(worker_repo) or deliverable.startswith(job_spec.repository_or_input.rstrip("/"))):
-        raise OpportunityValidationError("worker deliverable outside selected worker/target allowlist")
-    opp.deliverable_url = deliverable
-    opp.worker_commit_sha = result.commit_sha
-    opp.worker_result_hash = result.envelope_hash
-    state.active_opportunity = opp
+
+    # Non-economic qualification fixtures expose the exact checked task artifact as an internal
+    # content-addressed deliverable. It is intentionally not HTTPS, so CHECK cannot submit it.
+    if job_spec.external_source == "fixture":
+        opp.deliverable_url = f"atm-artifact://sha256/{job.result_hash}"
+        state.active_opportunity = opp
+        state.last_result = {
+            "status": "WORKER_TASK_ARTIFACT_READY_INTERNAL",
+            "execution_job_id": job.execution_job_id,
+            "worker_id": manifest.worker_id,
+            "work_lease_id": lease.lease_id,
+            "result_hash": job.result_hash,
+            "task_result_hash": checker.task_result_hash,
+            "checker_hash": checker.receipt_hash,
+            "launch_count": job.launch_count,
+        }
+        state.phase = Phase.CHECK
+        return
+
+    # Real economic jobs still require an externally deliverable HTTPS artifact before SUBMIT.
     state.last_result = {
-        "status": "WORKER_ARTIFACT_READY",
-        "worker_id": opp.worker_id,
-        "work_lease_id": opp.worker_lease_id,
-        "commit_sha": result.commit_sha,
-        "result_hash": result.envelope_hash,
+        "status": "EXECUTION_CHECKED_TASK_DELIVERABLE_NOT_MATERIALIZED",
+        "execution_job_id": job.execution_job_id,
+        "result_hash": job.result_hash,
+        "task_result_hash": checker.task_result_hash,
+        "checker_hash": checker.receipt_hash,
+        "launch_count": job.launch_count,
     }
-    state.phase = Phase.CHECK
 
 
 def phase_check(config: dict[str, Any], state: RuntimeState) -> None:
+    """Only ATM-owned durable independent checker proof can advance production CHECK."""
     del config
     opp = state.active_opportunity
-    if not opp or not getattr(opp, "worker_checker_url", None):
-        state.last_result = {"status": "CHECKER_PENDING_NO_FABRIC_RECEIPT"}
+    execution_job_id = str(getattr(opp, "execution_job_id", "") or "") if opp else ""
+    if not opp or not execution_job_id:
+        state.last_result = {"status": "CHECKER_PENDING_NO_EXECUTION_IDENTITY"}
         return
-    job_spec = WorkerJobSpec.model_validate(opp.worker_job_spec)
-    manifest = _registry().get(str(opp.worker_id))
-    receipt = _fetch_public_worker_json(str(opp.worker_checker_url), manifest)
-    if receipt is None:
-        state.last_result = {
-            "status": "CHECKER_PENDING",
-            "worker_id": opp.worker_id,
-            "work_lease_id": opp.worker_lease_id,
-        }
+    store = ExecutionJobStore(EXECUTION_DB)
+    try:
+        integrity = ProductionExecutionIntegrity(store, EXECUTION_WORKSPACE, EXECUTION_ARTIFACTS)
+        job = store.get(execution_job_id)
+        receipt = integrity.checker_receipt(execution_job_id)
+    finally:
+        store.close()
+    if job.status != ExecutionStatus.TERMINAL or receipt is None or receipt.verdict != "PASS" or receipt.receipt_hash != job.checker_hash:
+        state.last_result = {"status": "CHECKER_PENDING_INDEPENDENT_PROOF", "execution_job_id": execution_job_id}
         return
-    validate_worker_output_authority(receipt)
-    required = {"checker_id", "job_id", "scope_hash", "lease_id", "commit_sha", "status", "evidence_refs", "checked_at"}
-    if not required.issubset(receipt):
-        raise OpportunityValidationError("checker receipt missing required fields")
-    if str(receipt["checker_id"]) == str(opp.worker_id):
-        raise OpportunityValidationError("checker must be independent from worker identity")
-    if str(receipt["job_id"]) != job_spec.job_id:
-        raise OpportunityValidationError("checker job identity mismatch")
-    if str(receipt["scope_hash"]) != job_spec.scope_hash or str(receipt["lease_id"]) != str(opp.worker_lease_id):
-        raise OpportunityValidationError("checker scope/lease mismatch")
-    if str(receipt["commit_sha"]) != str(opp.worker_commit_sha):
-        raise OpportunityValidationError("checker commit mismatch")
-    if str(receipt["status"]).upper() not in {"PASS", "READY_TO_SUBMIT"}:
-        state.last_result = {"status": "CHECKER_FAIL", "evidence_refs": receipt.get("evidence_refs", [])}
+    if not opp.deliverable_url or not str(opp.deliverable_url).startswith("https://"):
+        state.last_result = {"status": "CHECKER_PASS_DELIVERABLE_UNMATERIALIZED", "execution_job_id": execution_job_id}
         return
     state.last_result = {
         "status": "CHECKER_PASS",
-        "checker_id": receipt["checker_id"],
-        "work_lease_id": opp.worker_lease_id,
-        "commit_sha": opp.worker_commit_sha,
-        "receipt_hash": canonical_hash(receipt),
-        "evidence_refs": receipt.get("evidence_refs", []),
+        "checker_id": receipt.checker_id,
+        "execution_job_id": execution_job_id,
+        "receipt_hash": receipt.receipt_hash,
+        "evidence_refs": [f"artifact:{receipt.artifact_hash}", f"task-result:{receipt.task_result_hash}", *[f"progress:{value}" for value in receipt.progress_receipt_hashes]],
     }
     state.phase = Phase.SUBMIT
 
