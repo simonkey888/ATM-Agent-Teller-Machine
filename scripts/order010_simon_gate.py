@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,7 +37,7 @@ def _repo_variable(name: str, value: str) -> str:
     except urllib.error.HTTPError as exc:
         if exc.code != 404:
             return f"VARIABLE_READ_HTTP_{exc.code}"
-    except Exception as exc:  # never include secrets in error text
+    except Exception as exc:
         return f"VARIABLE_READ_{type(exc).__name__}"
     body = json.dumps({"name": name, "value": str(value)}).encode()
     req = urllib.request.Request(
@@ -47,7 +48,9 @@ def _repo_variable(name: str, value: str) -> str:
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as response:
-            return "UPDATED" if exists else "CREATED" if response.status in {201, 204} else f"HTTP_{response.status}"
+            if exists:
+                return "UPDATED" if response.status in {200, 204} else f"HTTP_{response.status}"
+            return "CREATED" if response.status in {201, 204} else f"HTTP_{response.status}"
     except urllib.error.HTTPError as exc:
         return f"VARIABLE_WRITE_HTTP_{exc.code}"
     except Exception as exc:
@@ -79,11 +82,7 @@ def main() -> int:
     try:
         leads = source.discover()
     except Exception as exc:
-        receipt.update({
-            "state": "SOURCE_DEGRADED",
-            "source_error": type(exc).__name__,
-            "qualified_count": 0,
-        })
+        receipt.update({"state": "SOURCE_DEGRADED", "source_error": type(exc).__name__, "qualified_count": 0})
         RECEIPT.write_text(json.dumps(receipt, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         print("SIMON_GATE_STATE=SOURCE_DEGRADED")
         print("OUTGOING_SPEND_USD=0")
