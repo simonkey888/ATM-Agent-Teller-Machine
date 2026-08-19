@@ -106,12 +106,7 @@ def _extract_address(obj: dict[str, Any]) -> str:
 
 
 class TaskmarketCliLane:
-    """Supervisor-owned first-party CLI signer boundary.
-
-    The maker/checker never receives this object, signer HOME, keystore bytes, or
-    TaskMarket secret environment. Reads may use the public TaskMarket API; all
-    signing/mutation is delegated to the official CLI.
-    """
+    """Supervisor-owned first-party CLI signer boundary."""
 
     def __init__(
         self,
@@ -174,13 +169,24 @@ class TaskmarketCliLane:
             if not accepted:
                 raise TaskmarketCliError("TaskMarket legal acceptance is currently enforced and not accepted")
             return True
-        # Unknown enforcement shape remains fail-closed unless current acceptance is explicit.
         if not accepted:
             raise TaskmarketCliError("TaskMarket legal enforcement state is unknown and acceptance is not current")
         return True
 
+    def preflight_signer(self) -> dict[str, Any]:
+        """Resolve trusted signer identity/legal state before spending maker compute."""
+        address = self.address()
+        legal = self.legal_allows_write()
+        return {"wallet": address, "legal_allows_write": legal, "signer_present": True}
+
     def task_get(self, task_id: str) -> dict[str, Any]:
         return _data(self._run(["task", "get", task_id]))
+
+    def actions(self) -> dict[str, Any]:
+        """Use TaskMarket's first-party action feed as the preferred event hint source."""
+        if not self.signer_present():
+            raise TaskmarketCapabilityBlocked("encrypted TaskMarket keystore is absent from signer runtime")
+        return _data(self._run(["actions"]))
 
     def _submit_action(self, task: dict[str, Any]) -> dict[str, Any]:
         actions = [
@@ -257,10 +263,9 @@ class TaskmarketCliLane:
         if not checker_passed:
             raise TaskmarketCliError("independent checker did not pass")
         artifact, sha256 = self._artifact(artifact_path)
-        address = self.address()
-        self.legal_allows_write()
+        preflight = self.preflight_signer()
+        address = str(preflight["wallet"])
 
-        # Public duplicate resolution occurs before the final first-party side-effect read.
         duplicate = self.existing_submission(task_id)
         if duplicate:
             sid = str(duplicate.get("id") or duplicate.get("submissionId") or "")
@@ -274,7 +279,6 @@ class TaskmarketCliLane:
         try:
             raw = _data(self._run(["task", "submit", task_id, "--file", str(artifact)]))
         except TaskmarketCliError:
-            # Never blind-retry an ambiguous write. Resolve from authoritative submission state.
             recovered = self.existing_submission(task_id)
             if recovered:
                 sid = str(recovered.get("id") or recovered.get("submissionId") or "")
