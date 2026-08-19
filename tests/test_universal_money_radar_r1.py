@@ -186,8 +186,8 @@ class UniversalRadarR1Tests(unittest.TestCase):
         self.assertEqual(snap.outgoing_spend_usd, 0)
 
     def test_human_gate_is_routing_disposition_not_global_stop(self):
-        gated = opportunity(source="gated", external_id="a", human_gate="KYC")
-        open_job = opportunity(source="open", external_id="b")
+        gated = opportunity(source="gated", external_id="a", human_gate="KYC", created_at=None, updated_at=None, deadline=None)
+        open_job = opportunity(source="open", external_id="b", created_at=None, updated_at=None, deadline=None)
         snap = UniversalRadar(RadarRegistry([StaticSource("gated", [gated]), StaticSource("open", [open_job], priority=2)])).scan()
         self.assertEqual(len(snap.opportunities), 2)
         by_source = {x.source: x for x in snap.opportunities}
