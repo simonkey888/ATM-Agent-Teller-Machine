@@ -12,10 +12,13 @@ DIR = ARTIFACT.parent
 
 text = ARTIFACT.read_text(encoding="utf-8")
 files = [p for p in DIR.iterdir() if p.is_file()]
+external_urls = re.findall(r'https://[^\"\'<>\s]+', text)
+allowed_external = all(u.startswith("https://cdn.jsdelivr.net/npm/three@") for u in external_urls)
 checks = {
     "single_final_file": len(files) == 1 and files[0].name == "index.html",
     "html_document": "<!doctype html>" in text.lower() and "</html>" in text.lower(),
-    "threejs": "three" in text.lower() and "THREE.Scene" in text,
+    "threejs": "https://cdn.jsdelivr.net/npm/three@" in text and "THREE.Scene" in text,
+    "external_dependency_boundary": allowed_external and len(external_urls) == 1,
     "grid_3x3": "positions=[[-3,0,-3]" in text and "Number(e.key)" in text,
     "keyboard": "keydown" in text and "n>=1&&n<=9" in text,
     "touch_pointer": "pointerdown" in text and "touch-action:none" in text,
@@ -31,7 +34,7 @@ checks = {
     "protocol_changes": "protocols=[" in text and "setProtocol(protocolIndex+1)" in text,
     "limited_focus": "focus=2" in text and "useFocus" in text and "focus--" in text,
     "escalation": "wave++" in text and "1550-wave*16" in text,
-    "no_external_assets": not re.search(r"<(?:img|audio|video)\b", text, re.I),
+    "no_external_asset_pack": not re.search(r"<(?:img|audio|video)\b", text, re.I),
     "no_build_step": "type=\"module\"" not in text,
     "no_secrets": not re.search(r"(?:BEGIN [A-Z ]*PRIVATE KEY|sk-[A-Za-z0-9]{16,}|TASKMARKET_KEYSTORE|PRIVATE_KEY|API_TOKEN)", text),
 }
@@ -43,6 +46,7 @@ result = {
     "artifact": str(ARTIFACT),
     "artifact_sha256": sha,
     "size_bytes": ARTIFACT.stat().st_size,
+    "external_urls": external_urls,
     "checks": checks,
     "pass": not failed,
     "failed": failed,
