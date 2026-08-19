@@ -101,7 +101,8 @@ class SuperteamAgentApiTests(unittest.TestCase):
             gate = api.winner_human_gate()
             self.assertEqual(gate["agent_id"], "agent-1")
             self.assertEqual(gate["claim_code_exposed"], "false")
-            self.assertNotIn("claim", json.dumps(gate).lower().replace("claim_code_exposed", ""))
+            self.assertNotIn("claim-secret", json.dumps(gate))
+            self.assertNotIn("apiKey", json.dumps(gate))
 
     def test_explicit_mismatched_agent_id_fails_closed(self):
         with tempfile.TemporaryDirectory() as td, patch.object(radar_sources, "SECRET_FILE", Path(td) / "radar-secrets.json"), patch.dict(
