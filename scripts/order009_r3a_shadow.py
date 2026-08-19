@@ -8,7 +8,7 @@ import tempfile
 from decimal import Decimal
 from pathlib import Path
 
-from atm_core.opportunities import OpportunityValidationError, TaskmarketOpportunityAdapter
+from atm_core.opportunities import TaskmarketOpportunityAdapter
 from atm_core.taskmarket_maker import TaskmarketMakerError, TaskmarketMakerUnavailable, TaskmarketZeroCostMaker
 
 
@@ -18,6 +18,8 @@ KNOWN_SUBMITTED = {
 
 
 def main() -> int:
+    # Shadow is deliberately signer-free: it proves runtime selection + WORK/CHECK,
+    # never TaskMarket mutation. Production adapter submit still hard-gates signer.
     adapter = TaskmarketOpportunityAdapter()
     candidates = adapter.discover(Decimal("5"))
     candidates.sort(key=lambda row: (row.ev_per_effort_hour, row.ev_realized, -row.competition), reverse=True)
@@ -51,6 +53,10 @@ def main() -> int:
         raise SystemExit("R3A_SHADOW_NO_RUNTIME_SELECTED_TASK:" + " | ".join(diagnostics[-8:]))
 
     task_id = selected.canonical_opportunity_id.split(":", 1)[1]
+    net = str(Decimal(str(snapshot.get("netReward") or "0")) / Decimal(1_000_000))
+    print(f"R3A_SHADOW_SELECTED_TASK={task_id}")
+    print(f"R3A_SHADOW_SELECTED_NET_USDC={net}")
+    print(f"R3A_SHADOW_SELECTED_COMPETITION={snapshot.get('submissionCount')}")
     maker = TaskmarketZeroCostMaker(model="gemma-4-31b-it")
     root = Path(os.getenv("RUNNER_TEMP") or tempfile.gettempdir()) / "atm-order009-r3a-shadow" / task_id
     root.mkdir(parents=True, exist_ok=True)
@@ -76,7 +82,7 @@ def main() -> int:
         "stake_required": snapshot.get("stakeRequired"),
         "worker_submit_pending_action": bool(submit_actions),
         "requires_payment": submit_actions[0].get("requiresPayment") if len(submit_actions) == 1 else "UNKNOWN",
-        "net_reward_usdc": str(Decimal(str(snapshot.get("netReward") or "0")) / Decimal(1_000_000)),
+        "net_reward_usdc": net,
         "maker_model": result.model,
         "zero_cost_executor": True,
         "independent_checker": "PASS" if result.checker_passed else "FAIL",
