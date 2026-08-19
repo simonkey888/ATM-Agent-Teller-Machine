@@ -39,7 +39,8 @@ jobs:
           from pathlib import Path
           cfg=json.loads(Path('config/atm.example.json').read_text())
           assert cfg['outgoing_spend_usd'] == 0
-          assert cfg['paid_model_fallback'] is False
+          assert cfg['zero_cost_models']['paid_fallback'] is False
+          assert cfg['taskmarket_autopilot']['paid_fallback'] is False
           assert cfg['payment_recipient_public_identifier'].lower() == '0xd89ef03bc3105c538529ac2657bc4488c94ff4e4'
           print('ORDER010_EXACT_HEAD=PASS')
           print('OUTGOING_SPEND_USD=0')
