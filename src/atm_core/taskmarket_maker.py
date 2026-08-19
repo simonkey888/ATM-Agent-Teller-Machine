@@ -63,37 +63,6 @@ def _extract_json(text: str) -> dict[str, Any]:
     raise TaskmarketMakerError("zero-cost model returned no JSON object")
 
 
-def _checker_verdict(text: str) -> tuple[str, tuple[str, ...]]:
-    """Parse a small checker verdict conservatively without requiring JSON compliance."""
-    raw = text.replace("\r\n", "\n").strip()
-    try:
-        obj = _extract_json(raw)
-    except TaskmarketMakerError:
-        obj = None
-    if isinstance(obj, dict):
-        status = str(obj.get("status") or "").strip().upper()
-        notes_raw = obj.get("notes") or []
-        notes = tuple(str(item)[:500] for item in notes_raw[:12]) if isinstance(notes_raw, list) else ()
-        if status in {"PASS", "FAIL"}:
-            return status, notes
-
-    verdicts: list[str] = []
-    notes: list[str] = []
-    for line in raw.splitlines():
-        clean = line.strip().strip("`*_#>- ").strip()
-        match = re.fullmatch(r"(?:ATM_CHECK\s*=\s*|STATUS\s*[:=]\s*)?(PASS|FAIL)[.!]?", clean, re.I)
-        if match:
-            verdicts.append(match.group(1).upper())
-        elif clean and len(notes) < 12:
-            notes.append(clean[:500])
-    unique = set(verdicts)
-    if unique == {"PASS"}:
-        return "PASS", tuple(notes)
-    if "FAIL" in unique:
-        return "FAIL", tuple(notes)
-    raise TaskmarketMakerError("zero-cost checker returned no unambiguous PASS/FAIL verdict")
-
-
 def _deterministic_filename(task_description: str) -> str:
     low = task_description.lower()
     if "index.html" in low:
@@ -182,15 +151,25 @@ class TaskmarketZeroCostMaker:
             failures.append(f"{model}:{health.reason}")
         raise TaskmarketMakerUnavailable("no usable free Gemma route: " + " | ".join(failures))
 
-    def _generate(self, prompt: str, *, model: str, max_output_tokens: int) -> str:
+    def _generate(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        max_output_tokens: int,
+        structured_json: bool = False,
+    ) -> str:
         key = os.getenv("GEMINI_API_KEY", "").strip()
         if not key:
             raise TaskmarketMakerUnavailable("GEMINI_API_KEY is unavailable to supervisor")
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+        generation_config: dict[str, Any] = {"temperature": 0.2, "maxOutputTokens": max_output_tokens}
+        if structured_json:
+            generation_config["responseMimeType"] = "application/json"
         body = json.dumps(
             {
                 "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_output_tokens},
+                "generationConfig": generation_config,
             }
         ).encode("utf-8")
         req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
@@ -266,10 +245,15 @@ ARTIFACT_DATA:
 {content[:70000]}
 ---
 
-First line MUST be exactly ATM_CHECK=PASS or ATM_CHECK=FAIL.
-After that, add at most 8 short factual notes. Do not output source code, secrets, or JSON.
+Return exactly one JSON object with this schema and no other keys:
+{{"status":"PASS" or "FAIL","notes":["at most 8 short factual reasons"]}}
 """
-        status, notes = _checker_verdict(self._generate(checker_prompt, model=model, max_output_tokens=2048))
+        checked = _extract_json(
+            self._generate(checker_prompt, model=model, max_output_tokens=2048, structured_json=True)
+        )
+        status = str(checked.get("status") or "").strip().upper()
+        notes_raw = checked.get("notes") or []
+        notes = tuple(str(item)[:500] for item in notes_raw[:8]) if isinstance(notes_raw, list) else ()
         if status != "PASS":
             raise TaskmarketMakerError("independent zero-cost checker failed: " + " | ".join(notes))
         return MakerResult(artifact, filename, True, notes, model)
