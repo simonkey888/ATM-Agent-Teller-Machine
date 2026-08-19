@@ -13,6 +13,7 @@ on:
       - src/atm.py
       - config/atm.example.json
       - tests/test_taskmarket_autopilot.py
+      - tests/test_taskmarket_autopilot_negatives.py
 
 permissions:
   contents: read
@@ -42,7 +43,7 @@ jobs:
       - name: R3A adversarial contract tests
         env:
           PYTHONPATH: src
-        run: python -m unittest tests.test_taskmarket_autopilot -v
+        run: python -m unittest tests.test_taskmarket_autopilot tests.test_taskmarket_autopilot_negatives -v
       - name: Runtime-selected zero-cost maker/checker shadow
         env:
           PYTHONPATH: src
