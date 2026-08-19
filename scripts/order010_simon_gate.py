@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -13,10 +14,11 @@ from atm_core.simon_gate import GuruPublicSource, SimonGateError, TelegramBot, n
 
 
 RECEIPT = Path("order010-simon-gate-receipt.json")
+MARKER = "ATM ORDER010 SG2 SIMON GATE STATE"
 
 
 def _repo_variable(name: str, value: str) -> str:
-    """Persist non-secret SimonGate state in a GitHub Actions repository variable."""
+    """Best-effort repository-variable persistence for non-secret SimonGate state."""
     token = os.getenv("GITHUB_TOKEN", "").strip()
     repo = os.getenv("GITHUB_REPOSITORY", "").strip()
     if not token or not repo:
@@ -57,6 +59,50 @@ def _repo_variable(name: str, value: str) -> str:
         return f"VARIABLE_WRITE_{type(exc).__name__}"
 
 
+def _github_json(url: str) -> Any:
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "ATM-SimonGate/1.0"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _durable_state() -> dict[str, Any]:
+    """Load the latest sanitized SG2 receipt from Issue #38.
+
+    The numeric Telegram chat id is explicitly non-secret under SG2. This gives
+    us a durable fallback when the ephemeral GITHUB_TOKEN cannot administer
+    repository Actions variables.
+    """
+    repo = os.getenv("GITHUB_REPOSITORY", "").strip()
+    if not repo:
+        return {}
+    try:
+        issue = _github_json(f"https://api.github.com/repos/{repo}/issues/38")
+        count = int(issue.get("comments") or 0) if isinstance(issue, dict) else 0
+        page = max(1, (count + 99) // 100)
+        comments = _github_json(f"https://api.github.com/repos/{repo}/issues/38/comments?per_page=100&page={page}")
+    except Exception:
+        return {}
+    if not isinstance(comments, list):
+        return {}
+    for row in reversed(comments):
+        body = str(row.get("body") or "") if isinstance(row, dict) else ""
+        if not body.startswith(MARKER):
+            continue
+        match = re.search(r"```json\s*([\s\S]*?)\s*```", body)
+        if not match:
+            continue
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("schema") == "ATM_ORDER010_SG2_SIMON_GATE_V1":
+            return payload
+    return {}
+
+
 def _truthy(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -64,6 +110,7 @@ def _truthy(value: str | None) -> bool:
 def main() -> int:
     head = os.getenv("ORDER010_HEAD", os.getenv("GITHUB_SHA", "UNKNOWN")).strip() or "UNKNOWN"
     source = GuruPublicSource()
+    prior = _durable_state()
     receipt: dict[str, Any] = {
         "schema": "ATM_ORDER010_SG2_SIMON_GATE_V1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -111,7 +158,8 @@ def main() -> int:
 
     bot = TelegramBot(bot_token)
     updates = bot.updates()
-    chat_raw = os.getenv("ATM_TELEGRAM_CHAT_ID", "").strip()
+    prior_chat = prior.get("chat_id")
+    chat_raw = os.getenv("ATM_TELEGRAM_CHAT_ID", "").strip() or (str(prior_chat) if prior_chat else "")
     newly_paired = False
     try:
         chat_id = int(chat_raw) if chat_raw else bot.pair_chat_id(updates)
@@ -123,30 +171,42 @@ def main() -> int:
         print("OUTGOING_SPEND_USD=0")
         return 0
 
+    receipt["chat_id"] = chat_id
+    receipt["chat_id_bound"] = True
     if not chat_raw:
         newly_paired = True
-        receipt["chat_id_persist"] = _repo_variable("ATM_TELEGRAM_CHAT_ID", str(chat_id))
+        variable_result = _repo_variable("ATM_TELEGRAM_CHAT_ID", str(chat_id))
+        receipt["chat_id_repository_variable"] = variable_result
+        receipt["chat_id_persist"] = "REPOSITORY_VARIABLE" if variable_result in {"CREATED", "UPDATED"} else "SANITIZED_ISSUE_STATE"
         bot.send(chat_id, "ATM SG2 paired. Credentialless public lead radar is active. No platform password, cookie, OTP or payment credential is requested by ATM.")
-    receipt["chat_id_bound"] = True
+    else:
+        receipt["chat_id_persist"] = "DURABLE_STATE_REUSED"
 
     owner_action = bot.latest_owner_action(updates, chat_id)
     if owner_action:
         receipt["latest_owner_action"] = owner_action
-    activated = _truthy(os.getenv("ATM_GURU_ACTIVATED")) or bool(owner_action and owner_action.upper().startswith("ACTIVATED GURU"))
+
+    prior_activated = "GURU" in [str(x).upper() for x in (prior.get("activated_platforms") or [])]
+    activated = _truthy(os.getenv("ATM_GURU_ACTIVATED")) or prior_activated or bool(owner_action and owner_action.upper().startswith("ACTIVATED GURU"))
     if owner_action and owner_action.upper().startswith("ACTIVATED GURU"):
-        receipt["guru_activation_persist"] = _repo_variable("ATM_GURU_ACTIVATED", "true")
+        receipt["guru_activation_repository_variable"] = _repo_variable("ATM_GURU_ACTIVATED", "true")
         activated = True
+    receipt["activated_platforms"] = ["GURU"] if activated else []
 
     if owner_action and owner_action.upper().startswith(("POSTULÉ", "POSTULE")):
         receipt["owner_application_state"] = "OWNER_APPLIED"
         receipt["state"] = "OWNER_APPLIED_DISCOVERY_CONTINUES"
 
-    last_notified = os.getenv("SIMON_GATE_LAST_NOTIFIED_ID", "").strip()
+    prior_selected = prior.get("selected") if isinstance(prior.get("selected"), dict) else {}
+    prior_notified = str(prior_selected.get("source_id") or "") if prior.get("telegram_state") in {"NOTIFIED_SIMON", "DEDUPED_ALREADY_NOTIFIED"} else ""
+    last_notified = os.getenv("SIMON_GATE_LAST_NOTIFIED_ID", "").strip() or prior_notified
     should_notify = last_notified != selected.source_id or newly_paired
     if should_notify:
         message_id = bot.send(chat_id, notification_text(selected, activated=activated))
         receipt["telegram_message_id"] = message_id
-        receipt["last_notified_persist"] = _repo_variable("SIMON_GATE_LAST_NOTIFIED_ID", selected.source_id)
+        variable_result = _repo_variable("SIMON_GATE_LAST_NOTIFIED_ID", selected.source_id)
+        receipt["last_notified_repository_variable"] = variable_result
+        receipt["last_notified_persist"] = "REPOSITORY_VARIABLE" if variable_result in {"CREATED", "UPDATED"} else "SANITIZED_ISSUE_STATE"
         receipt["telegram_state"] = "NOTIFIED_SIMON"
         receipt["state"] = "NOTIFIED_SIMON"
     else:
@@ -157,6 +217,8 @@ def main() -> int:
     RECEIPT.write_text(json.dumps(receipt, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     print("SIMON_GATE_STATE=" + str(receipt["state"]))
     print("TELEGRAM_STATE=" + str(receipt.get("telegram_state", "UNKNOWN")))
+    print("CHAT_ID_BOUND=true")
+    print("CHAT_ID_PERSIST=" + str(receipt.get("chat_id_persist", "UNKNOWN")))
     print("QUALIFIED_COUNT=" + str(receipt["qualified_count"]))
     print("SELECTED_ID=" + selected.source_id)
     print("OUTGOING_SPEND_USD=0")
