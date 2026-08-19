@@ -45,6 +45,11 @@ from atm_core.runtime import (  # noqa: E402
 )
 from atm_core.security import redact_text  # noqa: E402
 from atm_core.state import StateStore  # noqa: E402
+from atm_core.taskmarket_maker import (  # noqa: E402
+    TaskmarketMakerError,
+    TaskmarketMakerUnavailable,
+    TaskmarketZeroCostMaker,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "config" / "atm.json"
@@ -150,13 +155,14 @@ def agent_workspace(phase: Phase, state: RuntimeState) -> Path:
     return path
 
 
-def sanitized_worker_env() -> dict[str, str]:
-    """Keep OS/runtime vars but strip ATM rail/payment credentials from Hermes child process."""
+def sanitized_worker_env(worker_home: Path | None = None) -> dict[str, str]:
+    """Strip signer/rail credentials and isolate child HOME from the supervisor signer."""
     env = os.environ.copy()
     protected_names = {
         "WORKPROTOCOL_API_KEY",
         "WORKPROTOCOL_AGENT_ID",
         "TASKMARKET_PRIVATE_KEY",
+        "TASKMARKET_KEYSTORE_B64",
         "PRIVATE_KEY",
         "WALLET_PRIVATE_KEY",
         "SEED_PHRASE",
@@ -164,8 +170,17 @@ def sanitized_worker_env() -> dict[str, str]:
     }
     for key in list(env):
         upper = key.upper()
-        if key in protected_names or upper.startswith("ATM_SECRET_"):
+        if (
+            key in protected_names
+            or upper.startswith("ATM_SECRET_")
+            or upper.startswith("TASKMARKET_")
+            or upper.startswith("ATM_TASKMARKET_")
+        ):
             env.pop(key, None)
+    if worker_home is not None:
+        worker_home.mkdir(parents=True, exist_ok=True)
+        env["HOME"] = str(worker_home)
+        env["USERPROFILE"] = str(worker_home)
     return env
 
 
@@ -247,10 +262,11 @@ def run_agent(phase: Phase, config: dict[str, Any], state: RuntimeState) -> Agen
         cmd += ["--max-turns", max_turns, "--toolsets", "web,terminal,skills", "-q", prompt]
         try:
             workspace = agent_workspace(phase, state)
+            child_home = workspace / ".isolated-home"
             cp = subprocess.run(
                 cmd,
                 cwd=workspace,
-                env=sanitized_worker_env(),
+                env=sanitized_worker_env(child_home),
                 text=True,
                 capture_output=True,
                 timeout=timeout,
@@ -358,6 +374,13 @@ def phase_verify(config: dict[str, Any], state: RuntimeState, adapters: dict[str
     from atm_core.opportunities import external_state_hash
 
     opp.external_state_hash = external_state_hash(snapshot)
+    if opp.source == "taskmarket":
+        opp = opp.model_copy(
+            update={
+                "task_description": str(snapshot.get("description") or getattr(opp, "task_description", "")),
+                "task_title": str(snapshot.get("title") or getattr(opp, "task_title", "")),
+            }
+        )
     state.active_opportunity = opp
     state.phase = Phase.CLAIM
     state.last_result = {"status": "VERIFIED", "snapshot_hash": opp.external_state_hash}
@@ -388,7 +411,37 @@ def phase_claim(config: dict[str, Any], state: RuntimeState, adapters: dict[str,
     state.last_result = {"status": "CLAIMED", "claim_id": opp.claim_id}
 
 
+def _taskmarket_work(config: dict[str, Any], state: RuntimeState, opp: Opportunity) -> None:
+    model = str(config.get("taskmarket_autopilot", {}).get("maker_model") or "gemma-4-31b-it")
+    maker = TaskmarketZeroCostMaker(model=model)
+    description = str(getattr(opp, "task_description", ""))
+    task_id = opp.canonical_opportunity_id.split(":", 1)[1]
+    try:
+        made = maker.make(task_id=task_id, task_description=description, workspace=agent_workspace(Phase.WORK, state))
+    except (TaskmarketMakerUnavailable, TaskmarketMakerError) as exc:
+        raise OpportunityValidationError(f"Taskmarket zero-cost maker unavailable: {exc}") from exc
+    state.active_opportunity = opp.model_copy(
+        update={
+            "deliverable_url": str(made.artifact),
+            "maker_model": made.model,
+            "maker_checker_passed": made.checker_passed,
+            "maker_checker_notes": list(made.checker_notes),
+        }
+    )
+    state.last_result = {
+        "status": "WORK_COMPLETE_ZERO_COST",
+        "artifact": made.filename,
+        "maker_model": made.model,
+        "independent_checker": "PASS",
+    }
+    state.phase = Phase.CHECK
+
+
 def phase_work(config: dict[str, Any], state: RuntimeState) -> None:
+    opp = state.active_opportunity
+    if opp and opp.source == "taskmarket":
+        _taskmarket_work(config, state, opp)
+        return
     result = run_agent(Phase.WORK, config, state)
     if result.human_gate:
         state.human_gate = result.human_gate
@@ -408,7 +461,45 @@ def phase_work(config: dict[str, Any], state: RuntimeState) -> None:
     state.phase = Phase.CHECK
 
 
+def _stage_taskmarket_artifact(config: dict[str, Any], state: RuntimeState, opp: Opportunity) -> Opportunity:
+    if getattr(opp, "maker_checker_passed", False) is not True:
+        raise OpportunityValidationError("Taskmarket independent checker did not pass")
+    source = Path(str(opp.deliverable_url or "")).resolve()
+    worker_root = (STATE_DIR / "workspaces").resolve()
+    try:
+        source.relative_to(worker_root)
+    except ValueError as exc:
+        raise OpportunityValidationError("Taskmarket maker artifact escaped worker workspace") from exc
+    if not source.is_file() or source.is_symlink():
+        raise OpportunityValidationError("Taskmarket maker artifact is not a regular file")
+    configured = Path(str(config.get("taskmarket_autopilot", {}).get("staging_root") or ".atm/staging"))
+    staging_root = (configured if configured.is_absolute() else ROOT / configured).resolve()
+    task_slug = hashlib.sha256(opp.canonical_opportunity_id.encode("utf-8")).hexdigest()[:24]
+    target_dir = staging_root / task_slug
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / source.name
+    shutil.copy2(source, target)
+    return opp.model_copy(
+        update={
+            "deliverable_url": str(target),
+            "checker_passed": True,
+            "checker_passed_at": utcnow(),
+            "artifact_sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+        }
+    )
+
+
 def phase_check(config: dict[str, Any], state: RuntimeState) -> None:
+    opp = state.active_opportunity
+    if opp and opp.source == "taskmarket":
+        state.active_opportunity = _stage_taskmarket_artifact(config, state, opp)
+        state.last_result = {
+            "status": "PASS",
+            "checker": "independent-zero-cost+supervisor-static",
+            "artifact_sha256": getattr(state.active_opportunity, "artifact_sha256", None),
+        }
+        state.phase = Phase.SUBMIT
+        return
     result = run_agent(Phase.CHECK, config, state)
     state.last_result = result.model_dump(mode="json")
     if result.human_gate:
@@ -429,11 +520,41 @@ def phase_submit(config: dict[str, Any], state: RuntimeState, adapters: dict[str
     snapshot = adapter.fetch_authoritative(opp)
     adapter.verify_freshness(opp, snapshot)
     adapter.verify_funding(opp, snapshot)
+    adapter.verify_eligibility(opp, snapshot)
     result = adapter.submit(opp, opp.deliverable_url)
     submission_id = result.get("submissionId") if isinstance(result, dict) else None
     if not submission_id and isinstance(result, dict):
         submission_id = (result.get("delivery") or {}).get("id")
     opp.submission_id = str(submission_id) if submission_id else opp.submission_id
+
+    if opp.source == "taskmarket":
+        if not opp.submission_id:
+            raise OpportunityValidationError("Taskmarket submit lacks authoritative submission id")
+        if bool(result.get("duplicate")):
+            state.last_result = {"status": "SKIP_NO_DUPLICATE", "submission_id": opp.submission_id}
+            state.active_opportunity = None
+            state.phase = Phase.DISCOVER
+            return
+        if result.get("manifestVerified") is not True or str(result.get("outgoingSpendUsd")) != "0":
+            raise OpportunityValidationError("Taskmarket submission did not pass manifest/zero-spend verification")
+        monitored = opp.model_copy(
+            update={
+                "inflight_stage": "SUBMITTED",
+                "submitted_at": utcnow(),
+                "worker_address": str(result.get("workerAddress") or ""),
+                "artifact_sha256": str(result.get("artifactSha256") or getattr(opp, "artifact_sha256", "")),
+                "idempotency_key": str(result.get("idempotencyKey") or opp.idempotency_key or ""),
+                "last_monitor_error": None,
+                "inflight_terminal": False,
+            }
+        )
+        if not any(row.submission_id == monitored.submission_id for row in state.in_flight):
+            state.in_flight.append(monitored)
+        state.active_opportunity = None
+        state.last_result = {"status": "SUBMITTED_NONBLOCKING", "submission_id": monitored.submission_id}
+        state.phase = Phase.DISCOVER
+        return
+
     state.active_opportunity = opp
     state.last_result = {"status": "SUBMITTED", "submission_id": opp.submission_id}
     state.phase = Phase.MONITOR
@@ -453,6 +574,53 @@ def phase_monitor(config: dict[str, Any], state: RuntimeState, adapters: dict[st
     elif status in {"rejected", "expired", "cancelled", "canceled"}:
         state.active_opportunity = None
         state.phase = Phase.DISCOVER
+
+
+def _matching_taskmarket_award(snapshot: dict[str, Any], wallet: str) -> dict[str, Any] | None:
+    for award in snapshot.get("awards") or []:
+        if isinstance(award, dict) and str(award.get("workerAddress") or "").lower() == wallet.lower():
+            return award
+    return None
+
+
+def monitor_in_flight(
+    config: dict[str, Any], state: RuntimeState, adapters: dict[str, OpportunityAdapter], ledger: PaymentLedger, *, limit: int = 8
+) -> None:
+    recipient = str(config.get("payment_recipient_public_identifier") or "").strip()
+    if not recipient:
+        return
+    updated: list[Opportunity] = []
+    for index, opp in enumerate(state.in_flight):
+        if index >= limit or getattr(opp, "inflight_terminal", False):
+            updated.append(opp)
+            continue
+        if opp.source != "taskmarket":
+            updated.append(opp)
+            continue
+        adapter = adapter_for(adapters, opp)
+        stage = str(getattr(opp, "inflight_stage", "SUBMITTED"))
+        changes: dict[str, Any] = {"last_checked_at": utcnow(), "last_monitor_error": None}
+        try:
+            snapshot = adapter.monitor(opp)
+            award = _matching_taskmarket_award(snapshot, recipient)
+            if award is not None and stage == "SUBMITTED":
+                stage = "ACCEPTED"
+            try:
+                proofs = adapter.fetch_payment(opp, recipient)
+                for proof in proofs:
+                    ledger.append(proof)
+                if proofs:
+                    stage = "WITHDRAWABLE"
+                    changes["settled_usdc"] = str(sum((p.amount for p in proofs), Decimal("0")))
+                    changes["settlement_tx_hashes"] = [p.payout_id_or_txid for p in proofs]
+                    changes["inflight_terminal"] = True
+            except PaymentNotFinal:
+                pass
+            changes["inflight_stage"] = stage
+        except Exception as exc:
+            changes["last_monitor_error"] = str(exc)[:500]
+        updated.append(opp.model_copy(update=changes))
+    state.in_flight = updated
 
 
 def phase_payment_verify(
@@ -491,6 +659,8 @@ def phase_payment_verify(
 def run_cycle(
     config: dict[str, Any], state: RuntimeState, adapters: dict[str, OpportunityAdapter], ledger: PaymentLedger
 ) -> None:
+    # In-flight payment truth advances independently and never owns active_opportunity.
+    monitor_in_flight(config, state, adapters, ledger)
     phase = state.phase
     if phase == Phase.DISCOVER:
         phase_discover(config, state, adapters)
@@ -517,6 +687,7 @@ def status_payload(state: RuntimeState, ledger: PaymentLedger) -> dict[str, Any]
     payload = state.model_dump(mode="json")
     payload["realized_withdrawable_usd"] = str(ledger.realized_withdrawable_usd())
     payload["validated_payment_proof_count"] = len(ledger.load())
+    payload["in_flight_count"] = len(state.in_flight)
     return payload
 
 
@@ -551,7 +722,7 @@ def main() -> int:
     try:
         while True:
             realized = ledger.realized_withdrawable_usd()
-            if realized >= state.target_paid_usd:
+            if realized >= state.target_paid_usd and not bool(config.get("target_reached_does_not_stop", False)):
                 print(f"TARGET_REACHED realized_withdrawable_usd={realized}")
                 return 0
             if state.human_gate:
@@ -570,15 +741,27 @@ def main() -> int:
                 print(exc.gate.model_dump_json(indent=2))
                 return 2
             except (OpportunityValidationError, PaymentNotFinal) as exc:
+                failed_phase = state.phase
                 state.last_error = str(exc)
-                if state.phase in {Phase.VERIFY, Phase.PAYMENT_VERIFY}:
-                    if state.phase == Phase.VERIFY:
-                        state.active_opportunity = None
-                        state.phase = Phase.DISCOVER
-                    else:
-                        state.phase = Phase.MONITOR
+                if failed_phase == Phase.VERIFY:
+                    if state.active_opportunity and state.active_opportunity.source == "taskmarket":
+                        adapter = adapters.get("taskmarket")
+                        task_id = state.active_opportunity.canonical_opportunity_id.split(":", 1)[1]
+                        if adapter is not None and hasattr(adapter, "skipped_task_ids"):
+                            adapter.skipped_task_ids.add(task_id)
+                    state.active_opportunity = None
+                    state.phase = Phase.DISCOVER
+                elif failed_phase in {Phase.WORK, Phase.CHECK, Phase.SUBMIT} and state.active_opportunity and state.active_opportunity.source == "taskmarket":
+                    adapter = adapters.get("taskmarket")
+                    task_id = state.active_opportunity.canonical_opportunity_id.split(":", 1)[1]
+                    if adapter is not None and hasattr(adapter, "skipped_task_ids"):
+                        adapter.skipped_task_ids.add(task_id)
+                    state.active_opportunity = None
+                    state.phase = Phase.DISCOVER
+                elif failed_phase == Phase.PAYMENT_VERIFY:
+                    state.phase = Phase.MONITOR
                 store.save(state)
-                log_event("validation", {"error": str(exc), "phase": state.phase.value})
+                log_event("validation", {"error": str(exc), "phase": failed_phase.value})
             except KeyboardInterrupt:
                 store.save(state)
                 print("Interrupted; state persisted.")
