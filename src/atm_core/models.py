@@ -303,6 +303,7 @@ class RuntimeState(BaseModel):
     cycle: int = 0
     target_paid_usd: Decimal = Decimal("200")
     active_opportunity: Opportunity | None = None
+    in_flight: list[Opportunity] = Field(default_factory=list)
     last_result: dict[str, Any] | None = None
     last_error: str | None = None
     human_gate: HumanGate | None = None
