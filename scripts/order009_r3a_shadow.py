@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 from decimal import Decimal
 from pathlib import Path
@@ -15,6 +16,13 @@ from atm_core.taskmarket_maker import TaskmarketMakerError, TaskmarketMakerUnava
 KNOWN_SUBMITTED = {
     "0x4c887264d5ede369de6e98c6214e6c03ee8708af108305ecafa0341a675e6147",
 }
+
+
+def exact_head() -> str:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, timeout=10).strip()
+    except Exception:
+        return "LOCAL"
 
 
 def main() -> int:
@@ -74,7 +82,7 @@ def main() -> int:
     ]
     receipt = {
         "schema": "ATM_ORDER009_R3A_ZERO_COST_MAKER_SHADOW_V1",
-        "head": os.getenv("GITHUB_SHA") or "LOCAL",
+        "head": exact_head(),
         "task_id": task_id,
         "task_selected_by_runtime": True,
         "task_status": snapshot.get("status"),
