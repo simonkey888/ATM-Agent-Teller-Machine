@@ -110,9 +110,12 @@ jobs:
                   if not isinstance(platforms.get("platforms"), list) or len(platforms["platforms"]) < 7:
                       raise RuntimeError("platform_health_not_material")
                   stages = money.get("stages") or {}
-                  if set(stages) != {"pending_usd", "accepted_usd", "settled_usd", "withdrawable_usd"}:
-                      raise RuntimeError("money_stages_missing")
-                  for marker in ("ATM Universal Money Radar", "ATTACK NOW", "PAID", "PLATFORM HEALTH", "Radar source SHA", "Deployed Worker SHA"):
+                  expected_stages = {"opportunity_value", "submitted_net", "accepted_net", "settled_usdc", "withdrawable_usdc"}
+                  if set(stages) != expected_stages:
+                      raise RuntimeError(f"money_stages_missing:{sorted(stages)}")
+                  if stages.get("submitted_net") in (None,"UNKNOWN","0",0):
+                      raise RuntimeError("robotics_submitted_net_missing")
+                  for marker in ("ATM Universal Money Radar", "ATTACK NOW", "PAID", "PLATFORM HEALTH", "Radar source SHA", "Deployed Worker SHA", "SUBMITTED_NET", "SETTLED_USDC", "WITHDRAWABLE_USDC"):
                       if marker not in page:
                           raise RuntimeError(f"ui_marker_missing:{marker}")
                   last = {
