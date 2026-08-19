@@ -1,4 +1,4 @@
-name: ORDER-009-R3 Next Submission
+name: ORDER-010 TaskMarket Next Submission
 
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ permissions:
   issues: write
 
 concurrency:
-  group: order009-r3-next-submission
+  group: order010-taskmarket-next-submission
   cancel-in-progress: false
 
 jobs:
@@ -65,7 +65,7 @@ jobs:
           python - <<'PY'
           import json, os, urllib.request
           url=f"https://api.taskmarket.dev/api/tasks/{os.environ['TASK_ID']}"
-          req=urllib.request.Request(url,headers={'Accept':'application/json','User-Agent':'ATM-ORDER009-R3-submit/1'})
+          req=urllib.request.Request(url,headers={'Accept':'application/json','User-Agent':'ATM-ORDER010-submit/1'})
           with urllib.request.urlopen(req,timeout=20) as r: t=json.loads(r.read().decode())
           submit=[a for a in (t.get('pendingActions') or []) if isinstance(a,dict) and a.get('role')=='worker' and a.get('action')=='submit']
           free=bool(submit) and all(a.get('requiresPayment') is False and a.get('paymentAmount') in (None,'',0,'0') for a in submit)
@@ -167,7 +167,7 @@ jobs:
           python - <<'PY'
           import json,os,urllib.request
           url=f"https://api.taskmarket.dev/api/tasks/{os.environ['TASK_ID']}/submissions"
-          req=urllib.request.Request(url,headers={'Accept':'application/json','User-Agent':'ATM-ORDER009-R3-duplicate/1'})
+          req=urllib.request.Request(url,headers={'Accept':'application/json','User-Agent':'ATM-ORDER010-duplicate/1'})
           with urllib.request.urlopen(req,timeout=20) as r: rows=json.loads(r.read().decode())
           if isinstance(rows,dict): rows=rows.get('submissions') or rows.get('items') or rows.get('data') or []
           found=''
@@ -227,7 +227,7 @@ jobs:
           import hashlib,json,os,urllib.request
           from pathlib import Path
           tid=os.environ['TASK_ID']; wallet=os.environ['CANONICAL_WALLET'].lower();artifact=Path('deliverables/taskmarket_whack_protocol/index.html');sha=hashlib.sha256(artifact.read_bytes()).hexdigest()
-          req=urllib.request.Request(f'https://api.taskmarket.dev/api/tasks/{tid}/submissions',headers={'Accept':'application/json','User-Agent':'ATM-ORDER009-R3-verify/1'})
+          req=urllib.request.Request(f'https://api.taskmarket.dev/api/tasks/{tid}/submissions',headers={'Accept':'application/json','User-Agent':'ATM-ORDER010-verify/1'})
           with urllib.request.urlopen(req,timeout=20) as r: rows=json.loads(r.read().decode())
           if isinstance(rows,dict): rows=rows.get('submissions') or rows.get('items') or rows.get('data') or []
           candidate=None
@@ -238,7 +238,7 @@ jobs:
           manifest_ok=False
           if sid:
               try:
-                  mreq=urllib.request.Request(f'https://api.taskmarket.dev/api/tasks/{tid}/submissions/{sid}/manifest',headers={'Accept':'application/json','User-Agent':'ATM-ORDER009-R3-verify/1'})
+                  mreq=urllib.request.Request(f'https://api.taskmarket.dev/api/tasks/{tid}/submissions/{sid}/manifest',headers={'Accept':'application/json','User-Agent':'ATM-ORDER010-verify/1'})
                   with urllib.request.urlopen(mreq,timeout=20) as r:m=json.loads(r.read().decode())
                   manifest_ok=any(isinstance(a,dict) and str(a.get('sha256Hash') or '').lower()==sha for a in (m.get('artifacts') or []))
               except Exception: pass
@@ -248,9 +248,9 @@ jobs:
           elif os.environ.get('WALLET_MATCH')!='true': state='FAILED_CLOSED';blocker='TASKMARKET_WALLET_MISMATCH'
           elif os.environ.get('LEGAL_ACCEPTED')!='true': state='FAILED_CLOSED';blocker='TASKMARKET_LEGAL_NOT_CURRENT'
           else: state='FAILED_CLOSED';blocker='SUBMISSION_NOT_VERIFIED'
-          receipt={'schema':'ATM_ORDER009_R3_NEXT_SUBMISSION_V1','head':os.environ['GITHUB_SHA'],'task_id':tid,'canonical_wallet':os.environ['CANONICAL_WALLET'],'artifact_sha256':sha,'state':state,'blocker':blocker,'submission_id':sid,'submission_verified':verified,'net_reward_usdc':'5.55','outgoing_spend_usd':'0'}
-          body='ATM ORDER009 R3 NEXT SUBMISSION\n```json\n'+json.dumps(receipt,sort_keys=True)+'\n```'
-          headers={'Authorization':f"Bearer {os.environ['GITHUB_TOKEN']}",'Accept':'application/vnd.github+json','Content-Type':'application/json','User-Agent':'ATM-ORDER009-R3-receipt/1'}
+          receipt={'schema':'ATM_ORDER010_TASKMARKET_SUBMISSION_V1','head':os.environ['GITHUB_SHA'],'task_id':tid,'canonical_wallet':os.environ['CANONICAL_WALLET'],'artifact_sha256':sha,'state':state,'blocker':blocker,'submission_id':sid,'submission_verified':verified,'net_reward_usdc':'5.55','outgoing_spend_usd':'0'}
+          body='ATM ORDER-010 TASKMARKET SUBMISSION\n```json\n'+json.dumps(receipt,sort_keys=True)+'\n```'
+          headers={'Authorization':f"Bearer {os.environ['GITHUB_TOKEN']}",'Accept':'application/vnd.github+json','Content-Type':'application/json','User-Agent':'ATM-ORDER010-receipt/1'}
           preq=urllib.request.Request(f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/issues/38/comments",data=json.dumps({'body':body}).encode(),method='POST',headers=headers)
           with urllib.request.urlopen(preq,timeout=20) as r:posted=json.loads(r.read().decode())
           print('NEXT_SUBMISSION_STATE='+state)
