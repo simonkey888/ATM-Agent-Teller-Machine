@@ -106,7 +106,9 @@ class TaskmarketZeroCostMaker:
         ).encode("utf-8")
         req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=120) as response:
+            # Full single-file deliverables can exceed health-probe latency materially.
+            # This is still the free-only rail; timeout is capability, never a paid fallback trigger.
+            with urllib.request.urlopen(req, timeout=300) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             raise TaskmarketMakerUnavailable(f"free Gemma inference HTTP {exc.code}") from exc
@@ -167,7 +169,7 @@ Return exactly JSON with two keys:
 {{"filename":"index.html or required .md filename","content":"COMPLETE FILE CONTENT"}}
 The content must be usable as submitted, with no build step when the task asks for none.
 """
-        made = _extract_json(self._generate(maker_prompt, model=model, max_output_tokens=24576))
+        made = _extract_json(self._generate(maker_prompt, model=model, max_output_tokens=16384))
         filename = self._safe_filename(str(made.get("filename") or ""), task_description)
         content = made.get("content")
         if not isinstance(content, str):
