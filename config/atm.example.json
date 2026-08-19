@@ -10,7 +10,7 @@
   "allow_auto_claim": true,
   "allow_auto_pr": true,
   "outgoing_spend_usd": 0,
-  "payment_recipient_public_identifier": "",
+  "payment_recipient_public_identifier": "0xd89Ef03bC3105C538529AC2657Bc4488c94ff4E4",
   "human_telegram": "https://t.me/simonkey888",
   "talent_profile": "READY",
   "provider": {
@@ -32,6 +32,17 @@
     "opencode_free": {"enabled": true, "model": "deepseek-v4-flash-free", "requires_current_zero_cost_verification": true},
     "paid_fallback": false
   },
+  "taskmarket_autopilot": {
+    "enabled": true,
+    "first_party_cli_only": true,
+    "canonical_wallet": "0xd89Ef03bC3105C538529AC2657Bc4488c94ff4E4",
+    "signer_home_env": "ATM_TASKMARKET_SIGNER_HOME",
+    "staging_root": ".atm/staging",
+    "maker_model": "gemma-4-31b-it",
+    "paid_fallback": false,
+    "outgoing_spend_usd": 0,
+    "nonblocking_monitor": true
+  },
   "provider_runtime": {"default_429_circuit_seconds": 900},
   "execution_router": {
     "claim_requires_executor_health": true,
@@ -40,7 +51,7 @@
   },
   "opportunity_adapters": {
     "workprotocol": {"enabled": true, "base_url": "https://workprotocol.ai", "self_register_free_only": true},
-    "taskmarket": {"enabled": false, "base_url": "https://api.taskmarket.dev", "disabled_reason": "EIP-191 submission signature requires external human-controlled signer"},
+    "taskmarket": {"enabled": true, "base_url": "https://api.taskmarket.dev", "signer": "FIRST_PARTY_CLI_PROTECTED_KEYSTORE"},
     "algora": {"enabled": false, "payout_api_template": null},
     "opire": {"enabled": false},
     "moltjobs": {"enabled": false}
@@ -63,7 +74,7 @@
       "agenthansa": {"priority": "P1", "enabled": true, "writes": "credentialed_only"},
       "bountybook": {"priority": "P1", "enabled": true, "writes": false},
       "0xwork": {"priority": "P1", "enabled": true, "writes": false, "zero_spend_guard": true},
-      "claw-earn": {"priority": "P1", "enabled": true, "writes": false}
+      "claw-earn": {"priority": "P1", "enabled": true, "writes": false, "zero_spend_guard": true}
     }
   },
   "coinpay": {
@@ -84,7 +95,7 @@
     "billable_estimate_fail_closed": true
   },
   "oci": {"optional": true, "vcn": "atm-vcn", "cidr": "10.77.0.0/16", "region": "sa-saopaulo-1", "a1_active_proven": false},
-  "discovery_order": ["superteam", "workprotocol", "opire", "github-direct", "moltjobs", "near-agent-market", "algora", "agenthansa", "bountybook", "0xwork", "claw-earn"],
+  "discovery_order": ["taskmarket", "superteam", "workprotocol", "opire", "github-direct", "moltjobs", "near-agent-market", "algora", "agenthansa", "bountybook", "0xwork", "claw-earn"],
   "hermes": {"max_turns": 500, "process_timeout_seconds": 7200},
   "loop": {"failure_backoff_seconds": 30, "max_failure_backoff_seconds": 1800, "pause_poll_seconds": 10, "phase_delay_seconds": {"DISCOVER": 300, "VERIFY": 2, "CLAIM": 2, "WORK": 2, "CHECK": 2, "SUBMIT": 2, "MONITOR": 300, "PAYMENT_VERIFY": 30}}
 }
