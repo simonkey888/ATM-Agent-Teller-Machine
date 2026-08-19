@@ -29,6 +29,13 @@ def _money(value: str) -> Decimal:
     return Decimal(value) * mult
 
 
+def _plain(value: Decimal) -> str:
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -131,8 +138,7 @@ class GuruPublicSource:
             return None
         competition = self._parse_competition(block)
         age_minutes = max(0, int(age.total_seconds() // 60))
-        payout = high
-        score = payout / Decimal("10") + Decimal(max(0, 50 - competition)) - Decimal(age_minutes) / Decimal("720")
+        score = high / Decimal("10") + Decimal(max(0, 50 - competition)) - Decimal(age_minutes) / Decimal("720")
         description = self._description(block, title)
         proposal = self._proposal(title, description, bid)
         return SimonGateLead(
@@ -143,8 +149,8 @@ class GuruPublicSource:
             description=description[:700],
             observed_at=self.now.isoformat(),
             age_minutes=age_minutes,
-            budget_low=str(low.normalize()),
-            budget_high=str(high.normalize()),
+            budget_low=_plain(low),
+            budget_high=_plain(high),
             currency=currency,
             exact_bid=bid,
             competition=competition,
@@ -158,16 +164,16 @@ class GuruPublicSource:
         hourly = re.search(r"Hourly\s*\|\s*\$\s*([\d,.]+(?:\.\d+)?k?)\s*-\s*\$\s*([\d,.]+(?:\.\d+)?k?)", block, re.I)
         if hourly:
             low, high = _money(hourly.group(1)), _money(hourly.group(2))
-            return low, high, "USD", f"USD {low.normalize()}/hr"
+            return low, high, "USD", f"USD {_plain(low)}/hr"
         fixed = re.search(r"Fixed Price\s*\|\s*\$\s*([\d,.]+(?:\.\d+)?k?)\s*-\s*\$?\s*([\d,.]+(?:\.\d+)?k?)", block, re.I)
         if fixed:
             low, high = _money(fixed.group(1)), _money(fixed.group(2))
-            return low, high, "USD", f"USD {low.normalize()} fixed"
+            return low, high, "USD", f"USD {_plain(low)} fixed"
         under = re.search(r"Fixed Price\s*\|\s*Under\s*\$\s*([\d,.]+(?:\.\d+)?k?)", block, re.I)
         if under:
             ceiling = _money(under.group(1))
             bid = max(Decimal("25"), (ceiling * Decimal("0.8")).quantize(Decimal("1")))
-            return Decimal("0"), ceiling, "USD", f"USD {bid.normalize()} fixed"
+            return Decimal("0"), ceiling, "USD", f"USD {_plain(bid)} fixed"
         return None, None, "USD", ""
 
     def _parse_age(self, block: str) -> timedelta | None:
