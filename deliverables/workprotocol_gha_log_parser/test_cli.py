@@ -20,7 +20,10 @@ Error: Expected: 2 Received: 1
     at Object.<anonymous> (src/math.test.js:14:9)
 """
 TS_LOG = "src/index.ts(12,3): error TS2322: Type 'string' is not assignable to type 'number'.\nBuild failed\n"
-LINT_LOG = "app.py:4:0: C0116: Missing function or method docstring (missing-function-docstring)\n"
+LINT_LOG = """************* Module app
+app.py:4:0: C0116: Missing function or method docstring (missing-function-docstring)
+pylint score 7.5/10
+"""
 
 
 class AcceptanceTests(unittest.TestCase):
