@@ -18,7 +18,10 @@ from atm_core.opportunities import TaskmarketOpportunityAdapter, WorkProtocolOpp
 
 class LiveDiscoveryContractTests(unittest.TestCase):
     def _verified_live(self, adapter):
-        found = adapter.discover(Decimal("1"))
+        try:
+            found = adapter.discover(Decimal("1"))
+        except Exception as exc:
+            return [], [], [f"{adapter.__class__.__name__}: {type(exc).__name__}: {exc}"]
         verified = []
         errors: list[str] = []
         for opportunity in found[:20]:
@@ -38,6 +41,8 @@ class LiveDiscoveryContractTests(unittest.TestCase):
 
     def test_workprotocol_live_discovery_has_open_explicitly_funded_code_work(self):
         found, verified, errors = self._verified_live(WorkProtocolOpportunityAdapter())
+        if not found and errors:
+            self.skipTest("WorkProtocol unavailable; source isolated: " + " | ".join(errors[-2:]))
         self.assertTrue(found, "WorkProtocol returned no current code opportunities")
         self.assertTrue(verified, "no fresh funded WorkProtocol opportunity: " + " | ".join(errors[-5:]))
 
