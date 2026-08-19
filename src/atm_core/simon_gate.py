@@ -85,6 +85,11 @@ class GuruPublicSource:
         "artificial intelligence", "research", "wordpress", "web ", "database", "json", "csv",
     )
 
+    _reject_execution = re.compile(
+        r"\b(cold calling|telemarketing|telesales|outbound sales|door[- ]to[- ]door|must have dialers?|dialer software|phone calling|voice calls?|in[- ]person|on[- ]site|onsite)\b",
+        re.I,
+    )
+
     def __init__(self, *, now: datetime | None = None, max_age: timedelta = timedelta(days=3)):
         self.now = (now or _utcnow()).astimezone(timezone.utc)
         self.max_age = max_age
@@ -131,6 +136,8 @@ class GuruPublicSource:
             return None
         lowered = f"{title} {block}".lower()
         if not any(term in lowered for term in self._fit_terms):
+            return None
+        if self._reject_execution.search(block):
             return None
         if re.search(r"\b(W9 required|U\.S\. only|US only|United States only|must reside in|must be based in)\b", block, re.I):
             return None
