@@ -13,6 +13,8 @@ from .zero_cost_model import ZeroCostModelGate
 
 DEFAULT_GEMMA_MODEL = "gemma-4-31b-it"
 FREE_GEMMA_FAILOVER = ("gemma-4-26b-a4b-it",)
+FILE_BEGIN = "ATM_FILE_BEGIN"
+FILE_END = "ATM_FILE_END"
 
 
 class TaskmarketMakerError(RuntimeError):
@@ -42,9 +44,12 @@ def _extract_json(text: str) -> dict[str, Any]:
         pass
     fenced = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", raw, re.I)
     if fenced:
-        value = json.loads(fenced.group(1))
-        if isinstance(value, dict):
-            return value
+        try:
+            value = json.loads(fenced.group(1))
+            if isinstance(value, dict):
+                return value
+        except json.JSONDecodeError:
+            pass
     decoder = json.JSONDecoder()
     for idx, ch in enumerate(raw):
         if ch != "{":
@@ -56,6 +61,30 @@ def _extract_json(text: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             continue
     raise TaskmarketMakerError("zero-cost model returned no JSON object")
+
+
+def _extract_artifact(text: str) -> tuple[str, str]:
+    """Parse large generated files without forcing source code through JSON escaping."""
+    raw = text.replace("\r\n", "\n")
+    filename_match = re.search(r"(?m)^ATM_FILENAME=([^\n]+)$", raw)
+    begin = raw.find(FILE_BEGIN)
+    end = raw.rfind(FILE_END)
+    if not filename_match or begin < 0 or end <= begin:
+        raise TaskmarketMakerError("maker response lacks raw-file framing")
+    filename = filename_match.group(1).strip()
+    content = raw[begin + len(FILE_BEGIN) : end]
+    if content.startswith("\n"):
+        content = content[1:]
+    if content.endswith("\n"):
+        content = content[:-1]
+    # Models sometimes wrap the entire raw payload in one Markdown code fence.
+    if content.startswith("```") and content.endswith("```"):
+        first_newline = content.find("\n")
+        if first_newline >= 0:
+            content = content[first_newline + 1 : -3].rstrip("\n")
+    if not content.strip():
+        raise TaskmarketMakerError("maker raw-file content is empty")
+    return filename, content
 
 
 class TaskmarketZeroCostMaker:
@@ -106,8 +135,6 @@ class TaskmarketZeroCostMaker:
         ).encode("utf-8")
         req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
         try:
-            # Full single-file deliverables can exceed health-probe latency materially.
-            # This is still the free-only rail; timeout is capability, never a paid fallback trigger.
             with urllib.request.urlopen(req, timeout=300) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
@@ -165,15 +192,15 @@ TASK_DATA:
 ---
 
 Produce the complete final single-file artifact. Do not explain it and do not use placeholders.
-Return exactly JSON with two keys:
-{{"filename":"index.html or required .md filename","content":"COMPLETE FILE CONTENT"}}
-The content must be usable as submitted, with no build step when the task asks for none.
+Large source files MUST NOT be JSON escaped. Return exactly this raw-file framing:
+ATM_FILENAME=<required filename>
+{FILE_BEGIN}
+<COMPLETE FILE CONTENT, verbatim>
+{FILE_END}
+Do not omit either marker. The content must be usable as submitted, with no build step when the task asks for none.
 """
-        made = _extract_json(self._generate(maker_prompt, model=model, max_output_tokens=16384))
-        filename = self._safe_filename(str(made.get("filename") or ""), task_description)
-        content = made.get("content")
-        if not isinstance(content, str):
-            raise TaskmarketMakerError("maker content is not text")
+        filename_raw, content = _extract_artifact(self._generate(maker_prompt, model=model, max_output_tokens=16384))
+        filename = self._safe_filename(filename_raw, task_description)
         artifact = workspace / filename
         artifact.write_text(content, encoding="utf-8", newline="\n")
         self._static_check(artifact, task_description)
