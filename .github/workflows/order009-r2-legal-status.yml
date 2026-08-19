@@ -1,6 +1,7 @@
-name: ORDER-009-R2 Canonical Wallet Mutation Gate
+name: ORDER-009-R3 TaskMarket Identity Check
 
 on:
+  workflow_dispatch:
   push:
     branches: [pivot/universal-money-radar-r1]
     paths:
@@ -8,375 +9,75 @@ on:
 
 permissions:
   contents: read
-  issues: write
-
-concurrency:
-  group: order009-r2-canonical-wallet-mutation
-  cancel-in-progress: false
 
 jobs:
-  canonical-wallet-gate:
+  identity-check:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 8
     env:
-      CANONICAL_WALLET: "0x9a4ce35cA7f2CFAB5D66DFfbE34D1C1C946e867d"
-      TASK20: "0x664bc58934ca51fc34386bf58a5b1f0e6d4172e06c7df032d1c84b1d6960766c"
-      TASK10: "0x4c887264d5ede369de6e98c6214e6c03ee8708af108305ecafa0341a675e6147"
+      CANONICAL_WALLET: "0xd89Ef03bC3105C538529AC2657Bc4488c94ff4E4"
       TASKMARKET_KEYSTORE_B64: ${{ secrets.TASKMARKET_KEYSTORE_B64 }}
     steps:
-      - name: Checkout exact head
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 1
-          persist-credentials: false
-
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: "22"
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: "3.11"
-
-      - name: Exact head binding
+      - name: Existing encrypted keystore only
         run: |
           set -Eeuo pipefail
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          echo "TESTED_SHA_EQ_HEAD=PASS"
-
-      - name: Materialize existing canonical keystore only
-        run: |
-          set -Eeuo pipefail
-          if [ -n "${TASKMARKET_KEYSTORE_B64:-}" ]; then
-            mkdir -p "$HOME/.taskmarket"
-            printf '%s' "$TASKMARKET_KEYSTORE_B64" | base64 --decode > "$HOME/.taskmarket/keystore.json"
-            chmod 600 "$HOME/.taskmarket/keystore.json"
-            echo "KEYSTORE_SOURCE=EXISTING_SECRET"
-          else
-            echo "KEYSTORE_SOURCE=ABSENT"
-          fi
           echo "TASKMARKET_INIT_PERFORMED=false"
+          if [ -z "${TASKMARKET_KEYSTORE_B64:-}" ]; then
+            echo "BLOCKED_CAPABILITY=TASKMARKET_KEYSTORE_B64"
+            exit 0
+          fi
+          mkdir -p "$HOME/.taskmarket"
+          printf '%s' "$TASKMARKET_KEYSTORE_B64" | base64 --decode > "$HOME/.taskmarket/keystore.json"
+          chmod 600 "$HOME/.taskmarket/keystore.json"
 
-      - name: A - taskmarket address
+      - name: Address bound to acting CLI wallet
+        if: env.TASKMARKET_KEYSTORE_B64 != ''
         id: address
-        shell: bash
         run: |
-          set +e
-          npx -y @lucid-agents/taskmarket@latest address > /tmp/tm-address.json 2>/tmp/tm-address.err
-          RC=$?
-          set -e
-          export RC
+          set -Eeuo pipefail
+          npx -y @lucid-agents/taskmarket@latest address > /tmp/address.json 2>/dev/null
           python - <<'PY'
           import json, os, re
           from pathlib import Path
-          canonical=os.environ['CANONICAL_WALLET'].lower()
-          raw=Path('/tmp/tm-address.json').read_text(errors='replace') if Path('/tmp/tm-address.json').exists() else ''
+          obj=json.loads(Path('/tmp/address.json').read_text())
+          def walk(x):
+              if isinstance(x,dict):
+                  yield x
+                  for v in x.values(): yield from walk(v)
+              elif isinstance(x,list):
+                  for v in x: yield from walk(v)
           address=''
-          try: obj=json.loads(raw)
-          except Exception: obj={}
-          def walk(o):
-              if isinstance(o,dict):
-                  yield o
-                  for v in o.values(): yield from walk(v)
-              elif isinstance(o,list):
-                  for v in o: yield from walk(v)
-          for d in walk(obj):
-              for k in ('address','walletAddress'):
-                  v=d.get(k)
-                  if isinstance(v,str) and re.fullmatch(r'0x[0-9a-fA-F]{40}',v):
-                      address=v; break
+          for row in walk(obj):
+              for key in ('address','walletAddress'):
+                  value=row.get(key)
+                  if isinstance(value,str) and re.fullmatch(r'0x[0-9A-Fa-f]{40}',value):
+                      address=value; break
               if address: break
-          match=bool(address and address.lower()==canonical)
-          with open(os.environ['GITHUB_OUTPUT'],'a') as out:
-              out.write('match='+str(match).lower()+'\n')
-              out.write('address='+address+'\n')
+          match=bool(address and address.lower()==os.environ['CANONICAL_WALLET'].lower())
           print('TASKMARKET_ADDRESS='+(address or 'UNAVAILABLE'))
           print('WALLET_MATCH='+str(match).lower())
-          print('ADDRESS_COMMAND_RC='+os.environ.get('RC',''))
-          if not match:
-              print('OWNER_ACTION_REQUIRED=TASKMARKET_KEYSTORE_TRANSFER_OR_RUNTIME_BINDING')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out: out.write('match='+str(match).lower()+'\n')
+          if not match: raise SystemExit('TASKMARKET_WALLET_MISMATCH')
           PY
 
-      - name: B - taskmarket legal status
+      - name: Read-only legal status
         if: steps.address.outputs.match == 'true'
-        id: legal
-        shell: bash
         run: |
-          set +e
-          npx -y @lucid-agents/taskmarket@latest legal status > /tmp/tm-legal.json 2>/tmp/tm-legal.err
-          RC=$?
-          set -e
-          export RC
+          set -Eeuo pipefail
+          npx -y @lucid-agents/taskmarket@latest legal status > /tmp/legal.json
           python - <<'PY'
-          import json, os
-          from pathlib import Path
-          try: obj=json.loads(Path('/tmp/tm-legal.json').read_text())
-          except Exception: obj={}
-          data=obj.get('data') if isinstance(obj,dict) else None
-          if not isinstance(data,dict): data=obj if isinstance(obj,dict) else {}
-          accepted=bool(data.get('accepted') is True)
-          docs=data.get('documents') or []
-          version=str(data.get('bundleVersion') or data.get('version') or '')
-          digest=str(data.get('bundleDigest') or '')
-          current=bool(accepted and int(os.environ.get('RC','1'))==0)
-          with open(os.environ['GITHUB_OUTPUT'],'a') as out:
-              out.write('current='+str(current).lower()+'\n')
-              out.write('accepted='+str(accepted).lower()+'\n')
-          print('LEGAL='+('CURRENT_ACCEPTED' if current else 'OWNER_REVIEW_REQUIRED'))
-          print('TASKMARKET_LEGAL_ACCEPTED='+str(accepted).lower())
-          print('BUNDLE_VERSION='+(version or 'UNAVAILABLE'))
-          print('BUNDLE_DIGEST='+(digest or 'UNAVAILABLE'))
-          for i in range(4):
-              url=''
-              if i < len(docs) and isinstance(docs[i],dict): url=str(docs[i].get('url') or '')
-              print(f'POLICY_URL_{i+1}='+(url or 'UNAVAILABLE'))
-          print('LEGAL_ACCEPT_PERFORMED=false')
-          PY
-
-      - name: C - first-party task get 20 USDC
-        if: steps.address.outputs.match == 'true'
-        id: task20
-        run: |
-          set -Eeuo pipefail
-          npx -y @lucid-agents/taskmarket@latest task get "$TASK20" > /tmp/tm-task20.json
-          python - <<'PY'
-          import json, os
-          from pathlib import Path
-          obj=json.loads(Path('/tmp/tm-task20.json').read_text())
-          data=obj.get('data') if isinstance(obj,dict) else None
-          if not isinstance(data,dict): raise SystemExit('TASK20_DATA_MISSING')
-          actions=data.get('pendingActions') or []
-          submit=[a for a in actions if isinstance(a,dict) and str(a.get('role') or '').lower()=='worker' and str(a.get('action') or '').lower()=='submit']
-          free=bool(submit) and all(a.get('requiresPayment') is False and a.get('paymentAmount') in (None,'',0,'0') for a in submit)
-          window=data.get('submissionWindowOpen') is True
-          eligible=bool(window and free)
-          with open(os.environ['GITHUB_OUTPUT'],'a') as out:
-              out.write('eligible='+str(eligible).lower()+'\n')
-          print('TASKMARKET_20_STATUS='+str(data.get('status') or 'UNKNOWN'))
-          print('TASKMARKET_20_SUBMISSION_WINDOW_OPEN='+str(window).lower())
-          print('TASKMARKET_20_WORKER_SUBMIT_ACTION='+str(bool(submit)).lower())
-          print('TASKMARKET_20_FREE_SUBMIT='+str(free).lower())
-          print('TASKMARKET_20='+('ELIGIBLE_FOR_WORKER' if eligible else 'EXPIRED_FOR_WORKER'))
-          PY
-
-      - name: D - first-party task get 10 USDC fallback
-        if: steps.address.outputs.match == 'true' && steps.task20.outputs.eligible != 'true'
-        id: task10
-        run: |
-          set -Eeuo pipefail
-          npx -y @lucid-agents/taskmarket@latest task get "$TASK10" > /tmp/tm-task10.json
-          python - <<'PY'
-          import json, os
-          from pathlib import Path
-          obj=json.loads(Path('/tmp/tm-task10.json').read_text())
-          data=obj.get('data') if isinstance(obj,dict) else None
-          if not isinstance(data,dict): raise SystemExit('TASK10_DATA_MISSING')
-          actions=data.get('pendingActions') or []
-          submit=[a for a in actions if isinstance(a,dict) and str(a.get('role') or '').lower()=='worker' and str(a.get('action') or '').lower()=='submit']
-          free=bool(submit) and all(a.get('requiresPayment') is False and a.get('paymentAmount') in (None,'',0,'0') for a in submit)
-          window=data.get('submissionWindowOpen') is True
-          eligible=bool(str(data.get('status') or '').lower()=='open' and window and free and data.get('stakeRequired') is False)
-          with open(os.environ['GITHUB_OUTPUT'],'a') as out:
-              out.write('eligible='+str(eligible).lower()+'\n')
-          print('TASKMARKET_10_STATUS='+str(data.get('status') or 'UNKNOWN'))
-          print('TASKMARKET_10_SUBMISSION_WINDOW_OPEN='+str(window).lower())
-          print('TASKMARKET_10_WORKER_SUBMIT_ACTION='+str(bool(submit)).lower())
-          print('TASKMARKET_10_FREE_SUBMIT='+str(free).lower())
-          print('TASKMARKET_10_ELIGIBLE='+str(eligible).lower())
-          PY
-
-      - name: Select verified mutation candidate
-        if: steps.address.outputs.match == 'true'
-        id: select
-        run: |
-          set -Eeuo pipefail
-          if [ "${{ steps.task20.outputs.eligible }}" = "true" ]; then
-            echo "target=$TASK20" >> "$GITHUB_OUTPUT"
-            echo "kind=20" >> "$GITHUB_OUTPUT"
-            echo "TARGET_ID=$TASK20"
-          elif [ "${{ steps.task10.outputs.eligible }}" = "true" ]; then
-            echo "target=$TASK10" >> "$GITHUB_OUTPUT"
-            echo "kind=10" >> "$GITHUB_OUTPUT"
-            echo "TARGET_ID=$TASK10"
-          else
-            echo "target=" >> "$GITHUB_OUTPUT"
-            echo "kind=none" >> "$GITHUB_OUTPUT"
-            echo "NO_VERIFIED_MUTATION_CANDIDATE=true"
-          fi
-
-      - name: Artifact gate
-        if: steps.select.outputs.kind != '' && steps.select.outputs.kind != 'none'
-        id: artifact
-        run: |
-          set -Eeuo pipefail
-          if [ "${{ steps.select.outputs.kind }}" = "20" ]; then
-            python -m pip install --disable-pip-version-check -q pytest
-            python -m pytest -q tests/test_trenchguard_rh.py
-            python scripts/order009-r2-artifact-check.py
-            python - <<'PY'
           import json
-          e=json.load(open('order009-r2-artifact-check.json'))
-          assert e.get('pass') is True
-          print('ARTIFACT=deliverables/trenchguard_rh')
-          print('ARTIFACT_CHECK=PASS')
-          PY
-            echo "path=deliverables/trenchguard_rh" >> "$GITHUB_OUTPUT"
-          else
-            python scripts/order009-r2-robotics-thesis-check.py
-            echo "path=deliverables/robotics_supply_chain_thesis/ROBOTICS_SUPPLY_CHAIN_THESIS.md" >> "$GITHUB_OUTPUT"
-            echo "ARTIFACT=deliverables/robotics_supply_chain_thesis/ROBOTICS_SUPPLY_CHAIN_THESIS.md"
-            echo "ARTIFACT_CHECK=PASS"
-          fi
-          echo "ok=true" >> "$GITHUB_OUTPUT"
-
-      - name: Duplicate-submission guard
-        if: steps.artifact.outputs.ok == 'true'
-        id: duplicate
-        env:
-          TARGET_ID: ${{ steps.select.outputs.target }}
-        run: |
-          python - <<'PY'
-          import json, os, urllib.request
-          tid=os.environ['TARGET_ID']; wallet=os.environ['CANONICAL_WALLET'].lower()
-          url=f'https://api.taskmarket.dev/api/tasks/{tid}/submissions'
-          req=urllib.request.Request(url,headers={'Accept':'application/json','User-Agent':'ATM-Order009-R2/duplicate-guard'})
-          with urllib.request.urlopen(req,timeout=20) as r: data=json.loads(r.read().decode())
-          if isinstance(data,dict): rows=data.get('submissions') or data.get('items') or data.get('data') or []
-          else: rows=data
-          if not isinstance(rows,list): rows=[]
-          found=''
-          for row in rows:
-              if not isinstance(row,dict): continue
-              rw=str(row.get('workerAddress') or row.get('worker') or '').lower()
-              if rw==wallet:
-                  found=str(row.get('id') or row.get('submissionId') or '')
-                  if found: break
-          with open(os.environ['GITHUB_OUTPUT'],'a') as out:
-              out.write('exists='+str(bool(found)).lower()+'\n')
-              out.write('submission_id='+found+'\n')
-          print('EXISTING_CANONICAL_SUBMISSION='+str(bool(found)).lower())
-          print('EXISTING_SUBMISSION_ID='+(found or ''))
-          PY
-
-      - name: Final first-party side-effect gate
-        if: steps.artifact.outputs.ok == 'true' && steps.duplicate.outputs.exists != 'true'
-        id: final
-        env:
-          TARGET_ID: ${{ steps.select.outputs.target }}
-        run: |
-          set -Eeuo pipefail
-          npx -y @lucid-agents/taskmarket@latest task get "$TARGET_ID" > /tmp/tm-final.json
-          python - <<'PY'
-          import json, os
           from pathlib import Path
-          obj=json.loads(Path('/tmp/tm-final.json').read_text()); data=obj.get('data') if isinstance(obj,dict) else None
-          if not isinstance(data,dict): raise SystemExit('FINAL_TASK_DATA_MISSING')
-          actions=data.get('pendingActions') or []
-          submit=[a for a in actions if isinstance(a,dict) and str(a.get('role') or '').lower()=='worker' and str(a.get('action') or '').lower()=='submit']
-          free=bool(submit) and all(a.get('requiresPayment') is False and a.get('paymentAmount') in (None,'',0,'0') for a in submit)
-          ok=bool(str(data.get('status') or '').lower()=='open' and data.get('submissionWindowOpen') is True and free and data.get('stakeRequired') is False)
-          with open(os.environ['GITHUB_OUTPUT'],'a') as out: out.write('ok='+str(ok).lower()+'\n')
-          print('FINAL_REFETCH_OPEN='+str(str(data.get('status') or '').lower()=='open').lower())
-          print('FINAL_REFETCH_SUBMISSION_WINDOW='+str(data.get('submissionWindowOpen') is True).lower())
-          print('FINAL_WORKER_SUBMIT_ACTION='+str(bool(submit)).lower())
-          print('FINAL_ZERO_COST_SUBMIT='+str(free).lower())
-          PY
-
-      - name: Submit exactly once after all gates
-        if: steps.address.outputs.match == 'true' && steps.legal.outputs.current == 'true' && steps.artifact.outputs.ok == 'true' && steps.duplicate.outputs.exists != 'true' && steps.final.outputs.ok == 'true'
-        id: submit
-        env:
-          TARGET_ID: ${{ steps.select.outputs.target }}
-          TARGET_KIND: ${{ steps.select.outputs.kind }}
-        run: |
-          set +e
-          if [ "$TARGET_KIND" = "20" ]; then
-            npx -y @lucid-agents/taskmarket@latest task submit "$TARGET_ID" \
-              --file deliverables/trenchguard_rh/RESEARCH.md \
-              --file deliverables/trenchguard_rh/trenchguard.py \
-              --file deliverables/trenchguard_rh/README.md \
-              --file tests/test_trenchguard_rh.py \
-              --file scripts/order009-r2-artifact-check.py \
-              > /tmp/tm-submit.json 2>/tmp/tm-submit.err
-          else
-            npx -y @lucid-agents/taskmarket@latest task submit "$TARGET_ID" \
-              --file deliverables/robotics_supply_chain_thesis/ROBOTICS_SUPPLY_CHAIN_THESIS.md \
-              > /tmp/tm-submit.json 2>/tmp/tm-submit.err
-          fi
-          RC=$?
-          set -e
-          echo "attempted=true" >> "$GITHUB_OUTPUT"
-          echo "rc=$RC" >> "$GITHUB_OUTPUT"
-          echo "SUBMIT_COMMAND_INVOKED_EXACTLY_ONCE=true"
-          echo "SUBMIT_RC=$RC"
-
-      - name: Verify and publish terminal receipt
-        if: always()
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          WALLET_MATCH: ${{ steps.address.outputs.match }}
-          LEGAL_CURRENT: ${{ steps.legal.outputs.current }}
-          TARGET_ID: ${{ steps.select.outputs.target }}
-          TARGET_KIND: ${{ steps.select.outputs.kind }}
-          ARTIFACT_OK: ${{ steps.artifact.outputs.ok }}
-          ARTIFACT_PATH: ${{ steps.artifact.outputs.path }}
-          DUPLICATE_EXISTS: ${{ steps.duplicate.outputs.exists }}
-          DUPLICATE_ID: ${{ steps.duplicate.outputs.submission_id }}
-          SUBMIT_ATTEMPTED: ${{ steps.submit.outputs.attempted }}
-        run: |
-          python - <<'PY'
-          import json, os, urllib.request
-          tid=os.environ.get('TARGET_ID',''); wallet=os.environ['CANONICAL_WALLET'].lower()
-          verified=False; sid=os.environ.get('DUPLICATE_ID','') if os.environ.get('DUPLICATE_EXISTS')=='true' else ''
-          if tid:
-              try:
-                  req=urllib.request.Request(f'https://api.taskmarket.dev/api/tasks/{tid}/submissions',headers={'Accept':'application/json','User-Agent':'ATM-Order009-R2/verify'})
-                  with urllib.request.urlopen(req,timeout=20) as r: data=json.loads(r.read().decode())
-                  rows=data.get('submissions') or data.get('items') or data.get('data') or [] if isinstance(data,dict) else data
-                  if not isinstance(rows,list): rows=[]
-                  for row in rows:
-                      if not isinstance(row,dict): continue
-                      rw=str(row.get('workerAddress') or row.get('worker') or '').lower()
-                      rid=str(row.get('id') or row.get('submissionId') or '')
-                      if rw==wallet and rid:
-                          sid=rid; verified=True; break
-              except Exception: pass
-          wallet_match=os.environ.get('WALLET_MATCH')=='true'; legal=os.environ.get('LEGAL_CURRENT')=='true'
-          artifact_ok=os.environ.get('ARTIFACT_OK')=='true'; attempted=os.environ.get('SUBMIT_ATTEMPTED')=='true'
-          if verified:
-              status='SUBMITTED'; next_action='VERIFY_ACCEPTANCE_AND_PAYMENT'
-          elif not wallet_match:
-              status='OWNER_ACTION_REQUIRED'; next_action='TASKMARKET_KEYSTORE_TRANSFER_OR_RUNTIME_BINDING'
-          elif not legal:
-              status='OWNER_ACTION_REQUIRED'; next_action='OWNER_REVIEW_AND_ACCEPT_CURRENT_TASKMARKET_LEGAL_BUNDLE'
-          elif not tid:
-              status='NO_VERIFIED_MUTATION_CANDIDATE'; next_action='NONE'
-          elif attempted:
-              status='FAILED_CLOSED'; next_action='SUBMISSION_ATTEMPT_NOT_VERIFIED'
-          else:
-              status='FAILED_CLOSED'; next_action='SIDE_EFFECT_GATE_NOT_PASS'
-          pending='NOT_RECHECKED_WALLET_BIND_BLOCKED' if not wallet_match else ('VERIFIED_TARGET_SELECTED' if tid else 'NONE')
-          receipt={
-            'schema':'ATM_ORDER009_R2_TERMINAL_V2','status':status,'head':os.environ['GITHUB_SHA'],'target_id':tid,
-            'wallet_match':wallet_match,'canonical_wallet':os.environ['CANONICAL_WALLET'],'legal':'CURRENT_ACCEPTED' if legal else ('NOT_CHECKED_WALLET_BIND_BLOCKED' if not wallet_match else 'OWNER_REVIEW_REQUIRED'),
-            'pending_action':pending,'artifact':os.environ.get('ARTIFACT_PATH',''),'artifact_check':'PASS' if artifact_ok else ('PREPARED_PRIOR_PASS' if not wallet_match else 'NOT_RUN'),
-            'submission_id':sid,'submission_verified':verified,'submission_performed':attempted,'outgoing_spend_usd':'0','realized_withdrawable_usd':'0','next':next_action,'merge':'NO'
-          }
-          body='ORDER-009-R2 TERMINAL RECEIPT\n```json\n'+json.dumps(receipt,sort_keys=True)+'\n```'
-          req=urllib.request.Request(f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/issues/38/comments",data=json.dumps({'body':body}).encode(),method='POST',headers={'Authorization':f"Bearer {os.environ['GITHUB_TOKEN']}",'Accept':'application/vnd.github+json','Content-Type':'application/json','User-Agent':'ATM-Order009-R2/terminal'})
-          with urllib.request.urlopen(req,timeout=20) as r: posted=json.loads(r.read().decode())
-          print('EVIDENCE_COMMENT='+str(posted.get('id') or ''))
-          print('ORDER_009_R2_STATUS='+status)
-          print('TARGET_ID='+tid)
-          print('WALLET_MATCH='+str(wallet_match).lower())
-          print('LEGAL='+receipt['legal'])
-          print('PENDING_ACTION='+pending)
-          print('ARTIFACT='+receipt['artifact'])
-          print('ARTIFACT_CHECK='+receipt['artifact_check'])
-          print('SUBMISSION_ID='+sid)
-          print('SUBMISSION_VERIFIED='+str(verified).lower())
-          print('OUTGOING_SPEND_USD=0')
-          print('REALIZED_WITHDRAWABLE_USD=0')
-          print('NEXT='+next_action)
+          obj=json.loads(Path('/tmp/legal.json').read_text())
+          data=obj.get('data',obj) if isinstance(obj,dict) else {}
+          print('TASKMARKET_LEGAL_ACCEPTED='+str(data.get('accepted') is True).lower())
+          print('BUNDLE_VERSION='+str(data.get('bundleVersion') or data.get('version') or 'UNAVAILABLE'))
+          print('BUNDLE_DIGEST='+str(data.get('bundleDigest') or 'UNAVAILABLE'))
+          for i,d in enumerate((data.get('documents') or [])[:4],1): print(f'POLICY_URL_{i}='+str(d.get('url') or 'UNAVAILABLE'))
+          print('LEGAL_ACCEPT_PERFORMED=false')
+          print('EXTERNAL_ECONOMIC_WRITE=false')
           PY
