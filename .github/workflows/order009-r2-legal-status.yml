@@ -1,0 +1,21 @@
+name: ORDER-009-R2 Legal Status Only
+
+on:
+  push:
+    branches: [pivot/universal-money-radar-r1]
+    paths:
+      - .github/workflows/order009-r2-legal-status.yml
+
+permissions:
+  contents: read
+
+jobs:
+  legal-status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+      - name: taskmarket legal status
+        run: npx -y @lucid-agents/taskmarket@latest legal status
