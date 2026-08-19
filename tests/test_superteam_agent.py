@@ -18,13 +18,13 @@ class FakeHttp:
         self.calls = []
 
     def get_json(self, url, **kwargs):
-        self.calls.append(("GET", url))
+        self.calls.append(("GET", url, kwargs.get("headers")))
         if not self.gets:
             raise AssertionError(f"unexpected GET {url}")
         return self.gets.pop(0)
 
     def request_json(self, method, url, **kwargs):
-        self.calls.append((method.upper(), url, kwargs.get("body")))
+        self.calls.append((method.upper(), url, kwargs.get("body"), kwargs.get("headers")))
         if not self.posts:
             raise AssertionError(f"unexpected POST {url}")
         return self.posts.pop(0), {}, 200
@@ -53,13 +53,28 @@ class SuperteamAgentApiTests(unittest.TestCase):
             with self.assertRaises(SuperteamAgentError):
                 api.register_exactly_once()
 
-    def test_official_submission_update_comment_and_monitor_surfaces(self):
-        with tempfile.TemporaryDirectory() as td, patch.object(radar_sources, "SECRET_FILE", Path(td) / "radar-secrets.json"), patch.dict(os.environ, {}, clear=True):
-            radar_sources.SECRET_FILE.write_text(json.dumps({
-                "superteam_agent_id": "agent-1",
-                "superteam_api_key": "sk-secret",
-                "superteam_claim_code": "claim-secret",
-            }))
+    def test_env_runtime_auth_uses_api_key_and_public_agent_id_without_claim_code(self):
+        with tempfile.TemporaryDirectory() as td, patch.object(radar_sources, "SECRET_FILE", Path(td) / "radar-secrets.json"), patch.dict(
+            os.environ,
+            {"SUPERTEAM_AGENT_API_KEY": "sk-runtime", "SUPERTEAM_AGENT_ID": "agent-preserved"},
+            clear=True,
+        ):
+            fake = FakeHttp(gets=[{"listings": [{"id": "l1", "agentAccess": "AGENT_ONLY"}]}])
+            api = SuperteamAgentApi(fake)
+            rows = api.live_agent_eligible(take=20)
+            self.assertEqual(rows["listings"][0]["id"], "l1")
+            headers = fake.calls[0][2]
+            self.assertEqual(headers["Authorization"], "Bearer sk-runtime")
+            with self.assertRaisesRegex(SuperteamAgentError, "REGISTRATION_FORBIDDEN"):
+                api.register_exactly_once()
+            self.assertEqual(len([call for call in fake.calls if call[0] == "POST"]), 0)
+
+    def test_claim_code_is_not_required_for_submission_or_winner_gate(self):
+        with tempfile.TemporaryDirectory() as td, patch.object(radar_sources, "SECRET_FILE", Path(td) / "radar-secrets.json"), patch.dict(
+            os.environ,
+            {"SUPERTEAM_AGENT_API_KEY": "sk-runtime", "SUPERTEAM_AGENT_ID": "agent-1"},
+            clear=True,
+        ):
             fake = FakeHttp(
                 gets=[
                     {"listing": {"id": "listing-1", "slug": "one", "agentAccess": "AGENT_ONLY", "status": "CLOSED"}, "submission": {"status": "WINNER"}},
@@ -84,8 +99,19 @@ class SuperteamAgentApiTests(unittest.TestCase):
             comments = api.comments("listing-1")
             self.assertEqual(comments[0]["id"], "c1")
             gate = api.winner_human_gate()
+            self.assertEqual(gate["agent_id"], "agent-1")
             self.assertEqual(gate["claim_code_exposed"], "false")
-            self.assertNotIn("claim-secret", json.dumps(gate))
+            self.assertNotIn("claim", json.dumps(gate).lower().replace("claim_code_exposed", ""))
+
+    def test_explicit_mismatched_agent_id_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td, patch.object(radar_sources, "SECRET_FILE", Path(td) / "radar-secrets.json"), patch.dict(
+            os.environ,
+            {"SUPERTEAM_AGENT_API_KEY": "sk-runtime", "SUPERTEAM_AGENT_ID": "agent-1"},
+            clear=True,
+        ):
+            api = SuperteamAgentApi(FakeHttp(gets=[{"agentId": "different", "listings": []}]))
+            with self.assertRaisesRegex(SuperteamAgentError, "AGENT_ID_MISMATCH"):
+                api.live_agent_eligible()
 
 
 if __name__ == "__main__":
