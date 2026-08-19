@@ -1,4 +1,4 @@
-name: ORDER-009-R2 Wallet Bind + Legal Status
+name: ORDER-009-R2 Target + Wallet + Legal Status
 
 on:
   push:
@@ -10,10 +10,11 @@ permissions:
   contents: read
 
 jobs:
-  wallet-bind-legal-status:
+  target-wallet-legal-status:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
+      TASK_ID: "0x664bc58934ca51fc34386bf58a5b1f0e6d4172e06c7df032d1c84b1d6960766c"
       CANONICAL_WALLET: "0x9a4ce35cA7f2CFAB5D66DFfbE34D1C1C946e867d"
       TASKMARKET_KEYSTORE_B64: ${{ secrets.TASKMARKET_KEYSTORE_B64 }}
     steps:
@@ -21,7 +22,52 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Authoritative taskmarket task get
+        id: target
+        run: |
+          set -Eeuo pipefail
+          npx -y @lucid-agents/taskmarket@latest task get "$TASK_ID" > /tmp/taskmarket-task.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          obj=json.loads(Path('/tmp/taskmarket-task.json').read_text())
+          data=obj.get('data') if isinstance(obj,dict) else None
+          if not isinstance(data,dict):
+              raise SystemExit('TASK_GET_DATA_MISSING')
+          pending=data.get('pendingActions') or []
+          worker_submit=[]
+          for a in pending:
+              if not isinstance(a,dict):
+                  continue
+              role=str(a.get('role') or '').lower()
+              action=str(a.get('action') or '').lower()
+              command=str(a.get('command') or '').lower()
+              if role=='worker' and (action=='submit' or ' task submit ' in (' '+command+' ')):
+                  worker_submit.append(a)
+          window=data.get('submissionWindowOpen')
+          if window is None:
+              window=any(bool(a.get('availableUntil')) or str(a.get('action') or '').lower()=='submit' for a in worker_submit)
+          submit_available=bool(window is True and worker_submit)
+          requires_payment=None
+          payment_amount=None
+          if worker_submit:
+              requires_payment=worker_submit[0].get('requiresPayment')
+              payment_amount=worker_submit[0].get('paymentAmount')
+          print('TASK_ID='+str(data.get('id') or os.environ['TASK_ID']))
+          print('TASK_STATUS='+str(data.get('status') or 'UNKNOWN'))
+          print('SUBMISSION_WINDOW_OPEN='+str(bool(window)).lower())
+          print('WORKER_SUBMIT_PENDING_ACTION='+str(bool(worker_submit)).lower())
+          print('SUBMIT_REQUIRES_PAYMENT='+('UNKNOWN' if requires_payment is None else str(bool(requires_payment)).lower()))
+          print('SUBMIT_PAYMENT_AMOUNT='+('UNKNOWN' if payment_amount is None else str(payment_amount)))
+          print('SUBMIT_AVAILABLE='+str(submit_available).lower())
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out:
+              out.write('submit_available='+str(submit_available).lower()+'\n')
+          if not submit_available:
+              print('CURRENT_TARGET_STATE=EXPIRED_CLOSED')
+          PY
+
       - name: Materialize existing keystore only
+        if: steps.target.outputs.submit_available == 'true'
         run: |
           set -Eeuo pipefail
           if [ -n "${TASKMARKET_KEYSTORE_B64:-}" ]; then
@@ -31,6 +77,7 @@ jobs:
           fi
 
       - name: taskmarket address only
+        if: steps.target.outputs.submit_available == 'true'
         id: address
         run: |
           set +e
@@ -41,9 +88,9 @@ jobs:
           python - <<'PY'
           import json, os, re
           from pathlib import Path
-          canonical=os.environ["CANONICAL_WALLET"].lower()
-          raw=Path("/tmp/taskmarket-address.json").read_text(errors="replace") if Path("/tmp/taskmarket-address.json").exists() else ""
-          address=""
+          canonical=os.environ['CANONICAL_WALLET'].lower()
+          raw=Path('/tmp/taskmarket-address.json').read_text(errors='replace') if Path('/tmp/taskmarket-address.json').exists() else ''
+          address=''
           try:
               obj=json.loads(raw)
           except Exception:
@@ -55,41 +102,40 @@ jobs:
               elif isinstance(o,list):
                   for v in o: yield from walk(v)
           for d in walk(obj):
-              for k in ("address","walletAddress"):
+              for k in ('address','walletAddress'):
                   v=d.get(k)
-                  if isinstance(v,str) and re.fullmatch(r"0x[0-9a-fA-F]{40}",v):
+                  if isinstance(v,str) and re.fullmatch(r'0x[0-9a-fA-F]{40}',v):
                       address=v
                       break
               if address: break
           match=bool(address and address.lower()==canonical)
-          with open(os.environ["GITHUB_OUTPUT"],"a") as out:
-              out.write("match="+str(match).lower()+"\n")
-              out.write("address="+address+"\n")
-          print("TASKMARKET_ADDRESS="+(address or "UNAVAILABLE"))
-          print("CANONICAL_WALLET_MATCH="+str(match).lower())
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out:
+              out.write('match='+str(match).lower()+'\n')
+              out.write('address='+address+'\n')
+          print('TASKMARKET_ADDRESS='+(address or 'UNAVAILABLE'))
+          print('CANONICAL_WALLET_MATCH='+str(match).lower())
           if not match:
-              print("OWNER_ACTION_REQUIRED=TASKMARKET_KEYSTORE_TRANSFER_OR_RUNTIME_BINDING")
-              raise SystemExit(0)
+              print('OWNER_ACTION_REQUIRED=TASKMARKET_KEYSTORE_TRANSFER_OR_RUNTIME_BINDING')
           PY
 
       - name: taskmarket legal status
-        if: steps.address.outputs.match == 'true'
+        if: steps.target.outputs.submit_available == 'true' && steps.address.outputs.match == 'true'
         run: |
           set -Eeuo pipefail
           npx -y @lucid-agents/taskmarket@latest legal status > /tmp/taskmarket-legal.json
           python - <<'PY'
           import json
           from pathlib import Path
-          obj=json.loads(Path("/tmp/taskmarket-legal.json").read_text())
-          data=obj.get("data") if isinstance(obj,dict) else None
+          obj=json.loads(Path('/tmp/taskmarket-legal.json').read_text())
+          data=obj.get('data') if isinstance(obj,dict) else None
           if not isinstance(data,dict):
-              raise SystemExit("LEGAL_STATUS_DATA_MISSING")
-          docs=data.get("documents") or []
+              raise SystemExit('LEGAL_STATUS_DATA_MISSING')
+          docs=data.get('documents') or []
           if len(docs) != 4:
-              raise SystemExit("LEGAL_STATUS_DOCUMENT_COUNT_NOT_4")
-          print("TASKMARKET_LEGAL_ACCEPTED="+str(bool(data.get("accepted"))).lower())
-          print("BUNDLE_VERSION="+str(data.get("bundleVersion") or ""))
-          print("BUNDLE_DIGEST="+str(data.get("bundleDigest") or ""))
+              raise SystemExit('LEGAL_STATUS_DOCUMENT_COUNT_NOT_4')
+          print('TASKMARKET_LEGAL_ACCEPTED='+str(bool(data.get('accepted'))).lower())
+          print('BUNDLE_VERSION='+str(data.get('bundleVersion') or ''))
+          print('BUNDLE_DIGEST='+str(data.get('bundleDigest') or ''))
           for i,doc in enumerate(docs,1):
-              print(f"POLICY_URL_{i}="+str(doc.get("url") or ""))
+              print(f"POLICY_URL_{i}="+str(doc.get('url') or ''))
           PY
