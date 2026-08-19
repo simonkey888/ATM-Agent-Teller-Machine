@@ -60,6 +60,17 @@ class GuruPublicSourceTests(unittest.TestCase):
         )
         self.assertEqual(GuruPublicSource(now=NOW).discover(raw), [])
 
+    def test_non_agentic_or_paid_tooling_leads_are_rejected(self):
+        raw = card(
+            job_id="2120332",
+            title="Cold Calling and texting for a Roofing Company",
+            age="Posted 12 mins ago",
+            budget="Fixed Price | $250-$500",
+            quotes="No Quotes Received",
+            body="Cold calling homeowners. Must have dialers - software and CRM to import leads. Outbound Sales Telemarketing.",
+        )
+        self.assertEqual(GuruPublicSource(now=NOW).discover(raw), [])
+
     def test_under_budget_gets_exact_zero_spend_bid(self):
         raw = card(
             job_id="4", title="WordPress bug fix", age="Posted 3 hrs ago", budget="Fixed Price | Under $250", quotes="4 Quotes Received"
