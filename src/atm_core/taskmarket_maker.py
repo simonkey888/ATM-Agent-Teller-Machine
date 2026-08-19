@@ -63,6 +63,37 @@ def _extract_json(text: str) -> dict[str, Any]:
     raise TaskmarketMakerError("zero-cost model returned no JSON object")
 
 
+def _checker_verdict(text: str) -> tuple[str, tuple[str, ...]]:
+    """Parse a small checker verdict conservatively without requiring JSON compliance."""
+    raw = text.replace("\r\n", "\n").strip()
+    try:
+        obj = _extract_json(raw)
+    except TaskmarketMakerError:
+        obj = None
+    if isinstance(obj, dict):
+        status = str(obj.get("status") or "").strip().upper()
+        notes_raw = obj.get("notes") or []
+        notes = tuple(str(item)[:500] for item in notes_raw[:12]) if isinstance(notes_raw, list) else ()
+        if status in {"PASS", "FAIL"}:
+            return status, notes
+
+    verdicts: list[str] = []
+    notes: list[str] = []
+    for line in raw.splitlines():
+        clean = line.strip().strip("`*_#>- ").strip()
+        match = re.fullmatch(r"(?:ATM_CHECK\s*=\s*|STATUS\s*[:=]\s*)?(PASS|FAIL)[.!]?", clean, re.I)
+        if match:
+            verdicts.append(match.group(1).upper())
+        elif clean and len(notes) < 12:
+            notes.append(clean[:500])
+    unique = set(verdicts)
+    if unique == {"PASS"}:
+        return "PASS", tuple(notes)
+    if "FAIL" in unique:
+        return "FAIL", tuple(notes)
+    raise TaskmarketMakerError("zero-cost checker returned no unambiguous PASS/FAIL verdict")
+
+
 def _deterministic_filename(task_description: str) -> str:
     low = task_description.lower()
     if "index.html" in low:
@@ -94,8 +125,6 @@ def _extract_artifact_content(text: str, task_description: str) -> str:
 
     filename = _deterministic_filename(task_description)
     if filename == "index.html":
-        # Prefer a normal HTML code fence, then recover a complete HTML document
-        # even when the free model adds prose around it.
         fences = re.findall(r"```(?:html)?\s*\n?([\s\S]*?)```", raw, re.I)
         for candidate in fences:
             low = candidate.lower()
@@ -109,8 +138,6 @@ def _extract_artifact_content(text: str, task_description: str) -> str:
             return raw[start : close + len("</html>")].strip()
         raise TaskmarketMakerError("maker response does not contain a complete HTML document")
 
-    # Markdown deliverables are text-native. Prefer a markdown fence; otherwise
-    # accept the full response only when it already looks like a substantive report.
     fences = re.findall(r"```(?:markdown|md)?\s*\n?([\s\S]*?)```", raw, re.I)
     for candidate in fences:
         if len(candidate.split()) >= 200:
@@ -239,12 +266,10 @@ ARTIFACT_DATA:
 {content[:70000]}
 ---
 
-Return exactly JSON: {{"status":"PASS" or "FAIL","notes":["short factual reasons"]}}.
+First line MUST be exactly ATM_CHECK=PASS or ATM_CHECK=FAIL.
+After that, add at most 8 short factual notes. Do not output source code, secrets, or JSON.
 """
-        checked = _extract_json(self._generate(checker_prompt, model=model, max_output_tokens=2048))
-        status = str(checked.get("status") or "").upper()
-        notes_raw = checked.get("notes") or []
-        notes = tuple(str(x)[:500] for x in notes_raw[:12]) if isinstance(notes_raw, list) else ()
+        status, notes = _checker_verdict(self._generate(checker_prompt, model=model, max_output_tokens=2048))
         if status != "PASS":
             raise TaskmarketMakerError("independent zero-cost checker failed: " + " | ".join(notes))
         return MakerResult(artifact, filename, True, notes, model)
