@@ -66,7 +66,7 @@ class GuruPublicSourceTests(unittest.TestCase):
         )
         row = GuruPublicSource(now=NOW).discover(raw)[0]
         self.assertEqual(row.exact_bid, "USD 200 fixed")
-        self.assertEqual(row.budget_high, "2.5E+2")
+        self.assertEqual(row.budget_high, "250")
 
 
 class TelegramBoundaryTests(unittest.TestCase):
