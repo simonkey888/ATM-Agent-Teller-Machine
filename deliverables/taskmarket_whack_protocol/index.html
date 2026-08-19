@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Whack Protocol — Grid Triage</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#080b13;color:#f4f7ff;font-family:Inter,ui-sans-serif,system-ui,sans-serif;touch-action:none}canvas{display:block}#hud{position:fixed;inset:0;pointer-events:none;padding:14px;display:flex;flex-direction:column;justify-content:space-between;box-sizing:border-box}.top{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:7px}.chip{background:#0c1322dc;border:1px solid #31466d;border-radius:10px;padding:8px 10px;box-shadow:0 8px 30px #0007}.chip small{display:block;color:#8ea7d4;font-size:10px;letter-spacing:.12em}.chip b{font-size:18px}.protocol{align-self:center;margin-top:9px;background:#111d36e8;border:1px solid #4e70b7;border-radius:10px;padding:8px 14px;text-align:center;max-width:min(680px,92vw)}.protocol strong{color:#88b9ff;letter-spacing:.08em}.bottom{display:flex;gap:8px;align-items:flex-end;justify-content:space-between}.legend{background:#0b1220dd;border:1px solid #273b60;border-radius:10px;padding:9px;font-size:11px;line-height:1.45;max-width:520px}.legend span{white-space:nowrap;margin-right:9px}.focus{background:#0b1220dd;border:1px solid #273b60;border-radius:10px;padding:9px;text-align:right}.focus b{color:#a6f4ff}#message{position:fixed;left:50%;top:56%;transform:translate(-50%,-50%);font-weight:900;font-size:clamp(20px,4vw,44px);text-align:center;text-shadow:0 3px 18px #000;pointer-events:none;opacity:0;transition:opacity .12s}#overlay{position:fixed;inset:0;display:none;place-items:center;background:#050812dc;z-index:5}.card{width:min(520px,88vw);background:#0d1628;border:1px solid #48679f;border-radius:16px;padding:24px;text-align:center;box-shadow:0 20px 80px #000}.card h1{margin:0 0 8px}.card p{color:#aab9d2}.card button{border:0;border-radius:10px;background:#72a7ff;color:#07101f;font-weight:900;padding:12px 20px;font-size:16px;cursor:pointer}.keys{position:fixed;left:50%;bottom:9px;transform:translateX(-50%);font-size:10px;color:#6f82a4;pointer-events:none}@media(max-width:650px){.top{grid-template-columns:repeat(3,1fr)}.chip:nth-child(4),.chip:nth-child(5){margin-top:0}.legend{font-size:9px;max-width:62vw}.protocol{font-size:12px}.keys{display:none}}
+</style>
+</head>
+<body>
+<div id="hud">
+  <div><div class="top">
+    <div class="chip"><small>SCORE</small><b id="score">0</b></div>
+    <div class="chip"><small>HIGH</small><b id="high">0</b></div>
+    <div class="chip"><small>COMBO</small><b id="combo">0×</b></div>
+    <div class="chip"><small>INTEGRITY</small><b id="lives">♥♥♥♥</b></div>
+    <div class="chip"><small>TIME</small><b id="time">60.0</b></div>
+  </div><div class="protocol"><strong id="protocolName">PROTOCOL: STANDARD</strong><div id="protocolRule">Strike HIT nodes. Spare SAFE nodes.</div></div></div>
+  <div class="bottom"><div class="legend"><span>● HIT +100</span><span>⬡ SAFE spare it</span><span>◷ WAIT until armed</span><span>①② ORDER</span><span>★ JACKPOT</span></div><div class="focus">FOCUS <b id="focus">◆◇</b><br><small>SPACE / double tap background</small></div></div>
+</div>
+<div id="message"></div>
+<div class="keys">Keyboard: 1–9 = grid · SPACE = Focus · R = restart</div>
+<div id="overlay"><div class="card"><h1>Protocol Breached</h1><p id="summary"></p><button id="restart">RESTART RUN</button></div></div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.min.js"></script>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const scene=new THREE.Scene(); scene.background=new THREE.Color(0x070a11); scene.fog=new THREE.FogExp2(0x070a11,.035);
+const camera=new THREE.PerspectiveCamera(48,innerWidth/innerHeight,.1,100); camera.position.set(0,8.8,11.5); camera.lookAt(0,0,0);
+const renderer=new THREE.WebGLRenderer({antialias:true}); renderer.setPixelRatio(Math.min(devicePixelRatio,2)); renderer.setSize(innerWidth,innerHeight); renderer.shadowMap.enabled=true; document.body.prepend(renderer.domElement);
+scene.add(new THREE.HemisphereLight(0x90b8ff,0x10131d,1.5)); const key=new THREE.DirectionalLight(0xffffff,2.5); key.position.set(3,8,5); key.castShadow=true; scene.add(key);
+const floor=new THREE.Mesh(new THREE.CylinderGeometry(7.2,7.2,.35,48),new THREE.MeshStandardMaterial({color:0x101725,metalness:.65,roughness:.35})); floor.position.y=-.45; floor.receiveShadow=true; scene.add(floor);
+const ring=new THREE.Mesh(new THREE.TorusGeometry(6.3,.055,8,96),new THREE.MeshBasicMaterial({color:0x395f9c})); ring.rotation.x=Math.PI/2; ring.position.y=-.25; scene.add(ring);
+const grid=new THREE.Group(); scene.add(grid);
+const ray=new THREE.Raycaster(), pointer=new THREE.Vector2();
+const targetMeshes=[]; const cells=[];
+const positions=[[-3,0,-3],[0,0,-3],[3,0,-3],[-3,0,0],[0,0,0],[3,0,0],[-3,0,3],[0,0,3],[3,0,3]];
+const TYPES={
+ hit:{color:0x37d68a,label:'HIT',icon:'●'}, safe:{color:0x58a7ff,label:'SAFE',icon:'⬡'}, wait:{color:0xffa24a,label:'WAIT',icon:'◷'}, order1:{color:0xb77cff,label:'1',icon:'①'}, order2:{color:0xd26cff,label:'2',icon:'②'}, jackpot:{color:0xffd452,label:'JACK',icon:'★'}
+};
+function labelTexture(text,color){const c=document.createElement('canvas');c.width=256;c.height=128;const x=c.getContext('2d');x.clearRect(0,0,256,128);x.fillStyle='rgba(5,9,16,.82)';x.roundRect(8,8,240,112,22);x.fill();x.strokeStyle=color;x.lineWidth=5;x.stroke();x.fillStyle='#fff';x.font='900 48px system-ui';x.textAlign='center';x.textBaseline='middle';x.fillText(text,128,67);const t=new THREE.CanvasTexture(c);t.colorSpace=THREE.SRGBColorSpace;return t}
+positions.forEach((p,i)=>{const base=new THREE.Mesh(new THREE.CylinderGeometry(1.05,1.14,.32,24),new THREE.MeshStandardMaterial({color:0x18243a,metalness:.7,roughness:.25}));base.position.set(...p);base.receiveShadow=true;grid.add(base);const pad=new THREE.Mesh(new THREE.CylinderGeometry(.78,.88,.34,24),new THREE.MeshStandardMaterial({color:0x263a5b,emissive:0x000000,metalness:.35,roughness:.3}));pad.position.set(p[0],.32,p[2]);pad.castShadow=true;pad.userData.cell=i;grid.add(pad);targetMeshes.push(pad);const sprite=new THREE.Sprite(new THREE.SpriteMaterial({map:labelTexture(String(i+1),'#45658f'),transparent:true,depthTest:false}));sprite.position.set(p[0],1.35,p[2]);sprite.scale.set(1.35,.68,1);sprite.visible=false;grid.add(sprite);cells.push({mesh:pad,sprite,type:null,active:false,armed:false,born:0,expires:0,order:0})});
+let score=0,combo=0,lives=4,timeLeft=60,focus=2,focusEarn=0,wave=0,lastSpawn=0,run=true,slowUntil=0,orderProgress=0,protocolIndex=0,messageTimer=0,lastTap=0;
+const protocols=[
+ {name:'STANDARD',rule:'Strike HIT nodes. Spare SAFE nodes.',mode:'standard'},
+ {name:'SHIELD WATCH',rule:'SAFE nodes are protected. One bad strike costs integrity.',mode:'shield'},
+ {name:'DELAYED ARM',rule:'Orange WAIT nodes become HIT only after the pulse.',mode:'delay'},
+ {name:'ORDER LOCK',rule:'Resolve ① before ②. Out-of-order strikes breach protocol.',mode:'order'}
+];
+function updateHUD(){ $('score').textContent=score; $('combo').textContent=combo+'×'; $('lives').textContent='♥'.repeat(Math.max(0,lives))+'·'.repeat(Math.max(0,4-lives)); $('time').textContent=Math.max(0,timeLeft).toFixed(1); $('focus').textContent='◆'.repeat(focus)+'◇'.repeat(2-focus); const h=Number(localStorage.getItem('whackProtocolHigh')||0);$('high').textContent=Math.max(h,score)}
+function say(text,color='#fff'){const el=$('message');el.textContent=text;el.style.color=color;el.style.opacity=1;clearTimeout(messageTimer);messageTimer=setTimeout(()=>el.style.opacity=0,440)}
+function setProtocol(index){protocolIndex=index%protocols.length;const p=protocols[protocolIndex];$('protocolName').textContent='PROTOCOL: '+p.name;$('protocolRule').textContent=p.rule;say(p.name,'#91baff');orderProgress=0;clearTargets()}
+function setCell(c,type,duration=1500){const def=TYPES[type];c.type=type;c.active=true;c.armed=type!=='wait';c.born=performance.now();c.expires=c.born+duration;c.mesh.material.color.setHex(def.color);c.mesh.material.emissive.setHex(def.color);c.mesh.material.emissiveIntensity=.24;c.mesh.scale.set(1,1.3,1);c.sprite.material.map.dispose();c.sprite.material.map=labelTexture(def.icon+' '+def.label,'#'+def.color.toString(16).padStart(6,'0'));c.sprite.visible=true;c.sprite.material.needsUpdate=true}
+function clearCell(c){c.active=false;c.type=null;c.armed=false;c.mesh.material.color.setHex(0x263a5b);c.mesh.material.emissive.setHex(0);c.mesh.scale.set(1,1,1);c.sprite.visible=false}
+function clearTargets(){cells.forEach(clearCell)}
+function randomFree(exclude=[]){const free=cells.map((c,i)=>!c.active&&!exclude.includes(i)?i:-1).filter(i=>i>=0);return free.length?free[Math.floor(Math.random()*free.length)]:-1}
+function spawn(){if(!run)return;wave++; if(wave>1&&wave%5===1)setProtocol(protocolIndex+1);const p=protocols[protocolIndex];const duration=Math.max(780,1550-wave*16);if(p.mode==='order'&&Math.random()<.62){clearTargets();const a=randomFree(),b=randomFree([a]);if(a>=0&&b>=0){setCell(cells[a],'order1',duration+600);cells[a].order=1;setCell(cells[b],'order2',duration+600);cells[b].order=2}return}const i=randomFree();if(i<0)return;let type='hit';const r=Math.random();if(p.mode==='delay'&&r<.45)type='wait';else if(r<.20)type='safe';else if(combo>=5&&r>.86)type='jackpot';setCell(cells[i],type,duration);if(type==='safe'&&Math.random()<.35){const j=randomFree([i]);if(j>=0)setCell(cells[j],'hit',duration)}if(type==='wait'){setTimeout(()=>{const c=cells[i];if(run&&c.active&&c.type==='wait'){c.armed=true;c.type='hit';c.mesh.material.color.setHex(TYPES.hit.color);c.mesh.material.emissive.setHex(TYPES.hit.color);c.sprite.material.map.dispose();c.sprite.material.map=labelTexture('● HIT','#37d68a');c.sprite.material.needsUpdate=true;say('ARMED','#61e8ad')}},620)} }
+function reward(points,label){combo++;const bonus=1+Math.min(combo,12)*.08;score+=Math.round(points*bonus);focusEarn++;if(focusEarn>=7&&focus<2){focus++;focusEarn=0;say('FOCUS EARNED','#9defff')}else say(label||'CLEAN','#8effbd')}
+function penalty(label){combo=0;lives--;score=Math.max(0,score-80);say(label||'BREACH','#ff6f86');if(lives<=0)endRun('Integrity exhausted')}
+function strike(index){if(!run)return;const c=cells[index];if(!c||!c.active){penalty('EMPTY STRIKE');return}if(c.type==='safe'){clearCell(c);penalty('PROTECTED');return}if(c.type==='wait'&&!c.armed){clearCell(c);penalty('TOO EARLY');return}if(c.type==='order2'&&orderProgress!==1){clearCell(c);penalty('WRONG ORDER');return}if(c.type==='order1'){orderProgress=1;clearCell(c);reward(120,'ORDER 1 ✓');return}if(c.type==='order2'){orderProgress=0;clearCell(c);reward(220,'ORDER COMPLETE');cells.filter(x=>x.active&&(x.type==='order1'||x.type==='order2')).forEach(clearCell);return}if(c.type==='jackpot'){clearCell(c);reward(420,'JACKPOT');return}clearCell(c);reward(100,'CLEAN HIT')}
+function useFocus(){if(!run||focus<=0)return;focus--;slowUntil=performance.now()+3500;say('FOCUS: TIME DILATED','#a6f4ff');updateHUD()}
+function endRun(reason){if(!run)return;run=false;clearTargets();const old=Number(localStorage.getItem('whackProtocolHigh')||0);if(score>old)localStorage.setItem('whackProtocolHigh',String(score));$('summary').textContent=`${reason}. Score ${score}. Best ${Math.max(score,old)}. Wave ${wave}.`;$('overlay').style.display='grid';updateHUD()}
+function reset(){score=0;combo=0;lives=4;timeLeft=60;focus=2;focusEarn=0;wave=0;lastSpawn=performance.now()-1200;run=true;slowUntil=0;orderProgress=0;protocolIndex=0;clearTargets();setProtocol(0);$('overlay').style.display='none';updateHUD()}
+renderer.domElement.addEventListener('pointerdown',e=>{const rect=renderer.domElement.getBoundingClientRect();pointer.x=((e.clientX-rect.left)/rect.width)*2-1;pointer.y=-((e.clientY-rect.top)/rect.height)*2+1;ray.setFromCamera(pointer,camera);const hit=ray.intersectObjects(targetMeshes,false)[0];if(hit)strike(hit.object.userData.cell);else{const now=performance.now();if(now-lastTap<320)useFocus();lastTap=now}});
+addEventListener('keydown',e=>{if(e.code==='Space'){e.preventDefault();useFocus();return}if(e.key.toLowerCase()==='r'){reset();return}const n=Number(e.key);if(n>=1&&n<=9)strike(n-1)});$('restart').addEventListener('click',reset);
+addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});
+let prev=performance.now();function animate(now){requestAnimationFrame(animate);const dt=Math.min(.05,(now-prev)/1000);prev=now;if(run){timeLeft-=dt;if(timeLeft<=0)endRun('Cycle complete');const slowed=now<slowUntil;const interval=Math.max(520,1100-wave*8)*(slowed?1.9:1);if(now-lastSpawn>interval){lastSpawn=now;spawn()}for(const c of cells){if(c.active&&now>c.expires){if(c.type==='hit'||c.type==='jackpot'||c.type==='order1'||c.type==='order2'){clearCell(c);combo=0;say('MISSED','#ffad70')}else clearCell(c)}if(c.active)c.mesh.position.y=.32+Math.sin(now*.006+c.mesh.userData.cell)*.08}updateHUD()}grid.rotation.y=Math.sin(now*.00013)*.06;renderer.render(scene,camera)}
+reset();requestAnimationFrame(animate);
+</script>
+</body>
+</html>
