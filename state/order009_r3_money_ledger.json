@@ -1,0 +1,25 @@
+{
+  "schema": "ATM_ORDER009_R3_MONEY_LEDGER_V1",
+  "canonical_taskmarket_wallet": "0xd89Ef03bC3105C538529AC2657Bc4488c94ff4E4",
+  "robotics": {
+    "task_id": "0x4c887264d5ede369de6e98c6214e6c03ee8708af108305ecafa0341a675e6147",
+    "submission_id": "aa7240f5-a8c8-4e61-81eb-f85fad405de2",
+    "artifact_sha256": "50443350d31df9a44a5e4880d3885b897493a5b8f900b8a93875447bcde5da0f",
+    "submitted_net_usdc": "9.25",
+    "accepted_net_usdc": "0",
+    "settled_usdc": "0",
+    "withdrawable_usdc": "0"
+  },
+  "totals": {
+    "opportunity_value_usdc": "9.25",
+    "submitted_net_usdc": "9.25",
+    "accepted_net_usdc": "0",
+    "settled_usdc": "0",
+    "withdrawable_usdc": "0"
+  },
+  "non_usdc": {
+    "dreams_estimated": "UNKNOWN"
+  },
+  "outgoing_spend_usd": "0",
+  "truth_rule": "Nominal reward and submission do not imply acceptance, settlement, or withdrawability."
+}
