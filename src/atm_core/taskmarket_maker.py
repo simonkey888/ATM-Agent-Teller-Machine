@@ -3,12 +3,11 @@ from __future__ import annotations
 import json
 import os
 import re
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .maker_router import MakerRouteUnavailable, ZeroCostMakerRouter
 from .zero_cost_model import ZeroCostModelGate
 
 DEFAULT_GEMMA_MODEL = "gemma-4-31b-it"
@@ -32,6 +31,7 @@ class MakerResult:
     checker_passed: bool
     checker_notes: tuple[str, ...]
     model: str
+    provider: str = "gemini-api"
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -117,12 +117,20 @@ def _extract_artifact_content(text: str, task_description: str) -> str:
 
 
 class TaskmarketZeroCostMaker:
-    """Supervisor-mediated Gemma maker/checker for bounded single-file tasks."""
+    """Supervisor-mediated bounded maker/checker with fail-closed zero-cost routing."""
 
-    def __init__(self, *, model: str = DEFAULT_GEMMA_MODEL, gate: ZeroCostModelGate | None = None):
+    def __init__(
+        self,
+        *,
+        model: str = DEFAULT_GEMMA_MODEL,
+        gate: ZeroCostModelGate | None = None,
+        router: ZeroCostMakerRouter | None = None,
+    ):
         self.preferred_model = model
         self.model = model
+        self.provider = "UNSELECTED"
         self.gate = gate or ZeroCostModelGate()
+        self.router = router or ZeroCostMakerRouter(gate=self.gate)
 
     @staticmethod
     def supported_task(description: str) -> bool:
@@ -133,61 +141,26 @@ class TaskmarketZeroCostMaker:
         )
         return single_html or single_markdown
 
-    def _select_free_model(self) -> str:
-        ordered = [self.preferred_model, *FREE_GEMMA_FAILOVER]
-        seen: set[str] = set()
-        failures: list[str] = []
-        for model in ordered:
-            if model in seen:
-                continue
-            seen.add(model)
-            if model not in ZeroCostModelGate.GEMMA4_ALLOWLIST:
-                failures.append(f"{model}:NOT_FREE_ALLOWLISTED")
-                continue
-            health = self.gate.google_health(model)
-            if health.usable and health.zero_cost_tier_proven:
-                self.model = model
-                return model
-            failures.append(f"{model}:{health.reason}")
-        raise TaskmarketMakerUnavailable("no usable free Gemma route: " + " | ".join(failures))
-
     def _generate(
         self,
         prompt: str,
         *,
-        model: str,
         max_output_tokens: int,
         structured_json: bool = False,
     ) -> str:
-        key = os.getenv("GEMINI_API_KEY", "").strip()
-        if not key:
-            raise TaskmarketMakerUnavailable("GEMINI_API_KEY is unavailable to supervisor")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-        generation_config: dict[str, Any] = {"temperature": 0.2, "maxOutputTokens": max_output_tokens}
-        if structured_json:
-            generation_config["responseMimeType"] = "application/json"
-        body = json.dumps(
-            {
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": generation_config,
-            }
-        ).encode("utf-8")
-        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=300) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            raise TaskmarketMakerUnavailable(f"free Gemma inference HTTP {exc.code}") from exc
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise TaskmarketMakerUnavailable(f"free Gemma inference unavailable: {type(exc).__name__}") from exc
-        candidates = payload.get("candidates") or [] if isinstance(payload, dict) else []
-        if not candidates:
-            raise TaskmarketMakerError("free Gemma inference returned no candidate")
-        parts = ((candidates[0].get("content") or {}).get("parts") or []) if isinstance(candidates[0], dict) else []
-        text = "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict)).strip()
-        if not text:
-            raise TaskmarketMakerError("free Gemma inference returned empty candidate text")
-        return text
+            generated = self.router.generate(
+                prompt,
+                preferred_gemini_model=self.preferred_model,
+                gemini_failovers=FREE_GEMMA_FAILOVER,
+                max_output_tokens=max_output_tokens,
+                structured_json=structured_json,
+            )
+        except MakerRouteUnavailable as exc:
+            raise TaskmarketMakerUnavailable(str(exc)) from exc
+        self.model = generated.route.model
+        self.provider = generated.route.provider
+        return generated.text
 
     @staticmethod
     def _static_check(path: Path, task_description: str) -> None:
@@ -207,7 +180,6 @@ class TaskmarketZeroCostMaker:
     def make(self, *, task_id: str, task_description: str, workspace: Path) -> MakerResult:
         if not self.supported_task(task_description):
             raise TaskmarketMakerUnavailable("task is outside bounded single-file zero-cost maker capability")
-        model = self._select_free_model()
         workspace = workspace.resolve()
         workspace.mkdir(parents=True, exist_ok=True)
         filename = _deterministic_filename(task_description)
@@ -224,8 +196,10 @@ Produce the COMPLETE final file `{filename}`. No placeholders, mockup, explanati
 Return ONLY the complete file content. For HTML you MAY use one normal ```html code fence; for Markdown you MAY use one normal ```markdown fence. Do not truncate the file.
 """
         content = _extract_artifact_content(
-            self._generate(maker_prompt, model=model, max_output_tokens=16384), task_description
+            self._generate(maker_prompt, max_output_tokens=16384), task_description
         )
+        maker_model = self.model
+        maker_provider = self.provider
         artifact = workspace / filename
         artifact.write_text(content, encoding="utf-8", newline="\n")
         self._static_check(artifact, task_description)
@@ -249,11 +223,11 @@ Return exactly one JSON object with this schema and no other keys:
 {{"status":"PASS" or "FAIL","notes":["at most 8 short factual reasons"]}}
 """
         checked = _extract_json(
-            self._generate(checker_prompt, model=model, max_output_tokens=2048, structured_json=True)
+            self._generate(checker_prompt, max_output_tokens=2048, structured_json=True)
         )
         status = str(checked.get("status") or "").strip().upper()
         notes_raw = checked.get("notes") or []
         notes = tuple(str(item)[:500] for item in notes_raw[:8]) if isinstance(notes_raw, list) else ()
         if status != "PASS":
             raise TaskmarketMakerError("independent zero-cost checker failed: " + " | ".join(notes))
-        return MakerResult(artifact, filename, True, notes, model)
+        return MakerResult(artifact, filename, True, notes, maker_model, maker_provider)
