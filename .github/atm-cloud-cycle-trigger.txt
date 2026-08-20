@@ -1,4 +1,4 @@
-gate=order016-diablique-final-exact-head
+gate=order016-diablique-final-terminal
 order=ORDER-016
-reason=event-swarm-doctor-gap-forge-provider-flywheel-cash-mode-final-proof
-requested_utc=2026-08-20T19:29:00Z
+reason=final-code-live-proof-security-cash-mode-exact-head
+requested_utc=2026-08-20T19:32:00Z
