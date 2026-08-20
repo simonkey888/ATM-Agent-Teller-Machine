@@ -1,4 +1,4 @@
 gate=order014-cash-mode-live-refresh
 order=ORDER-014
 reason=cash-canon-continuous-scan
-requested_utc=2026-08-20T13:15:00Z
+requested_utc=2026-08-20T13:18:00Z
