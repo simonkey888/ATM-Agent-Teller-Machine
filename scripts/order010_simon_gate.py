@@ -6,11 +6,18 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from atm_core.simon_gate import GuruPublicSource, SimonGateError, TelegramBot, notification_text
+from atm_core.simon_gate import (
+    GuruPublicSource,
+    SimonGateError,
+    TelegramBot,
+    notification_due,
+    notification_fingerprint,
+    notification_text,
+)
 
 
 RECEIPT = Path("order010-simon-gate-receipt.json")
@@ -135,15 +142,55 @@ def main() -> int:
         print("OUTGOING_SPEND_USD=0")
         return 0
 
-    receipt["qualified_count"] = len(leads)
+    receipt["discovery_lead_count"] = len(leads)
     if not leads:
+        receipt["qualified_count"] = 0
         receipt["state"] = "NO_CURRENT_QUALIFIED_LEAD"
         RECEIPT.write_text(json.dumps(receipt, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         print("SIMON_GATE_STATE=NO_CURRENT_QUALIFIED_LEAD")
         print("OUTGOING_SPEND_USD=0")
         return 0
 
-    selected = leads[0]
+    # AUD #5356057214: the list page is only a hint. Every candidate must be
+    # rebuilt from its current individual page before it can reach Telegram.
+    # Guru's observed ID-verification path currently costs USD 4.95, so the
+    # onboarding predicate intentionally fails closed under ZERO_SPEND.
+    qualified = []
+    rejection_counts: dict[str, int] = {}
+    for lead in leads[:10]:
+        try:
+            refreshed, gate = source.refetch_individual(
+                lead,
+                platform_onboarding_compatible=False,
+            )
+        except Exception as exc:
+            reason = "INDIVIDUAL_REFETCH_" + type(exc).__name__.upper()
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+            continue
+        for reason in gate.rejection_reasons:
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+        if refreshed is not None and gate.executable:
+            qualified.append(refreshed)
+    receipt.update({
+        "qualified_count": len(qualified),
+        "individual_object_authority": True,
+        "rejection_counts": dict(sorted(rejection_counts.items())),
+        "guru_public_discovery": "ALLOWED",
+        "guru_mutation": "BLOCKED_PAID_VERIFICATION",
+        "guru_owner_onboarding": "DO_NOT_REQUEST",
+        "guru_idv_cost_usd": "4.95",
+        "telegram_state": "WITHHELD_NO_ZERO_COST_QUALIFIED_JOB",
+    })
+    if not qualified:
+        receipt["state"] = "READ_ONLY_SEARCHING"
+        RECEIPT.write_text(json.dumps(receipt, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        print("SIMON_GATE_STATE=READ_ONLY_SEARCHING")
+        print("TELEGRAM_STATE=WITHHELD_NO_ZERO_COST_QUALIFIED_JOB")
+        print("QUALIFIED_COUNT=0")
+        print("OUTGOING_SPEND_USD=0")
+        return 0
+
+    selected = qualified[0]
     receipt["selected"] = selected.public_dict()
     receipt["state"] = "PROPOSAL_READY"
 
@@ -178,7 +225,6 @@ def main() -> int:
         variable_result = _repo_variable("ATM_TELEGRAM_CHAT_ID", str(chat_id))
         receipt["chat_id_repository_variable"] = variable_result
         receipt["chat_id_persist"] = "REPOSITORY_VARIABLE" if variable_result in {"CREATED", "UPDATED"} else "SANITIZED_ISSUE_STATE"
-        bot.send(chat_id, "ATM SG2 paired. Credentialless public lead radar is active. No platform password, cookie, OTP or payment credential is requested by ATM.")
     else:
         receipt["chat_id_persist"] = "DURABLE_STATE_REUSED"
 
@@ -187,26 +233,32 @@ def main() -> int:
         receipt["latest_owner_action"] = owner_action
 
     prior_activated = "GURU" in [str(x).upper() for x in (prior.get("activated_platforms") or [])]
-    activated = _truthy(os.getenv("ATM_GURU_ACTIVATED")) or prior_activated or bool(owner_action and owner_action.upper().startswith("ACTIVATED GURU"))
-    if owner_action and owner_action.upper().startswith("ACTIVATED GURU"):
-        receipt["guru_activation_repository_variable"] = _repo_variable("ATM_GURU_ACTIVATED", "true")
-        activated = True
+    activated = _truthy(os.getenv("ATM_GURU_ACTIVATED")) or prior_activated
     receipt["activated_platforms"] = ["GURU"] if activated else []
 
     if owner_action and owner_action.upper().startswith(("POSTULÉ", "POSTULE")):
         receipt["owner_application_state"] = "OWNER_APPLIED"
         receipt["state"] = "OWNER_APPLIED_DISCOVERY_CONTINUES"
 
-    prior_selected = prior.get("selected") if isinstance(prior.get("selected"), dict) else {}
-    prior_notified = str(prior_selected.get("source_id") or "") if prior.get("telegram_state") in {"NOTIFIED_SIMON", "DEDUPED_ALREADY_NOTIFIED"} else ""
-    last_notified = os.getenv("SIMON_GATE_LAST_NOTIFIED_ID", "").strip() or prior_notified
-    should_notify = last_notified != selected.source_id or newly_paired
+    required_action = "OPEN_EXACT_JOB_AND_SUBMIT_PREPARED_PROPOSAL"
+    prior_fingerprint = str(prior.get("notification_fingerprint") or "") or None
+    try:
+        prior_notified_at = datetime.fromisoformat(str(prior.get("notified_at") or "").replace("Z", "+00:00"))
+    except ValueError:
+        prior_notified_at = None
+    should_notify = notification_due(
+        selected,
+        required_action,
+        prior_fingerprint=prior_fingerprint,
+        prior_notified_at=prior_notified_at,
+        now=datetime.now(timezone.utc),
+        reminder_ttl=timedelta(hours=24),
+    )
     if should_notify:
         message_id = bot.send(chat_id, notification_text(selected, activated=activated))
         receipt["telegram_message_id"] = message_id
-        variable_result = _repo_variable("SIMON_GATE_LAST_NOTIFIED_ID", selected.source_id)
-        receipt["last_notified_repository_variable"] = variable_result
-        receipt["last_notified_persist"] = "REPOSITORY_VARIABLE" if variable_result in {"CREATED", "UPDATED"} else "SANITIZED_ISSUE_STATE"
+        receipt["notification_fingerprint"] = notification_fingerprint(selected, required_action)
+        receipt["notified_at"] = datetime.now(timezone.utc).isoformat()
         receipt["telegram_state"] = "NOTIFIED_SIMON"
         receipt["state"] = "NOTIFIED_SIMON"
     else:

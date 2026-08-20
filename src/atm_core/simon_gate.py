@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import re
 import urllib.parse
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterable
@@ -63,6 +64,25 @@ class SimonGateLead:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class HumanGateQualification:
+    current_object: bool
+    owner_eligible: bool
+    work_class_supported: bool
+    no_prohibited_outreach: bool
+    no_required_paid_tooling: bool
+    owner_action_cost_usd: str
+    current_budget_verified: bool
+    current_competition_verified: bool
+    payment_risk_explicit: bool
+    platform_onboarding_compatible: bool
+    rejection_reasons: tuple[str, ...]
+
+    @property
+    def executable(self) -> bool:
+        return not self.rejection_reasons
+
+
 class GuruPublicSource:
     """Credentialless public Guru radar.
 
@@ -101,6 +121,108 @@ class GuruPublicSource:
         )
         with urllib.request.urlopen(req, timeout=20) as response:
             return response.read().decode("utf-8", errors="replace")
+
+    def fetch_job(self, url: str) -> str:
+        if not re.fullmatch(r"https://www\.guru\.com/jobs/[A-Za-z0-9_%./?=&+-]+", url):
+            raise SimonGateError("GURU_INDIVIDUAL_URL_INVALID")
+        req = urllib.request.Request(
+            url,
+            headers={"Accept": "text/html", "Cache-Control": "no-cache", "User-Agent": "ATM-SimonGate-Individual/2.0"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as response:
+            return response.read().decode("utf-8", errors="replace")
+
+    def refetch_individual(
+        self,
+        lead: SimonGateLead,
+        *,
+        raw_html: str | None = None,
+        platform_onboarding_compatible: bool = False,
+    ) -> tuple[SimonGateLead | None, HumanGateQualification]:
+        """Rebuild mutation-critical fields from the current individual job page.
+
+        Aggregate/list values are only discovery hints. Unknown critical predicates
+        fail closed and never become a Telegram human gate.
+        """
+
+        raw = raw_html if raw_html is not None else self.fetch_job(lead.url)
+        block = _clean(raw)
+        reasons: list[str] = []
+        current = bool(block) and not re.search(
+            r"\b(job (?:is )?(?:closed|expired|removed)|no longer available|not accepting quotes)\b", block, re.I
+        )
+        if not current:
+            reasons.append("CURRENT_OBJECT_FALSE")
+
+        restricted = re.search(
+            r"\b(?:location\s*:\s*)?(?:must\s+reside\s+in\s+(?:the\s+)?(?:usa|u\.?s\.?a?\.?|united states)|"
+            r"u\.?s\.?a?\.?[- ]only|united states[- ]only|us[- ]only|must be based in (?:the )?(?:usa|us|united states)|w9 required)\b",
+            block,
+            re.I,
+        )
+        owner_eligible = current and restricted is None
+        if not owner_eligible:
+            reasons.append("OWNER_INELIGIBLE")
+
+        prohibited_outreach = self._reject_execution.search(block) is not None or re.search(
+            r"\b(homeowner outreach|unsolicited (?:calls?|texts?|messages?)|scrub(?:bing)? homeowner|cold outreach)\b",
+            block,
+            re.I,
+        ) is not None
+        if prohibited_outreach:
+            reasons.append("PROHIBITED_OUTREACH")
+        supported = any(term in block.lower() for term in self._fit_terms) and not prohibited_outreach
+        if not supported:
+            reasons.append("UNSUPPORTED_WORK_CLASS")
+
+        paid_tooling = re.search(
+            r"\b(pay to apply|application fee|paid bid|buy bids?|subscription required|must have (?:a )?(?:paid )?dialer|"
+            r"paid (?:software|tooling)|verification fee|credit card verification)\b",
+            block,
+            re.I,
+        ) is not None
+        if paid_tooling:
+            reasons.append("REQUIRED_PAID_TOOLING")
+
+        low, high, currency, exact_bid = self._parse_budget(block)
+        budget_verified = low is not None and high is not None and bool(exact_bid)
+        if not budget_verified:
+            reasons.append("CURRENT_BUDGET_UNKNOWN")
+        competition = self._parse_competition(block)
+        competition_verified = competition != 999
+        if not competition_verified:
+            reasons.append("CURRENT_COMPETITION_UNKNOWN")
+
+        payment_risk = "GURU_SAFEPAY_AVAILABLE_NOT_FUNDED_UNTIL_AGREEMENT"
+        if not platform_onboarding_compatible:
+            reasons.append("PAID_ONBOARDING_INCOMPATIBLE")
+
+        refreshed = None
+        if current and budget_verified and competition_verified:
+            refreshed = replace(
+                lead,
+                budget_low=_plain(low),
+                budget_high=_plain(high),
+                currency=currency,
+                exact_bid=exact_bid,
+                competition=competition,
+                payment_risk=payment_risk,
+                description=self._description(block, lead.title)[:700],
+            )
+        qualification = HumanGateQualification(
+            current_object=current,
+            owner_eligible=owner_eligible,
+            work_class_supported=supported,
+            no_prohibited_outreach=not prohibited_outreach,
+            no_required_paid_tooling=not paid_tooling,
+            owner_action_cost_usd="0" if not paid_tooling and platform_onboarding_compatible else "UNKNOWN",
+            current_budget_verified=budget_verified,
+            current_competition_verified=competition_verified,
+            payment_risk_explicit=True,
+            platform_onboarding_compatible=platform_onboarding_compatible,
+            rejection_reasons=tuple(sorted(set(reasons))),
+        )
+        return refreshed, qualification
 
     def discover(self, raw_html: str | None = None) -> list[SimonGateLead]:
         raw = raw_html if raw_html is not None else self.fetch()
@@ -303,23 +425,56 @@ class TelegramBot:
         return int(result.get("message_id") or 0)
 
 
+def notification_fingerprint(lead: SimonGateLead, required_action: str) -> str:
+    payload = {
+        "platform": lead.platform,
+        "external_id": lead.source_id,
+        "required_action": required_action,
+        "budget": [lead.currency, lead.budget_low, lead.budget_high],
+        "competition": lead.competition,
+        "payment_risk": lead.payment_risk,
+        "url": lead.url,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def notification_due(
+    lead: SimonGateLead,
+    required_action: str,
+    *,
+    prior_fingerprint: str | None,
+    prior_notified_at: datetime | None,
+    now: datetime | None = None,
+    reminder_ttl: timedelta = timedelta(hours=24),
+) -> bool:
+    """Suppress unchanged alerts by (platform, external id, owner action).
+
+    A material budget/competition/payment/action change alters the fingerprint.
+    An unchanged alert is allowed only after the bounded reminder TTL.
+    """
+
+    current = notification_fingerprint(lead, required_action)
+    if not prior_fingerprint or current != prior_fingerprint:
+        return True
+    if prior_notified_at is None:
+        return False
+    observed = (now or _utcnow()).astimezone(timezone.utc)
+    return observed - prior_notified_at.astimezone(timezone.utc) >= reminder_ttl
+
+
 def notification_text(lead: SimonGateLead, *, activated: bool = False) -> str:
+    if not activated:
+        raise SimonGateError("PAID_ONBOARDING_PROMPT_BLOCKED")
     age = f"{lead.age_minutes} min" if lead.age_minutes < 120 else f"{lead.age_minutes // 60} h"
-    activation = "" if activated else (
-        "🔐 ACTIVATE GURU\n"
-        "Reason: real current paid lead found / account required to quote\n"
-        f"Signup: {GuruPublicSource.signup_url}\n"
-        f"Lead: {lead.url}\n"
-        "Action: create/verify the account if needed; never send ATM a password, cookie, OTP or payment credential.\n\n"
-    )
     return (
-        activation
-        + "ATM SG2 — PROPOSAL_READY\n"
-        + f"Platform: {lead.platform}\n"
-        + f"Lead: {lead.title}\n"
-        + f"URL: {lead.url}\n"
-        + f"Age: {age}\n"
+        "HUMAN GATE NOW\n"
+        + f"{lead.platform} — {lead.title}\n"
         + f"Budget: {lead.currency} {lead.budget_low}–{lead.budget_high}\n"
+        + f"Fresh: {age}\n"
+        + "ATM fit: qualified digital deliverable\n"
+        + "Action: open this exact job and submit the prepared proposal\n"
+        + "Cost to owner: USD 0\n"
+        + f"{lead.url}\n"
         + f"Exact bid: {lead.exact_bid}\n"
         + f"Competition: {lead.competition} quotes\n"
         + f"Payment risk: {lead.payment_risk}\n\n"

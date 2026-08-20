@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
-from atm_core.simon_gate import GuruPublicSource, SimonGateError, TelegramBot, notification_text
+from atm_core.simon_gate import (
+    GuruPublicSource,
+    SimonGateError,
+    TelegramBot,
+    notification_due,
+    notification_fingerprint,
+    notification_text,
+)
 
 
 NOW = datetime(2026, 8, 19, 21, 30, tzinfo=timezone.utc)
@@ -79,6 +87,65 @@ class GuruPublicSourceTests(unittest.TestCase):
         self.assertEqual(row.exact_bid, "USD 200 fixed")
         self.assertEqual(row.budget_high, "250")
 
+    def test_individual_object_us_only_overrides_list_hint(self):
+        lead = GuruPublicSource(now=NOW).discover(card(
+            job_id="2120335", title="Remote Data Entry Clerk", age="Posted 1 hr ago",
+            budget="Hourly|$35 - $45", quotes="No Quotes Received"
+        ))[0]
+        page = """<main><h1>Remote Data Entry Clerk</h1><p>Posted 1 hr ago</p>
+        <p>Hourly | $35 - $45</p><p>3 Quotes Received</p>
+        <p>Python data entry. Location: Must reside in the USA.</p></main>"""
+        refreshed, gate = GuruPublicSource(now=NOW).refetch_individual(
+            lead, raw_html=page, platform_onboarding_compatible=True
+        )
+        self.assertIsNotNone(refreshed)
+        self.assertFalse(gate.owner_eligible)
+        self.assertIn("OWNER_INELIGIBLE", gate.rejection_reasons)
+        self.assertFalse(gate.executable)
+
+    def test_individual_object_rejects_cold_outreach_and_paid_tooling(self):
+        lead = GuruPublicSource(now=NOW).discover(card(
+            job_id="2120332", title="Python Automation", age="Posted 1 hr ago",
+            budget="Fixed Price | $250-$500", quotes="No Quotes Received"
+        ))[0]
+        page = """<main><p>Posted 1 hr ago</p><p>Fixed Price | $300-$600</p>
+        <p>2 Quotes Received</p><p>Scrubbing homeowner lists, cold calling and texting.
+        Must have a paid dialer software and CRM.</p></main>"""
+        refreshed, gate = GuruPublicSource(now=NOW).refetch_individual(
+            lead, raw_html=page, platform_onboarding_compatible=True
+        )
+        self.assertEqual(refreshed.budget_low, "300")
+        self.assertEqual(refreshed.budget_high, "600")
+        self.assertIn("PROHIBITED_OUTREACH", gate.rejection_reasons)
+        self.assertIn("REQUIRED_PAID_TOOLING", gate.rejection_reasons)
+
+    def test_individual_budget_and_competition_are_authoritative(self):
+        lead = GuruPublicSource(now=NOW).discover(card(
+            job_id="88", title="Python Automation", age="Posted 1 hr ago",
+            budget="Fixed Price | $250-$500", quotes="No Quotes Received"
+        ))[0]
+        page = """<main><p>Posted 1 hr ago</p><p>Fixed Price | $800-$1200</p>
+        <p>17 Quotes Received</p><p>Python automation and API integration.</p></main>"""
+        refreshed, gate = GuruPublicSource(now=NOW).refetch_individual(
+            lead, raw_html=page, platform_onboarding_compatible=True
+        )
+        self.assertTrue(gate.executable)
+        self.assertEqual((refreshed.budget_low, refreshed.budget_high), ("800", "1200"))
+        self.assertEqual(refreshed.competition, 17)
+
+    def test_paid_guru_onboarding_fails_closed(self):
+        lead = GuruPublicSource(now=NOW).discover(card(
+            job_id="89", title="Python Automation", age="Posted 1 hr ago",
+            budget="Fixed Price | $250-$500", quotes="4 Quotes Received"
+        ))[0]
+        page = """<main><p>Posted 1 hr ago</p><p>Fixed Price | $250-$500</p>
+        <p>4 Quotes Received</p><p>Python automation.</p></main>"""
+        _, gate = GuruPublicSource(now=NOW).refetch_individual(
+            lead, raw_html=page, platform_onboarding_compatible=False
+        )
+        self.assertIn("PAID_ONBOARDING_INCOMPATIBLE", gate.rejection_reasons)
+        self.assertEqual(gate.owner_action_cost_usd, "UNKNOWN")
+
 
 class TelegramBoundaryTests(unittest.TestCase):
     def test_pair_requires_exactly_one_private_start(self):
@@ -92,7 +159,7 @@ class TelegramBoundaryTests(unittest.TestCase):
         with self.assertRaises(SimonGateError):
             TelegramBot.pair_chat_id(updates + [{"update_id": 3, "message": {"text": "/start", "chat": {"id": 456, "type": "private"}}}])
 
-    def test_owner_action_is_state_only_and_notification_has_no_secret_request(self):
+    def test_notification_requires_already_zero_cost_compatible_platform(self):
         updates = [
             {"update_id": 4, "message": {"text": "ACTIVATED GURU", "chat": {"id": 123, "type": "private"}}},
             {"update_id": 5, "message": {"text": "POSTULÉ guru:2121001", "chat": {"id": 123, "type": "private"}}},
@@ -101,14 +168,38 @@ class TelegramBoundaryTests(unittest.TestCase):
         row = GuruPublicSource(now=NOW).discover(card(
             job_id="2121001", title="Remote Data Entry Clerk", age="Posted 1 hr ago", budget="Hourly|$35 - $45", quotes="No Quotes Received"
         ))[0]
-        message = notification_text(row, activated=False)
-        self.assertIn("🔐 ACTIVATE GURU", message)
+        with self.assertRaisesRegex(SimonGateError, "PAID_ONBOARDING_PROMPT_BLOCKED"):
+            notification_text(row, activated=False)
+        message = notification_text(row, activated=True)
+        self.assertIn("HUMAN GATE NOW", message)
+        self.assertIn("Cost to owner: USD 0", message)
         self.assertIn("Exact bid: USD 35/hr", message)
         self.assertIn("POSTULÉ guru:2121001", message)
         lowered = message.lower()
-        self.assertIn("never send atm a password", lowered)
+        self.assertNotIn("activate guru", lowered)
         self.assertNotIn("api_key=", lowered)
         self.assertNotIn("cookie=", lowered)
+
+    def test_notification_dedupe_suppresses_same_scan_and_allows_material_change(self):
+        row = GuruPublicSource(now=NOW).discover(card(
+            job_id="2121001", title="Python Automation", age="Posted 1 hr ago",
+            budget="Fixed Price | $250-$500", quotes="4 Quotes Received"
+        ))[0]
+        action = "OPEN_EXACT_JOB_AND_SUBMIT_PREPARED_PROPOSAL"
+        fingerprint = notification_fingerprint(row, action)
+        self.assertFalse(notification_due(
+            row, action, prior_fingerprint=fingerprint, prior_notified_at=NOW,
+            now=NOW + timedelta(minutes=5)
+        ))
+        changed = replace(row, competition=5)
+        self.assertTrue(notification_due(
+            changed, action, prior_fingerprint=fingerprint, prior_notified_at=NOW,
+            now=NOW + timedelta(minutes=5)
+        ))
+        self.assertTrue(notification_due(
+            row, action, prior_fingerprint=fingerprint, prior_notified_at=NOW,
+            now=NOW + timedelta(hours=25)
+        ))
 
 
 if __name__ == "__main__":
