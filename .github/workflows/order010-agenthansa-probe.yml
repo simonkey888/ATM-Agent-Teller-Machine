@@ -1,0 +1,94 @@
+name: ORDER-010 AgentHansa Auth Probe
+
+on:
+  push:
+    branches: [pivot/universal-money-radar-r1]
+    paths:
+      - '.github/workflows/order010-agenthansa-probe.yml'
+      - 'scripts/order010_agenthansa_probe.py'
+      - 'src/atm_core/work_conserving.py'
+      - 'src/atm_v2_oci.py'
+      - 'tests/test_work_conserving_runtime.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: order010-agenthansa-auth-probe
+  cancel-in-progress: true
+
+jobs:
+  authenticated-read-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      AGENTHANSA_API_KEY: ${{ secrets.AGENTHANSA_API_KEY }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - name: Exact-head credential boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -n "$AGENTHANSA_API_KEY"
+          echo 'ORDER010_AGENTHANSA_EXACT_HEAD=PASS'
+          echo 'AGENTHANSA_SECRET_PRESENT=YES'
+          echo 'OUTGOING_SPEND_USD=0'
+      - name: Runtime contract tests
+        env:
+          PYTHONPATH: src:.
+        run: python -m unittest tests.test_work_conserving_runtime -v
+      - name: Authenticated AgentHansa reads only
+        id: probe
+        env:
+          PYTHONPATH: src:.
+        run: python scripts/order010_agenthansa_probe.py
+      - name: Publish sanitized durable receipt
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROBE_OUTCOME: ${{ steps.probe.outcome }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          from pathlib import Path
+
+          path=Path('order010-agenthansa-probe-receipt.json')
+          if path.exists():
+              receipt=json.loads(path.read_text(encoding='utf-8'))
+          else:
+              receipt={
+                  'schema':'ATM_ORDER010_AGENTHANSA_AUTH_PROBE_V1',
+                  'auth_probe':'FAIL_CLOSED',
+                  'probe_outcome':os.environ.get('PROBE_OUTCOME','unknown'),
+                  'duplicate_registration_performed':False,
+                  'claim_performed':False,
+                  'submission_performed':False,
+                  'payout_request_performed':False,
+                  'outgoing_spend_usd':'0',
+                  'global_block':False,
+              }
+          receipt['head']=os.environ['GITHUB_SHA']
+          receipt['run_id']=os.environ['GITHUB_RUN_ID']
+          receipt['run_attempt']=os.environ['GITHUB_RUN_ATTEMPT']
+          receipt['run_url']=f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          body='ORDER-010 AGENTHANSA AUTH PROBE RECEIPT\n```json\n'+json.dumps(receipt,sort_keys=True)+'\n```'
+          req=urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/issues/38/comments",
+              data=json.dumps({'body':body}).encode(), method='POST',
+              headers={'Authorization':f"Bearer {os.environ['GITHUB_TOKEN']}",'Accept':'application/vnd.github+json','Content-Type':'application/json','User-Agent':'ATM-Order010-AgentHansa/1.0'},
+          )
+          with urllib.request.urlopen(req,timeout=20) as response:
+              posted=json.loads(response.read().decode())
+          print('ORDER010_AGENTHANSA_RECEIPT='+str(posted.get('html_url')))
+          print('AGENTHANSA_AUTH_PROBE='+str(receipt.get('auth_probe','FAIL_CLOSED')))
+          print('OUTGOING_SPEND_USD=0')
+          PY
