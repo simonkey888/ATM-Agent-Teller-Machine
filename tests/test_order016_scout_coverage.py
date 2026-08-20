@@ -24,9 +24,10 @@ class FakeBoard:
 class Order016ScoutCoverageTests(unittest.TestCase):
     def test_runtime_scans_every_configured_source_in_bounded_batches(self):
         seen = []
+        batch_sizes = []
 
-        def fake_scan(self, adapters, discovery_order, minimum):
-            self.assertLessEqual(len(discovery_order), 3)
+        def fake_scan(_fabric, adapters, discovery_order, minimum):
+            batch_sizes.append(len(discovery_order))
             seen.extend(discovery_order)
             return ()
 
@@ -36,6 +37,8 @@ class Order016ScoutCoverageTests(unittest.TestCase):
             with patch("atm_core.swarm_runtime.ScoutFabric.scan", new=fake_scan):
                 result = current_pass_swarm_shadow(config, adapters, FakeBoard())
         self.assertEqual(seen, list(adapters))
+        self.assertEqual(batch_sizes, [3, 3, 2])
+        self.assertTrue(all(size <= 3 for size in batch_sizes))
         self.assertEqual(result["stats"]["scout_fabric"]["configured_sources_scanned"], 8)
         self.assertEqual(result["stats"]["scout_fabric"]["bounded_concurrency"], 3)
 
