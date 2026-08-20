@@ -1,4 +1,4 @@
-gate=order016-final-refresh
+gate=order016-final-full-scout
 order=ORDER-016
-reason=final-head-verification
-requested_utc=2026-08-20T19:43:00Z
+reason=all-sources-bounded-scout-final-head
+requested_utc=2026-08-20T19:47:00Z
