@@ -4,6 +4,7 @@ import base64
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -197,8 +198,9 @@ class TaskmarketCliLaneTests(unittest.TestCase):
             self.assertTrue(result["materialized"])
             self.assertEqual(result["wallet"].lower(), CANONICAL_TASKMARKET_WALLET.lower())
             self.assertNotIn("TASKMARKET_KEYSTORE_B64", env)
-            self.assertEqual(lane.keystore_path.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(lane.keystore_path.parent.stat().st_mode & 0o777, 0o700)
+            if os.name != "nt":
+                self.assertEqual(lane.keystore_path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(lane.keystore_path.parent.stat().st_mode & 0o777, 0o700)
             self.assertEqual(runner.calls, [["address"]])
 
     def test_supervisor_rejects_conflicting_wallet_and_still_removes_transport(self):
