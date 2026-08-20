@@ -70,7 +70,20 @@ jobs:
       - name: R3A mandatory adversarial controls
         env:
           PYTHONPATH: src
-        run: python -m unittest tests.test_taskmarket_autopilot tests.test_taskmarket_autopilot_negatives -v
+        run: |
+          python -m unittest tests.test_taskmarket_autopilot tests.test_taskmarket_autopilot_negatives -v
+          python -m unittest tests.test_maker_fallback_gate -v
+      - name: AUD maker fallback credential gate
+        env:
+          PYTHONPATH: src
+        run: |
+          set -Eeuo pipefail
+          test -n "$GEMINI_API_KEY"
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          ! grep -qE '^  models: read$' .github/workflows/ci.yml
+          ! grep -q 'GROQ_API_KEY' src/atm_core/maker_router.py
+          ! grep -q 'CEREBRAS_API_KEY' src/atm_core/maker_router.py
+          python scripts/order010_maker_fallback_gate.py
       - name: Fresh runtime-selected zero-cost WORK/CHECK shadow
         env:
           PYTHONPATH: src
