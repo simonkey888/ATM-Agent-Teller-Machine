@@ -6,7 +6,7 @@ import unittest
 import urllib.error
 from unittest.mock import patch
 
-from atm_core.maker_router import ZeroCostMakerRouter
+from atm_core.maker_router import MakerRouteError, ZeroCostMakerRouter
 from atm_core.zero_cost_model import ProviderHealth
 
 
@@ -74,6 +74,93 @@ class MakerFallbackGateTests(unittest.TestCase):
         self.assertEqual(result.route.provider, "opencode-free")
         self.assertEqual(result.route.billed_usd, "0")
         self.assertEqual(len(calls), 2)
+
+    def test_semantic_non_json_fails_over_to_next_ready_route(self):
+        calls = []
+        secrets = {
+            "GEMINI_API_KEY": "model-key-only",
+            "TASKMARKET_KEYSTORE_B64": "forbidden-keystore",
+            "TASKBOUNTY_API_KEY": "forbidden-taskbounty",
+            "MOLTJOBS_API_KEY": "forbidden-moltjobs",
+            "AGENTHANSA_API_KEY": "forbidden-agenthansa",
+        }
+
+        def opener(req, timeout=0):
+            del timeout
+            wire = "\n".join(
+                [req.full_url, str(dict(req.header_items())), (req.data or b"").decode("utf-8", errors="replace")]
+            )
+            calls.append(wire)
+            if "gemma-4-31b-it" in req.full_url:
+                return FakeResponse({"candidates": [{"content": {"parts": [{"text": "not-json"}]}}]})
+            return FakeResponse(
+                {"candidates": [{"content": {"parts": [{"text": '{"status":"PASS","notes":[]}'}]}}]}
+            )
+
+        def require_checker_json(text):
+            try:
+                obj = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise MakerRouteError("semantic checker JSON invalid") from exc
+            if obj != {"status": "PASS", "notes": []}:
+                raise MakerRouteError("semantic checker schema invalid")
+
+        router = ZeroCostMakerRouter(
+            gate=FakeGate(gemini_ready=True, second_gemini_ready=True, opencode_ready=False),
+            opener=opener,
+        )
+        with patch.dict(os.environ, secrets, clear=False):
+            result = router.generate(
+                "checker prompt contains no economic secret",
+                preferred_gemini_model="gemma-4-31b-it",
+                gemini_failovers=("gemma-4-26b-a4b-it",),
+                max_output_tokens=128,
+                structured_json=True,
+                semantic_validator=require_checker_json,
+            )
+        self.assertEqual(result.route.model, "gemma-4-26b-a4b-it")
+        self.assertEqual(json.loads(result.text), {"status": "PASS", "notes": []})
+        self.assertEqual(len(calls), 2)
+        wire = "\n".join(calls)
+        for key, value in secrets.items():
+            if key == "GEMINI_API_KEY":
+                continue
+            self.assertNotIn(value, wire, key)
+
+    def test_one_same_route_repair_then_next_route_with_global_bound(self):
+        calls = []
+
+        def opener(req, timeout=0):
+            del timeout
+            calls.append(req.full_url)
+            if len(calls) <= 2:
+                return FakeResponse({"candidates": [{"content": {"parts": [{"text": "bad"}]}}]})
+            return FakeResponse({"candidates": [{"content": {"parts": [{"text": '{"status":"PASS","notes":[]}'}]}}]})
+
+        def validator(text):
+            try:
+                obj = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise MakerRouteError("semantic") from exc
+            if obj.get("status") != "PASS":
+                raise MakerRouteError("semantic")
+
+        router = ZeroCostMakerRouter(
+            gate=FakeGate(gemini_ready=True, second_gemini_ready=True, opencode_ready=True),
+            opener=opener,
+        )
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "g", "OPENCODE_API_KEY": "o"}, clear=False):
+            result = router.generate(
+                "first",
+                preferred_gemini_model="gemma-4-31b-it",
+                gemini_failovers=("gemma-4-26b-a4b-it",),
+                max_output_tokens=128,
+                structured_json=True,
+                semantic_validator=validator,
+                repair_prompt="repair once",
+            )
+        self.assertEqual(result.route.model, "gemma-4-26b-a4b-it")
+        self.assertEqual(len(calls), 3)
 
     def test_router_attempts_at_most_three_ready_routes(self):
         calls = []
