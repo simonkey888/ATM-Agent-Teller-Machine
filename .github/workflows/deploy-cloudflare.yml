@@ -37,6 +37,9 @@ jobs:
         env:
           PYTHONPATH: src
         run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ffmpeg
+          ffmpeg -version | head -1
           python scripts/install_obscura_pinned.py --target /tmp/atm-obscura-v0.2.0
           test "$(/tmp/atm-obscura-v0.2.0/obscura --version)" = "obscura 0.2.0"
           python scripts/order015_browser_benchmark.py --obscura /tmp/atm-obscura-v0.2.0/obscura
