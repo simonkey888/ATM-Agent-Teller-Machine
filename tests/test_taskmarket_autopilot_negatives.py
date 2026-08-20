@@ -117,6 +117,40 @@ class MandatoryR3ANegativeControls(unittest.TestCase):
             self.assertEqual(lines[1], "")
             self.assertTrue(secret.exists())
 
+    def test_worker_environment_is_allowlist_not_supervisor_clone(self):
+        with tempfile.TemporaryDirectory() as td, patch.dict(
+            os.environ,
+            {
+                "GITHUB_TOKEN": "must-not-cross",
+                "OCI_CLI_AUTH": "must-not-cross",
+                "GOOGLE_API_KEY": "required-provider-only",
+            },
+            clear=False,
+        ):
+            env = atm.sanitized_worker_env(Path(td), "GOOGLE_API_KEY")
+            self.assertNotIn("GITHUB_TOKEN", env)
+            self.assertNotIn("OCI_CLI_AUTH", env)
+            self.assertEqual(env["GOOGLE_API_KEY"], "required-provider-only")
+
+    def test_oci_worker_refuses_execution_without_mount_sandbox(self):
+        with tempfile.TemporaryDirectory() as td, patch.dict(
+            os.environ, {"ATM_HOST_CLASS": "OCI"}, clear=False
+        ), patch("shutil.which", return_value=None):
+            root = Path(td)
+            with self.assertRaisesRegex(RuntimeError, "refusing unsandboxed"):
+                atm.sandboxed_worker_command(["hermes"], root, root / "home")
+
+    def test_oci_worker_mount_namespace_hides_authority_and_signer_roots(self):
+        with tempfile.TemporaryDirectory() as td, patch.dict(
+            os.environ, {"ATM_HOST_CLASS": "OCI"}, clear=False
+        ), patch("shutil.which", return_value="/usr/bin/bwrap"):
+            root = Path(td)
+            cmd = atm.sandboxed_worker_command(["/var/lib/atm/.local/bin/hermes"], root, root / "home")
+            joined = " ".join(cmd)
+            self.assertIn("--unshare-all", cmd)
+            self.assertIn("--tmpfs /etc/atm", joined)
+            self.assertNotIn("--bind /var/lib/atm /var/lib/atm", joined)
+
     def test_settlement_fields_without_base_usdc_receipt_are_not_money(self):
         task = {
             "awards": [

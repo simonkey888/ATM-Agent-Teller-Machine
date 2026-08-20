@@ -95,7 +95,7 @@ class ATMTests(unittest.TestCase):
             self.assertEqual(status["realized_withdrawable_usd"], "0")
             self.assertEqual(status["validated_payment_proof_count"], 0)
 
-    def test_workprotocol_accepts_live_style_explicit_escrow_evidence(self):
+    def test_workprotocol_rejects_unbound_platform_escrow_signal(self):
         adapter = WorkProtocolOpportunityAdapter(http=FakeHttp())
         opp = atm.Opportunity(
             canonical_opportunity_id="workprotocol:job",
@@ -104,17 +104,18 @@ class ATMTests(unittest.TestCase):
             upstream_status="open",
             reward_gross=Decimal("75"),
         )
-        adapter.verify_funding(
-            opp,
-            {
-                "job": {
-                    "paymentAmount": "75.00",
-                    "status": "open",
-                    "escrowFunded": True,
-                    "escrowTxHash": "0xd8d4f28b42bb4dfda74aa38c143f8c7483bf9eb82082397489cb07d3acb68ecd",
-                }
-            },
-        )
+        with self.assertRaisesRegex(Exception, "escrow contract"):
+            adapter.verify_funding(
+                opp,
+                {
+                    "job": {
+                        "paymentAmount": "75.00",
+                        "status": "open",
+                        "escrowFunded": True,
+                        "escrowTxHash": "0xd8d4f28b42bb4dfda74aa38c143f8c7483bf9eb82082397489cb07d3acb68ecd",
+                    }
+                },
+            )
 
     def test_workprotocol_registration_is_automatic_when_public_payout_is_configured(self):
         with tempfile.TemporaryDirectory() as td:

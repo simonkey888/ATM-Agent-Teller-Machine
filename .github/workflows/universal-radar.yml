@@ -54,8 +54,10 @@ jobs:
           assert cfg['specialist_worker_integrations'] == 'DEFERRED'
           worker=Path('worker/src/index.js').read_text()
           assert 'ATM UNIVERSAL RADAR SNAPSHOT' in worker
-          assert 'PAID' in worker and 'authoritative_paid' in worker
-          print('UNIVERSAL_RADAR_ZERO_SPEND=PASS')
+          assert 'ATM_UNIVERSAL_RADAR_PUBLIC_V3' in worker
+          assert 'EXECUTABLE' in worker and 'REJECTED_SLOP' in worker
+          assert '9.25' not in worker
+          print('UNIVERSAL_RADAR_ZERO_SPEND_CANON=PASS')
           PY
       - name: Live read-only platform contract probe
         env:

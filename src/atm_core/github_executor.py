@@ -96,8 +96,8 @@ class BoundedGitHubExecutor:
     def preclaim_guard(opportunity: UniversalOpportunity) -> None:
         if opportunity.source != "github-direct" and opportunity.executor_class.value != "GITHUB_BOUNDED_PATCH":
             raise GitHubExecutionGuardError("not a bounded GitHub patch opportunity")
-        if opportunity.disposition.value == "REJECT":
-            raise GitHubExecutionGuardError("rejected opportunity cannot reach GitHub write path")
+        if opportunity.operational_state.value != "EXECUTABLE":
+            raise GitHubExecutionGuardError("only canonical EXECUTABLE work can reach GitHub write path")
         if opportunity.execution_cost_usd != 0:
             raise GitHubExecutionGuardError("outgoing spend prohibited")
         if opportunity.funding_status.value != "VERIFIED":

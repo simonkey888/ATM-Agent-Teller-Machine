@@ -286,6 +286,10 @@ class ValidatedPaymentProof(BaseModel):
 
     @property
     def dedupe_key(self) -> str:
+        if self.chain_id is not None and self.event_index_or_unique_id.lower().startswith("log:"):
+            return "|".join(
+                [str(self.chain_id), self.payout_id_or_txid.lower(), self.event_index_or_unique_id.lower()]
+            )
         return "|".join(
             [
                 self.platform.lower(),

@@ -7,7 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -218,6 +218,57 @@ class PaymentLedger:
     def realized_withdrawable_usd(self) -> Decimal:
         return sum((p.normalized_usd for p in self.load()), Decimal("0"))
 
+    def payout_destinations(self, canonical_wallet: str, *, now: datetime | None = None) -> list[dict[str, str]]:
+        return payout_destination_earnings(self.load(), canonical_wallet, now=now)
+
+
+def payout_destination_earnings(
+    proofs: list[ValidatedPaymentProof], canonical_wallet: str, *, now: datetime | None = None
+) -> list[dict[str, str]]:
+    """Attribute validated receipts once to public payout destinations without bank inference."""
+    observed_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    cutoff = observed_at - timedelta(days=30)
+    wallet = canonical_wallet.lower()
+    seen: set[str] = set()
+    terminal: list[ValidatedPaymentProof] = []
+    pending: list[ValidatedPaymentProof] = []
+    for proof in proofs:
+        if proof.dedupe_key in seen:
+            continue
+        seen.add(proof.dedupe_key)
+        if (
+            proof.recipient_public_identifier.lower() != wallet
+            or proof.chain_id != BASE_CHAIN_ID
+            or str(proof.token_address or "").lower() != BASE_USDC
+        ):
+            continue
+        if proof.status in COUNTABLE_PAYMENT_STATUSES:
+            terminal.append(proof)
+        else:
+            pending.append(proof)
+    lifetime = sum((p.normalized_usd for p in terminal), Decimal("0"))
+    last_30d = sum((p.normalized_usd for p in terminal if p.timestamp >= cutoff), Decimal("0"))
+    pending_value = sum((p.normalized_usd for p in pending), Decimal("0")) if pending else None
+    short_wallet = wallet[:6] + "…" + wallet[-4:]
+    return [
+        {
+            "display_label": "MetaMask / Base USDC",
+            "rail": f"Base USDC · {short_wallet}",
+            "last_30d_usd": str(last_30d),
+            "lifetime_usd": str(lifetime),
+            "pending_or_unsettled_usd": str(pending_value) if pending_value is not None else "UNKNOWN",
+            "verification_state": "VERIFIED_DESTINATION",
+        },
+        {
+            "display_label": "Santander",
+            "rail": "BANK_PAYOUT",
+            "last_30d_usd": "UNKNOWN",
+            "lifetime_usd": "UNKNOWN",
+            "pending_or_unsettled_usd": "UNKNOWN",
+            "verification_state": "NOT_CONNECTED",
+        },
+    ]
+
 
 class PaymentAdapter(ABC):
     platform: str
@@ -273,7 +324,8 @@ class WorkProtocolPaymentAdapter(PaymentAdapter):
             currency = str(payment.get("currency") or job.get("paymentCurrency") or "USDC").upper()
             if currency != "USDC":
                 raise PaymentValidationError("WorkProtocol adapter currently counts only USDC Base settlement")
-            self.chain.verify_usdc_transfer(str(settlement_tx), expected_recipient, amount)
+            chain_evidence = self.chain.verify_usdc_transfer(str(settlement_tx), expected_recipient, amount)
+            transfer = min(chain_evidence["matching_transfers"], key=lambda row: int(row["log_index"]))
             ts_raw = payment.get("settledAt") or payment.get("releasedAt") or payment.get("updatedAt") or job.get("updatedAt")
             if not ts_raw:
                 raise PaymentValidationError("WorkProtocol payment missing settlement timestamp")
@@ -284,7 +336,7 @@ class WorkProtocolPaymentAdapter(PaymentAdapter):
                     source="platform_api+base_receipt",
                     platform=self.platform,
                     payout_id_or_txid=str(settlement_tx),
-                    event_index_or_unique_id=str(payment.get("id") or payment.get("eventIndex") or idx),
+                    event_index_or_unique_id=f"log:{transfer['log_index']}",
                     amount=amount,
                     currency=currency,
                     recipient=expected_recipient,
@@ -330,14 +382,15 @@ class TaskmarketPaymentAdapter(PaymentAdapter):
             if not settlement_tx or not settled_at or worker_payment_raw is None:
                 raise PaymentValidationError("Taskmarket award lacks canonical settlement fields")
             amount = Decimal(str(worker_payment_raw)) / Decimal(1_000_000)
-            self.chain.verify_usdc_transfer(settlement_tx, expected_recipient, amount)
+            chain_evidence = self.chain.verify_usdc_transfer(settlement_tx, expected_recipient, amount)
+            transfer = min(chain_evidence["matching_transfers"], key=lambda row: int(row["log_index"]))
             timestamp = datetime.fromisoformat(str(settled_at).replace("Z", "+00:00"))
             proofs.append(
                 build_validated_proof(
                     source="taskmarket_award+base_receipt",
                     platform=self.platform,
                     payout_id_or_txid=settlement_tx,
-                    event_index_or_unique_id=str(award.get("id") or award.get("rank") or idx),
+                    event_index_or_unique_id=f"log:{transfer['log_index']}",
                     amount=amount,
                     currency="USDC",
                     recipient=expected_recipient,

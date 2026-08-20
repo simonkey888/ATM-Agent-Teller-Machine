@@ -13,9 +13,11 @@ from pathlib import Path
 from typing import Any, Callable, MutableMapping
 
 from .payments import HttpJsonClient
+from .universal_radar import OperationalState, taskmarket_admission
 
 CANONICAL_TASKMARKET_WALLET = "0xd89Ef03bC3105C538529AC2657Bc4488c94ff4E4"
-TASKMARKET_PACKAGE = "@lucid-agents/taskmarket@latest"
+TASKMARKET_PACKAGE = "@lucid-agents/taskmarket@1.11.0"
+TASKMARKET_PACKAGE_INTEGRITY = "sha512-fZqaWpzcU5FftPMiZoA4guvAAgiNA4vbD7EVFtCKbQqofOfJhNRi84U3NY76tR5mg5//FcREZLtqy1G5V96fgQ=="
 TASKMARKET_PRODUCTION_API = "https://api.taskmarket.dev"
 
 
@@ -48,7 +50,28 @@ Runner = Callable[[list[str], Path, dict[str, str]], subprocess.CompletedProcess
 
 
 def _default_runner(args: list[str], home: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    cmd = ["npx", "-y", TASKMARKET_PACKAGE, *args]
+    integrity = subprocess.run(
+        ["npm", "view", TASKMARKET_PACKAGE, "dist.integrity", "--json"],
+        cwd=home,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=45,
+        encoding="utf-8",
+        errors="replace",
+    )
+    try:
+        observed_integrity = json.loads(integrity.stdout or "null")
+    except json.JSONDecodeError:
+        observed_integrity = None
+    if integrity.returncode != 0 or observed_integrity != TASKMARKET_PACKAGE_INTEGRITY:
+        return subprocess.CompletedProcess(
+            args=["npm", "view", TASKMARKET_PACKAGE, "dist.integrity"],
+            returncode=86,
+            stdout="",
+            stderr="TASKMARKET_CLI_INTEGRITY_MISMATCH",
+        )
+    cmd = ["npx", "-y", "--ignore-scripts", TASKMARKET_PACKAGE, *args]
     return subprocess.run(
         cmd,
         cwd=home,
@@ -173,9 +196,18 @@ class TaskmarketCliLane:
         return self.keystore_path.is_file()
 
     def _cli_env(self) -> dict[str, str]:
-        env = os.environ.copy()
-        env["HOME"] = str(self.signer_home)
-        env["USERPROFILE"] = str(self.signer_home)
+        allow = {
+            "PATH", "SYSTEMROOT", "WINDIR", "PATHEXT", "COMSPEC",
+            "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+            "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR",
+        }
+        env = {key: value for key, value in os.environ.items() if key in allow}
+        env.update({
+            "HOME": str(self.signer_home),
+            "USERPROFILE": str(self.signer_home),
+            "TASKMARKET_API_URL": TASKMARKET_PRODUCTION_API,
+            "npm_config_ignore_scripts": "true",
+        })
         return env
 
     def _run(self, args: list[str]) -> dict[str, Any]:
@@ -246,12 +278,22 @@ class TaskmarketCliLane:
         return action
 
     def assert_side_effect_gate(self, task: dict[str, Any]) -> None:
-        if str(task.get("status") or "").lower() != "open":
-            raise TaskmarketCliError("TaskMarket task is not open")
-        if task.get("submissionWindowOpen") is not True:
-            raise TaskmarketCliError("TaskMarket submission window is closed")
-        if task.get("stakeRequired") is not False:
-            raise TaskmarketCliError("TaskMarket task requires stake")
+        state, reasons = taskmarket_admission(
+            task,
+            canonical_wallet=self.canonical_wallet,
+            existing_submission=False,
+            signer_ready=True,
+        )
+        if state != OperationalState.EXECUTABLE:
+            if "PAID_ENTRY" in reasons:
+                raise TaskmarketCliError("TaskMarket submit requires outgoing payment")
+            if "STAKE_REQUIRED" in reasons:
+                raise TaskmarketCliError("TaskMarket task requires stake")
+            if "NO_CURRENT_WORKER_ACTION" in reasons:
+                raise TaskmarketCliError("exact worker submit pendingAction is unavailable")
+            if "IDENTITY_NOT_READY" in reasons:
+                raise TaskmarketCliError("worker submit pendingAction is not eligible for canonical wallet")
+            raise TaskmarketCliError("TaskMarket Canon rejected mutation: " + ",".join(reasons))
         mode = str(task.get("mode") or "bounty").lower()
         if mode != "bounty":
             raise TaskmarketCliError("TaskMarket autonomous lane currently permits bounty mode only")

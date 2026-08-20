@@ -14,7 +14,7 @@ from atm_core.models import Phase
 from atm_core.opportunities import external_state_hash
 from atm_core.radar_registry import build_canonical_registry
 from atm_core.swarm_runtime import current_pass_swarm_shadow
-from atm_core.universal_radar import RadarDisposition, UniversalRadar, load_snapshot, persist_snapshot
+from atm_core.universal_radar import OperationalState, RadarDisposition, UniversalRadar, load_snapshot, persist_snapshot
 
 
 RADAR_SNAPSHOT = Path(__file__).resolve().parents[1] / ".atm" / "universal-radar.json"
@@ -91,6 +91,8 @@ def _universal_swarm_shadow(config, adapters, board):
         snapshot = UniversalRadar(build_canonical_registry(), floor_usd=max(Decimal("5"), floor), per_source_timeout=10).scan()
         persist_snapshot(snapshot, RADAR_SNAPSHOT)
         for item in snapshot.opportunities:
+            if item.operational_state != OperationalState.EXECUTABLE:
+                continue
             payload = {
                 "canonical_opportunity_id": item.canonical_id,
                 "source": item.source,
@@ -115,6 +117,7 @@ def _universal_swarm_shadow(config, adapters, board):
                 "external_state_hash": item.source_state_hash,
                 "executor_class": item.executor_class.value,
                 "radar_disposition": item.disposition.value,
+                "operational_state": item.operational_state.value,
                 "withdrawal_path": item.withdrawal_path,
             }
             board.upsert_candidate(
@@ -156,6 +159,7 @@ def _public_radar_item(item):
         "agent_policy": item.agent_policy.value,
         "executor": item.executor_class.value,
         "disposition": item.disposition.value,
+        "operational_state": item.operational_state.value,
         "money_velocity": str(item.money_velocity_score),
         "human_gate": bool(item.human_gate),
         "rejection_reasons": item.rejection_reasons[:8],
@@ -197,9 +201,11 @@ def _fabric_build_status(core, state, ledger, targets, board, lease, control):
         status["radar"] = {
             "schema": radar.schema,
             "generated_at": radar.generated_at.isoformat(),
-            "opportunity_count": len(radar.opportunities),
-            "attack_now_count": sum(1 for item in radar.opportunities if item.disposition == RadarDisposition.ATTACK_NOW),
-            "opportunities": [_public_radar_item(item) for item in radar.opportunities[:80]],
+            "opportunity_count": sum(1 for item in radar.opportunities if item.operational_state == OperationalState.EXECUTABLE),
+            "attack_now_count": sum(1 for item in radar.opportunities if item.operational_state == OperationalState.EXECUTABLE),
+            "opportunities": [_public_radar_item(item) for item in radar.opportunities if item.operational_state == OperationalState.EXECUTABLE][:80],
+            "rejection_counts": radar.rejection_counts,
+            "canonical_duplicate_count": radar.canonical_duplicate_count,
         }
         status["platform_health"] = [row.model_dump(mode="json") for row in radar.platform_health]
     return status

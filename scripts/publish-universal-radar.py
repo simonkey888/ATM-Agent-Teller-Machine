@@ -10,7 +10,7 @@ from typing import Any
 
 from atm_core.order009_sources import RAIL_CAPABILITIES
 from atm_core.radar_registry import build_canonical_registry
-from atm_core.universal_radar import UniversalRadar
+from atm_core.universal_radar import OperationalState, SourceState, UniversalRadar
 
 MARKER = "ATM UNIVERSAL RADAR SNAPSHOT"
 DEFAULT_REPO = "simonkey888/ATM-Agent-Teller-Machine"
@@ -43,6 +43,7 @@ def safe_opp(item: Any) -> dict[str, Any]:
         "executor_health": getattr(item, "executor_health", "UNPROBED"),
         "freshness_state": getattr(item, "freshness_state", "UNKNOWN"),
         "disposition": item.disposition.value,
+        "operational_state": item.operational_state.value,
         "money_velocity": str(item.money_velocity_score),
         "payment_rail": str(item.payment_rail)[:120],
         "withdrawal_path": str(item.withdrawal_path)[:160],
@@ -56,17 +57,27 @@ def safe_opp(item: Any) -> dict[str, Any]:
 def build_payload(source_sha: str) -> dict[str, Any]:
     registry = build_canonical_registry()
     snapshot = UniversalRadar(registry, floor_usd=Decimal("5"), per_source_timeout=4).scan()
-    rows = sorted(snapshot.opportunities, key=lambda x: (x.money_velocity_score, x.payout_net), reverse=True)
+    executable = [x for x in snapshot.opportunities if x.operational_state == OperationalState.EXECUTABLE]
+    rows = sorted(executable, key=lambda x: (x.money_velocity_score, x.payout_net), reverse=True)
+    healthy = sum(1 for row in snapshot.platform_health if row.state == SourceState.HEALTHY)
+    slop_rejected = sum(1 for row in snapshot.opportunities if row.operational_state == OperationalState.REJECTED_SLOP)
     return {
-        "schema": "ATM_UNIVERSAL_RADAR_PUBLIC_V2",
+        "schema": "ATM_UNIVERSAL_RADAR_PUBLIC_V3",
         "source_sha": source_sha,
         "source_branch": "pivot/universal-money-radar-r1",
         "generated_at": snapshot.generated_at.isoformat(),
         "outgoing_spend_usd": "0",
         "source_count": len(registry.names),
         "radar_sources": registry.names,
-        "opportunity_count": len(snapshot.opportunities),
-        "attack_now_count": sum(1 for x in snapshot.opportunities if x.disposition.value == "ATTACK_NOW"),
+        "scanned_count": len(snapshot.opportunities),
+        "opportunity_count": len(executable),
+        "current_candidates": len(executable),
+        "executable_now": len(executable),
+        "attack_now_count": len(executable),
+        "healthy_source_count": healthy,
+        "slop_rejected_last_scan": slop_rejected,
+        "canonical_duplicate_count": snapshot.canonical_duplicate_count,
+        "rejection_counts": snapshot.rejection_counts,
         "opportunities": [safe_opp(x) for x in rows[:60]],
         "platform_health": [
             {
@@ -104,12 +115,18 @@ def request_json(method: str, url: str, token: str, body: dict[str, Any] | None 
 
 def publish(payload: dict[str, Any], *, repo: str, issue: int, token: str) -> str:
     api = f"https://api.github.com/repos/{repo}/issues/{issue}/comments"
-    comments = request_json("GET", api + "?per_page=100", token)
+    issue_data = request_json("GET", f"https://api.github.com/repos/{repo}/issues/{issue}", token)
+    comment_count = int(issue_data.get("comments") or 0) if isinstance(issue_data, dict) else 0
+    page = max(1, (comment_count + 99) // 100)
+    comments = request_json("GET", api + f"?per_page=100&page={page}", token)
     body = MARKER + "\n```json\n" + json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n```"
     target = None
     if isinstance(comments, list):
         for row in reversed(comments):
-            if isinstance(row, dict) and str(row.get("body") or "").startswith(MARKER):
+            login = str((row.get("user") or {}).get("login") or "") if isinstance(row, dict) else ""
+            association = str(row.get("author_association") or "") if isinstance(row, dict) else ""
+            trusted = login == "github-actions[bot]" or (login == "simonkey888" and association in {"OWNER", "MEMBER", "COLLABORATOR"})
+            if trusted and str(row.get("body") or "").startswith(MARKER):
                 target = row.get("url")
                 break
     if target:

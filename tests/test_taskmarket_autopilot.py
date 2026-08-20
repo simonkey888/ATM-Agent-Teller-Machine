@@ -42,7 +42,10 @@ def task_payload(*, payment=False, window=True, stake=False):
     return {
         "id": TASK_ID,
         "status": "open",
+        "phase": "active",
         "mode": "bounty",
+        "escrowTxHash": "0x" + "34" * 32,
+        "netReward": "5550000",
         "submissionWindowOpen": window,
         "stakeRequired": stake,
         "pendingActions": [

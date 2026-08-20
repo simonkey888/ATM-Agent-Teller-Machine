@@ -2,7 +2,7 @@ name: ATM Cloudflare Deploy
 
 on:
   push:
-    branches: [main, agent/atm-v1, pivot/universal-money-radar-r1]
+    branches: [pivot/universal-money-radar-r1]
   workflow_dispatch:
 
 permissions:
@@ -37,7 +37,7 @@ jobs:
         run: node --check worker/src/index.js
 
   deploy:
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/agent/atm-v1' || github.ref == 'refs/heads/pivot/universal-money-radar-r1')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/pivot/universal-money-radar-r1'
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 12
@@ -105,19 +105,38 @@ jobs:
                   money = json.loads(get("/api/money-board", attempt))
                   page = get("/", attempt)
                   radar = status.get("radar") or {}
+                  operational = status.get("operational_status") or {}
                   if radar.get("source_sha") != expected or opps.get("source_sha") != expected or platforms.get("source_sha") != expected:
                       raise RuntimeError(f"radar_sha={radar.get('source_sha')} opp_sha={opps.get('source_sha')}")
+                  if operational.get("code") not in {"ACTIVE", "SEARCH"} or operational.get("checks", {}).get("heartbeat_fresh") is not True:
+                      raise RuntimeError(f"operational_status={operational}")
                   if not isinstance(platforms.get("platforms"), list) or len(platforms["platforms"]) < 7:
                       raise RuntimeError("platform_health_not_material")
                   stages = money.get("stages") or {}
-                  expected_stages = {"opportunity_value", "submitted_net", "accepted_net", "settled_usdc", "withdrawable_usdc"}
+                  expected_stages = {"opportunity_value", "submitted_net", "accepted_net", "settled_usdc", "withdrawable_usdc", "realized_24h", "realized_30d"}
                   if set(stages) != expected_stages:
                       raise RuntimeError(f"money_stages_missing:{sorted(stages)}")
                   if stages.get("submitted_net") in (None,"UNKNOWN","0",0):
-                      raise RuntimeError("robotics_submitted_net_missing")
-                  for marker in ("ATM Universal Money Radar", "ATTACK NOW", "PAID", "PLATFORM HEALTH", "Radar source SHA", "Deployed Worker SHA", "SUBMITTED_NET", "SETTLED_USDC", "WITHDRAWABLE_USDC"):
+                      raise RuntimeError("order012_submitted_net_missing")
+                  destinations = status.get("payout_destinations") or []
+                  by_label = {str(row.get("display_label")): row for row in destinations if isinstance(row, dict)}
+                  if "MetaMask / Base USDC" not in by_label or by_label.get("Santander", {}).get("verification_state") != "NOT_CONNECTED":
+                      raise RuntimeError(f"payout_destination_truth_missing:{destinations}")
+                  if by_label["Santander"].get("lifetime_usd") not in {"UNKNOWN", "NO_VERIFIED_DATA"}:
+                      raise RuntimeError("santander_unverified_value_fabricated")
+                  rows = opps.get("opportunities") or []
+                  ids = [str(row.get("id")) for row in rows]
+                  if len(ids) != len(set(ids)):
+                      raise RuntimeError("canonical_duplicate_in_active_api")
+                  forbidden = {"FIXTURE", "MOCK", "SIGNAL_ONLY", "UNVERIFIED", "DEMO_ONLY", "SYNTHETIC", "STALE", "REJECTED_SLOP"}
+                  for row in rows:
+                      if row.get("operational_state") != "EXECUTABLE" or forbidden & {str(v).upper() for v in row.values() if isinstance(v, str)}:
+                          raise RuntimeError(f"non_executable_active_row:{row.get('id')}")
+                  for marker in ("ATM Universal Money Radar", "status-pill", "CURRENT WORK", "PAYOUT DESTINATIONS / EARNINGS", "MetaMask / Base USDC", "Santander", "NOT_CONNECTED", "EXECUTABLE OPPORTUNITIES", "SUBMITTED NET", "WITHDRAWABLE", "SLOP REJECTED"):
                       if marker not in page:
                           raise RuntimeError(f"ui_marker_missing:{marker}")
+                  if page.count('class="status-pill"') != 1 or "overflow-wrap:anywhere" not in page or "min-width:0" not in page:
+                      raise RuntimeError("dashboard_dom_responsive_contract_failed")
                   last = {
                       "health_sha": health.get("git_sha"), "radar_sha": radar.get("source_sha"),
                       "source_count": radar.get("source_count"), "opportunity_count": radar.get("opportunity_count"),

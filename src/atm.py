@@ -59,6 +59,7 @@ STATE_FILE = STATE_DIR / "state.json"
 PAYMENT_LEDGER_FILE = STATE_DIR / "validated-payment-proofs.jsonl"
 LOG_DIR = STATE_DIR / "logs"
 LOCK_FILE = STATE_DIR / "atm.lock"
+CANONICAL_PAYOUT_WALLET = "0xd89Ef03bC3105C538529AC2657Bc4488c94ff4E4"
 
 PROMPT_FILES = {
     Phase.WORK: "WORKER.md",
@@ -155,28 +156,18 @@ def agent_workspace(phase: Phase, state: RuntimeState) -> Path:
     return path
 
 
-def sanitized_worker_env(worker_home: Path | None = None) -> dict[str, str]:
-    """Strip signer/rail credentials and isolate child HOME from the supervisor signer."""
-    env = os.environ.copy()
-    protected_names = {
-        "WORKPROTOCOL_API_KEY",
-        "WORKPROTOCOL_AGENT_ID",
-        "TASKMARKET_PRIVATE_KEY",
-        "TASKMARKET_KEYSTORE_B64",
-        "PRIVATE_KEY",
-        "WALLET_PRIVATE_KEY",
-        "SEED_PHRASE",
-        "MNEMONIC",
+def sanitized_worker_env(worker_home: Path | None = None, provider_env: str | None = None) -> dict[str, str]:
+    """Build a secret-minimal child environment; never clone supervisor authority."""
+    allow = {
+        "PATH", "SYSTEMROOT", "WINDIR", "PATHEXT", "COMSPEC", "LANG", "LC_ALL", "TZ",
+        "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+        "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR",
     }
-    for key in list(env):
-        upper = key.upper()
-        if (
-            key in protected_names
-            or upper.startswith("ATM_SECRET_")
-            or upper.startswith("TASKMARKET_")
-            or upper.startswith("ATM_TASKMARKET_")
-        ):
-            env.pop(key, None)
+    env = {key: value for key, value in os.environ.items() if key in allow}
+    if provider_env and re.fullmatch(r"[A-Z][A-Z0-9_]{1,79}", provider_env):
+        value = os.getenv(provider_env)
+        if value:
+            env[provider_env] = value
     if worker_home is not None:
         worker_home.mkdir(parents=True, exist_ok=True)
         env["HOME"] = str(worker_home)
@@ -236,6 +227,35 @@ Return exactly one JSON object matching this shape and no extra keys:
 """
 
 
+def sandboxed_worker_command(cmd: list[str], workspace: Path, child_home: Path) -> list[str]:
+    """Hide controller, signer and authority paths from untrusted OCI workers."""
+    if os.getenv("ATM_HOST_CLASS", "").upper() != "OCI":
+        return cmd
+    bwrap = shutil.which("bwrap")
+    if not bwrap:
+        raise RuntimeError("OCI worker sandbox unavailable; refusing unsandboxed Hermes execution")
+    wrapped = [
+        bwrap,
+        "--die-with-parent", "--new-session", "--unshare-all", "--share-net",
+        "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+        "--ro-bind", "/usr", "/usr",
+    ]
+    for path in ("/bin", "/lib", "/lib64"):
+        if Path(path).exists():
+            wrapped += ["--ro-bind", path, path]
+    wrapped += [
+        "--ro-bind", "/etc", "/etc", "--tmpfs", "/etc/atm",
+        "--dir", "/var", "--dir", "/var/lib", "--dir", "/var/lib/atm",
+        "--ro-bind", "/var/lib/atm/.local", "/var/lib/atm/.local",
+        "--dir", "/home", "--bind", str(child_home), "/home/worker",
+        "--bind", str(workspace), "/work", "--chdir", "/work",
+        "--setenv", "HOME", "/home/worker", "--setenv", "USERPROFILE", "/home/worker",
+        "--",
+        *cmd,
+    ]
+    return wrapped
+
+
 def run_agent(phase: Phase, config: dict[str, Any], state: RuntimeState) -> AgentResult:
     hermes = shutil.which("hermes")
     if not hermes:
@@ -263,10 +283,11 @@ def run_agent(phase: Phase, config: dict[str, Any], state: RuntimeState) -> Agen
         try:
             workspace = agent_workspace(phase, state)
             child_home = workspace / ".isolated-home"
+            child_home.mkdir(parents=True, exist_ok=True)
             cp = subprocess.run(
-                cmd,
+                sandboxed_worker_command(cmd, workspace, child_home),
                 cwd=workspace,
-                env=sanitized_worker_env(child_home),
+                env=sanitized_worker_env(child_home, str(required_env) if required_env else None),
                 text=True,
                 capture_output=True,
                 timeout=timeout,
@@ -535,11 +556,6 @@ def phase_submit(config: dict[str, Any], state: RuntimeState, adapters: dict[str
     if opp.source == "taskmarket":
         if not opp.submission_id:
             raise OpportunityValidationError("Taskmarket submit lacks authoritative submission id")
-        if bool(result.get("duplicate")):
-            state.last_result = {"status": "SKIP_NO_DUPLICATE", "submission_id": opp.submission_id}
-            state.active_opportunity = None
-            state.phase = Phase.DISCOVER
-            return
         if result.get("manifestVerified") is not True or str(result.get("outgoingSpendUsd")) != "0":
             raise OpportunityValidationError("Taskmarket submission did not pass manifest/zero-spend verification")
         monitored = opp.model_copy(
@@ -556,7 +572,10 @@ def phase_submit(config: dict[str, Any], state: RuntimeState, adapters: dict[str
         if not any(row.submission_id == monitored.submission_id for row in state.in_flight):
             state.in_flight.append(monitored)
         state.active_opportunity = None
-        state.last_result = {"status": "SUBMITTED_NONBLOCKING", "submission_id": monitored.submission_id}
+        state.last_result = {
+            "status": "RECOVERED_IN_FLIGHT" if bool(result.get("duplicate")) else "SUBMITTED_NONBLOCKING",
+            "submission_id": monitored.submission_id,
+        }
         state.phase = Phase.DISCOVER
         return
 
@@ -693,6 +712,9 @@ def status_payload(state: RuntimeState, ledger: PaymentLedger) -> dict[str, Any]
     payload["realized_withdrawable_usd"] = str(ledger.realized_withdrawable_usd())
     payload["validated_payment_proof_count"] = len(ledger.load())
     payload["in_flight_count"] = len(state.in_flight)
+    payload["payout_destinations"] = ledger.payout_destinations(
+        str(os.getenv("ATM_PAYMENT_RECIPIENT_PUBLIC_IDENTIFIER") or CANONICAL_PAYOUT_WALLET)
+    )
     return payload
 
 

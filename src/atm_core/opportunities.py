@@ -227,6 +227,9 @@ class WorkProtocolOpportunityAdapter(OpportunityAdapter):
         )
         if not has_explicit_lock:
             raise OpportunityValidationError("WorkProtocol job lacks explicit per-job escrow evidence")
+        from .funding_gate import verify_base_escrow_receipt
+
+        verify_base_escrow_receipt(self, snapshot)
 
     def verify_eligibility(self, opportunity: Opportunity, snapshot: dict[str, Any]) -> None:
         job = snapshot.get("job") or snapshot
@@ -291,6 +294,12 @@ class WorkProtocolOpportunityAdapter(OpportunityAdapter):
         api_key, agent_id = self._auth()
         job_id = opportunity.canonical_opportunity_id.split(":", 1)[1]
         snapshot = self.http.get(f"{self.base_url}/api/jobs/{urllib.parse.quote(job_id)}")
+        self.verify_freshness(opportunity, snapshot)
+        self.verify_funding(opportunity, snapshot)
+        self.verify_eligibility(opportunity, snapshot)
+        current_hash = external_state_hash(snapshot)
+        if opportunity.external_state_hash and current_hash != opportunity.external_state_hash:
+            raise OpportunityValidationError("WorkProtocol state changed after VERIFY; re-verification cycle required")
         for claim in snapshot.get("claims") or []:
             if str(claim.get("agentId") or claim.get("agent_id") or "") == agent_id and claim.get("id"):
                 return {"claim": claim, "reused": True}
@@ -305,11 +314,32 @@ class WorkProtocolOpportunityAdapter(OpportunityAdapter):
         job_id = opportunity.canonical_opportunity_id.split(":", 1)[1]
         if not opportunity.claim_id:
             raise OpportunityValidationError("WorkProtocol submission requires claim_id")
-        return self.http.post_json(
-            f"{self.base_url}/api/jobs/{urllib.parse.quote(job_id)}/deliver",
-            {"claimId": opportunity.claim_id, "deliverable": {"type": "url", "url": deliverable_url}},
-            {"Authorization": f"Bearer {api_key}"},
-        )
+        def reconcile(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+            job = snapshot.get("job") if isinstance(snapshot.get("job"), dict) else {}
+            rows = [*(snapshot.get("deliveries") or []), *(job.get("deliveries") or [])]
+            for row in rows:
+                if not isinstance(row, dict) or str(row.get("claimId") or row.get("claim_id") or "") != opportunity.claim_id:
+                    continue
+                delivered = row.get("deliverable") if isinstance(row.get("deliverable"), dict) else {}
+                if str(delivered.get("url") or row.get("deliverableUrl") or "") == deliverable_url and row.get("id"):
+                    return {"delivery": row, "reused": True}
+            return None
+
+        existing = reconcile(self.fetch_authoritative(opportunity))
+        if existing:
+            return existing
+        key = hashlib.sha256(f"{job_id}|{opportunity.claim_id}|{deliverable_url}".encode()).hexdigest()
+        try:
+            return self.http.post_json(
+                f"{self.base_url}/api/jobs/{urllib.parse.quote(job_id)}/deliver",
+                {"claimId": opportunity.claim_id, "deliverable": {"type": "url", "url": deliverable_url}},
+                {"Authorization": f"Bearer {api_key}", "Idempotency-Key": key},
+            )
+        except Exception:
+            recovered = reconcile(self.fetch_authoritative(opportunity))
+            if recovered:
+                return recovered
+            raise
 
     def monitor(self, opportunity: Opportunity) -> dict[str, Any]:
         return self.fetch_authoritative(opportunity)
@@ -465,7 +495,20 @@ class TaskmarketOpportunityAdapter(OpportunityAdapter):
             )
         except TaskmarketDuplicateSubmission as exc:
             self.skipped_task_ids.add(task_id)
-            return {"ok": True, "submissionId": exc.submission_id, "duplicate": True, "idempotencyKey": "EXISTING"}
+            artifact_sha256 = str(getattr(opportunity, "artifact_sha256", ""))
+            manifest_verified = bool(
+                artifact_sha256 and self.lane._verify_manifest(task_id, exc.submission_id, artifact_sha256)
+            )
+            return {
+                "ok": True,
+                "submissionId": exc.submission_id,
+                "duplicate": True,
+                "idempotencyKey": "EXISTING_AUTHORITATIVE_SUBMISSION",
+                "artifactSha256": artifact_sha256,
+                "manifestVerified": manifest_verified,
+                "workerAddress": self.lane.canonical_wallet,
+                "outgoingSpendUsd": "0",
+            }
         return {
             "ok": True,
             "submissionId": receipt.submission_id,

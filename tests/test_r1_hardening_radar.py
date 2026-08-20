@@ -70,11 +70,11 @@ class R1HardeningTests(unittest.TestCase):
     def test_cloudflare_has_sanitized_money_board_and_raw_byte_webhook_boundary(self):
         text = (Path(__file__).resolve().parents[1] / "worker" / "src" / "index.js").read_text(encoding="utf-8")
         self.assertIn("/api/money-board", text)
-        for key in ("pending_usd", "accepted_usd", "settled_usd", "withdrawable_usd"):
+        for key in ("submitted_net_usdc", "accepted_net_usdc", "settled_usdc", "withdrawable_usdc"):
             self.assertIn(key, text)
         self.assertIn("request.arrayBuffer()", text)
         self.assertIn("SAFE_BOARD", text)
-        for evidence_key in ("active_leases", "eligible_provenance", "states"):
+        for evidence_key in ("in_flight", "submission_id", "task_id"):
             self.assertIn(evidence_key, text)
         self.assertNotIn("seed phrase", text.lower())
 

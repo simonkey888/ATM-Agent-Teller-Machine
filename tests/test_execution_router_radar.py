@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from atm_core.execution_router import UniversalExecutionRouter
-from atm_core.universal_radar import AgentPolicy, ExecutorClass, FundingStatus, RadarDisposition, UniversalOpportunity, source_hash
+from atm_core.universal_radar import AgentPolicy, ExecutorClass, FundingStatus, OperationalState, RadarDisposition, UniversalOpportunity, source_hash
 
 
 class FakeProviderGate:
@@ -56,6 +56,7 @@ def item(klass=ExecutorClass.HTTP_RESEARCH, **updates):
         source_state_hash=source_hash({"id": "r1"}),
         executor_class=klass,
         disposition=RadarDisposition.ATTACK_NOW,
+        operational_state=OperationalState.EXECUTABLE,
     )
     payload.update(updates)
     return UniversalOpportunity(**payload)
@@ -93,8 +94,8 @@ class UniversalExecutionRouterTests(unittest.TestCase):
     def test_human_gate_unverified_funding_and_nonzero_cost_never_claimed(self):
         for candidate in (
             item(human_gate="KYC"),
-            item(funding_status=FundingStatus.UNVERIFIED),
-            item(execution_cost_usd=Decimal("0.01")),
+            item(funding_status=FundingStatus.UNVERIFIED, operational_state=OperationalState.UNVERIFIED),
+            item(execution_cost_usd=Decimal("0.01"), operational_state=OperationalState.WATCH_ONLY),
         ):
             allowed, _ = self.router(model=True, github=True).claim_allowed(candidate)
             self.assertFalse(allowed)

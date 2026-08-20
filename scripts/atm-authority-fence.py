@@ -4,8 +4,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 ENV_FILE = Path(os.getenv("ATM_AUTHORITY_ENV_FILE", "/etc/atm/authority.env"))
@@ -54,6 +56,16 @@ def main() -> int:
         "epoch": int(rec.get("epoch") or 0) == int(epoch_raw),
         "source_sha": rec.get("source_sha") == sha,
     }
+    try:
+        expiry = datetime.fromisoformat(str(rec.get("lease_expires_at") or "").replace("Z", "+00:00"))
+        checks["lease_live"] = expiry.astimezone(timezone.utc) > datetime.now(timezone.utc)
+    except ValueError:
+        checks["lease_live"] = False
+    repo = Path(__file__).resolve().parents[1]
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, text=True, capture_output=True, timeout=5)
+    dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=repo, text=True, capture_output=True, timeout=5)
+    checks["actual_head"] = head.returncode == 0 and head.stdout.strip() == sha
+    checks["tracked_tree_clean"] = dirty.returncode == 0 and not dirty.stdout.strip()
     bad = [k for k, ok in checks.items() if not ok]
     if bad:
         print("AUTHORITY_FENCE=FAIL reason=MISMATCH fields=" + ",".join(bad), file=sys.stderr); return 23

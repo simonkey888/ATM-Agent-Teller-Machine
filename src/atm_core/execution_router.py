@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -13,6 +14,7 @@ from .universal_radar import (
     ExecutorClass,
     FundingStatus,
     RadarDisposition,
+    SourceState,
     UniversalOpportunity,
     qualify,
     source_hash,
@@ -87,7 +89,7 @@ def legacy_to_universal(opportunity: Any, snapshot: dict[str, Any], config: dict
         fees=fees,
         payout_net=net,
         funding_status=FundingStatus.VERIFIED,
-        funding_proof=dict(getattr(opportunity, "funding_proof", {}) or {}),
+        funding_proof=dict(getattr(opportunity, "funding_proof", {}) or {"authoritative_state_hash": source_hash(snapshot)}),
         escrow={
             "status": job.get("escrowStatus"),
             "tx": job.get("escrowTxHash"),
@@ -107,6 +109,17 @@ def legacy_to_universal(opportunity: Any, snapshot: dict[str, Any], config: dict
         required_capabilities=required,
         execution_cost_usd=Decimal("0"),
         source_state_hash=source_hash(snapshot),
+        source_state=SourceState.HEALTHY,
+        source_checked_at=datetime.now(timezone.utc),
+        external_object_exists=True,
+        external_status="OPEN",
+        submission_window_open=True,
+        stake_required=False,
+        paid_action_required=False,
+        current_worker_action_available=True,
+        canonical_identity_eligible=True,
+        credential_boundary_ready=True,
+        already_submitted_by_atm=False,
     )
     floor = max(Decimal("5"), Decimal(str(config.get("min_reward_usd", 5))))
     return qualify(normalized, floor_usd=floor)
@@ -220,7 +233,7 @@ class UniversalExecutionRouter:
 
     def claim_allowed(self, opportunity: UniversalOpportunity) -> tuple[bool, ExecutorAvailability]:
         availability = self.probe(opportunity)
-        if opportunity.disposition == RadarDisposition.REJECT:
+        if opportunity.operational_state.value != "EXECUTABLE":
             return False, availability
         if opportunity.human_gate:
             return False, availability

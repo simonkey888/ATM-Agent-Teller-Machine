@@ -7,6 +7,8 @@ import json
 import os
 import socket
 import stat
+import struct
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -128,6 +130,17 @@ def serve_one(conn: socket.socket, token: str) -> None:
         raw += chunk
         if b"\n" in raw: break
     try:
+        peer_pid, _, _ = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+        service = subprocess.run(
+            ["systemctl", "show", "--property=MainPID", "--value", "atm-supervisor.service"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        supervisor_pid = int((service.stdout or "0").strip() or "0")
+        if service.returncode != 0 or supervisor_pid <= 1 or peer_pid != supervisor_pid:
+            raise PublishError("publisher caller is not the live supervisor MainPID")
         request = json.loads(raw.split(b"\n", 1)[0].decode("utf-8"))
         if set(request) != {"opportunity_id", "workspace"}: raise PublishError("invalid request fields")
         response = {"ok": True, "url": publish(token, str(request["opportunity_id"]), str(request["workspace"]))}

@@ -6,7 +6,7 @@ import os
 import re
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
@@ -50,6 +50,17 @@ class RadarDisposition(str, Enum):
     MONITOR = "MONITOR"
     HUMAN_GATE = "HUMAN_GATE"
     REJECT = "REJECT"
+
+
+class OperationalState(str, Enum):
+    """Canonical admission result used by ranking and every mutation boundary."""
+
+    EXECUTABLE = "EXECUTABLE"
+    WATCH_ONLY = "WATCH_ONLY"
+    HUMAN_GATE = "HUMAN_GATE"
+    UNVERIFIED = "UNVERIFIED"
+    STALE = "STALE"
+    REJECTED_SLOP = "REJECTED_SLOP"
 
 
 class SourceState(str, Enum):
@@ -101,8 +112,22 @@ class UniversalOpportunity(BaseModel):
     batchable: bool = False
     executor_class: ExecutorClass = ExecutorClass.UNSUPPORTED
     disposition: RadarDisposition = RadarDisposition.MONITOR
+    operational_state: OperationalState = OperationalState.UNVERIFIED
     rejection_reasons: list[str] = Field(default_factory=list)
     money_velocity_score: Decimal = Decimal("0")
+    source_state: SourceState = SourceState.UNKNOWN
+    source_checked_at: datetime | None = None
+    source_ttl_seconds: int = 900
+    external_object_exists: bool | None = None
+    external_status: str = "UNKNOWN"
+    submission_window_open: bool | None = None
+    stake_required: bool | None = None
+    paid_action_required: bool | None = None
+    current_worker_action_available: bool | None = None
+    canonical_identity_eligible: bool | None = None
+    credential_boundary_ready: bool | None = None
+    already_submitted_by_atm: bool | None = None
+    provenance_tags: list[str] = Field(default_factory=list)
 
     @field_validator("canonical_url")
     @classmethod
@@ -121,6 +146,13 @@ class UniversalOpportunity(BaseModel):
     @property
     def canonical_id(self) -> str:
         return f"{self.source.lower()}:{self.external_id}"
+
+    @field_validator("source_ttl_seconds")
+    @classmethod
+    def bounded_source_ttl(cls, value: int) -> int:
+        if value < 1 or value > 900:
+            raise ValueError("live source TTL must be between 1 and 900 seconds")
+        return value
 
 
 class PlatformHealth(BaseModel):
@@ -142,6 +174,8 @@ class RadarSnapshot(BaseModel):
     opportunities: list[UniversalOpportunity]
     platform_health: list[PlatformHealth]
     source_errors: dict[str, str] = Field(default_factory=dict)
+    rejection_counts: dict[str, int] = Field(default_factory=dict)
+    canonical_duplicate_count: int = 0
     outgoing_spend_usd: Decimal = Decimal("0")
 
 
@@ -245,6 +279,12 @@ def route_executor(opportunity: UniversalOpportunity) -> ExecutorClass:
         return ExecutorClass.UNSUPPORTED
     if any(term in tokens for term in ("physical", "irl", "phone call", "video call", "on-site", "onsite")):
         return ExecutorClass.UNSUPPORTED
+    if any(term in tokens for term in ("ocr", "scanned document", "image to text", "raster", "brand design", "logo design", "image generation")):
+        return ExecutorClass.UNSUPPORTED
+    if any(term in tokens for term in ("translation", "localization", "localisation", "glossary")):
+        return ExecutorClass.UNSUPPORTED
+    if any(term in tokens for term in ("data cleanup", "data normalization", "data normalisation", "structured file transform")):
+        return ExecutorClass.UNSUPPORTED
     # Specific task semantics beat generic category tokens such as "code" or "repository".
     if any(term in tokens for term in ("test fix", "failing test", "pytest", "unit test", "regression")):
         return ExecutorClass.TEST_FIX
@@ -256,7 +296,7 @@ def route_executor(opportunity: UniversalOpportunity) -> ExecutorClass:
         return ExecutorClass.DOCS
     if any(term in tokens for term in ("extract", "scrape", "csv", "dataset", "data collection")):
         return ExecutorClass.DATA_EXTRACTION
-    if any(term in tokens for term in ("write", "writing", "content", "summary", "translation")):
+    if any(term in tokens for term in ("write", "writing", "content", "summary")):
         return ExecutorClass.CONTENT_GENERATION
     if any(term in tokens for term in ("qa", "verify", "validation", "browser test")):
         return ExecutorClass.LIGHT_QA
@@ -269,46 +309,137 @@ def route_executor(opportunity: UniversalOpportunity) -> ExecutorClass:
     return ExecutorClass.UNSUPPORTED
 
 
+SLOP_TAGS = {"FIXTURE", "MOCK", "SIGNAL_ONLY", "UNVERIFIED", "DEMO_ONLY", "SYNTHETIC"}
+OPEN_EXTERNAL_STATES = {"OPEN", "ACTIVE", "AVAILABLE", "PUBLISHED", "LIVE"}
+
+
+def _slop_provenance(opportunity: UniversalOpportunity) -> bool:
+    source_tokens = {token for token in re.split(r"[^A-Z0-9]+", opportunity.source.upper()) if token}
+    tags = {str(tag).upper() for tag in opportunity.provenance_tags}
+    extra_funding_state = str(getattr(opportunity, "funding_state", "")).upper()
+    return bool((source_tokens | tags | {extra_funding_state}) & SLOP_TAGS)
+
+
+def _legacy_disposition(state: OperationalState) -> RadarDisposition:
+    if state == OperationalState.EXECUTABLE:
+        return RadarDisposition.ATTACK_NOW
+    if state == OperationalState.HUMAN_GATE:
+        return RadarDisposition.HUMAN_GATE
+    if state in {OperationalState.WATCH_ONLY, OperationalState.UNVERIFIED}:
+        return RadarDisposition.MONITOR
+    return RadarDisposition.REJECT
+
+
 def qualify(opportunity: UniversalOpportunity, *, floor_usd: Decimal = Decimal("5"), now: datetime | None = None) -> UniversalOpportunity:
+    """Fail-closed Canon admission.
+
+    A positive score is impossible unless every mutation-critical fact is explicit,
+    current, and proven. Discovery data alone is never authorization.
+    """
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     reasons: list[str] = []
     latest = opportunity.updated_at or opportunity.created_at
+    state = OperationalState.EXECUTABLE
+
+    if _slop_provenance(opportunity) or not external_text_is_safe(f"{opportunity.title}\n{opportunity.description}"):
+        state = OperationalState.REJECTED_SLOP
+        reasons.append("FIXTURE_OR_SIGNAL_ONLY")
+
+    if opportunity.source_checked_at is None:
+        reasons.append("STALE_FETCH")
+        state = OperationalState.UNVERIFIED if state != OperationalState.REJECTED_SLOP else state
+    elif (now - opportunity.source_checked_at.astimezone(timezone.utc)).total_seconds() > opportunity.source_ttl_seconds:
+        reasons.append("STALE_FETCH")
+        state = OperationalState.STALE if state != OperationalState.REJECTED_SLOP else state
+    if opportunity.source_state != SourceState.HEALTHY:
+        reasons.append("SOURCE_DEGRADED")
+        state = OperationalState.UNVERIFIED if state not in {OperationalState.REJECTED_SLOP, OperationalState.STALE} else state
+
     if opportunity.deadline and opportunity.deadline.astimezone(timezone.utc) <= now:
         reasons.append("EXPIRED")
-    if latest and (now - latest.astimezone(timezone.utc)).total_seconds() > 30 * 86400:
-        reasons.append("STALE_30D")
-    if opportunity.funding_status in {FundingStatus.UNFUNDED, FundingStatus.UNKNOWN}:
-        reasons.append("FUNDING_NOT_PROVEN")
+        state = OperationalState.STALE if state != OperationalState.REJECTED_SLOP else state
+    external_status = opportunity.external_status.strip().upper()
+    if opportunity.external_object_exists is False:
+        reasons.append("REMOTE_404")
+        state = OperationalState.STALE if state != OperationalState.REJECTED_SLOP else state
+    elif opportunity.external_object_exists is not True:
+        reasons.append("REMOTE_404")
+        state = OperationalState.UNVERIFIED if state not in {OperationalState.REJECTED_SLOP, OperationalState.STALE} else state
+    if external_status in {"CLOSED", "CANCELLED", "CANCELED", "DELETED", "COMPLETED", "EXPIRED"}:
+        reasons.append("CLOSED")
+        state = OperationalState.STALE if state != OperationalState.REJECTED_SLOP else state
+    elif external_status not in OPEN_EXTERNAL_STATES:
+        reasons.append("CLOSED")
+        state = OperationalState.UNVERIFIED if state not in {OperationalState.REJECTED_SLOP, OperationalState.STALE} else state
+
+    if opportunity.funding_status != FundingStatus.VERIFIED or not opportunity.funding_proof:
+        reasons.append("UNVERIFIED_FUNDING")
+        state = OperationalState.UNVERIFIED if state not in {OperationalState.REJECTED_SLOP, OperationalState.STALE} else state
+    if opportunity.payout_net <= 0:
+        reasons.append("ZERO_REWARD")
+        state = OperationalState.WATCH_ONLY if state == OperationalState.EXECUTABLE else state
     if opportunity.payout_net < floor_usd and not opportunity.batchable:
-        reasons.append("BELOW_ACTIVE_FLOOR")
-    if opportunity.execution_cost_usd > 0:
-        reasons.append("OUTGOING_SPEND_REQUIRED")
+        reasons.append("POLICY_REJECT")
+        state = OperationalState.WATCH_ONLY if state == OperationalState.EXECUTABLE else state
+    if opportunity.execution_cost_usd > 0 or opportunity.paid_action_required is True:
+        reasons.append("PAID_ENTRY")
+        state = OperationalState.WATCH_ONLY if state == OperationalState.EXECUTABLE else state
+    elif opportunity.paid_action_required is not False:
+        reasons.append("PAID_ENTRY")
+        state = OperationalState.UNVERIFIED if state == OperationalState.EXECUTABLE else state
+    if opportunity.stake_required is True:
+        reasons.append("STAKE_REQUIRED")
+        state = OperationalState.WATCH_ONLY if state == OperationalState.EXECUTABLE else state
+    elif opportunity.stake_required is not False:
+        reasons.append("STAKE_REQUIRED")
+        state = OperationalState.UNVERIFIED if state == OperationalState.EXECUTABLE else state
     if opportunity.agent_policy in {AgentPolicy.HUMAN_ONLY, AgentPolicy.PROHIBITED}:
-        reasons.append("AUTOMATION_NOT_ALLOWED")
+        reasons.append("POLICY_REJECT")
+        state = OperationalState.WATCH_ONLY if state == OperationalState.EXECUTABLE else state
     if opportunity.payment_rail.upper() in {"UNKNOWN", "NONE", ""}:
-        reasons.append("UNKNOWN_PAYMENT")
+        reasons.append("PAYOUT_UNKNOWN")
+        state = OperationalState.UNVERIFIED if state == OperationalState.EXECUTABLE else state
     if opportunity.withdrawal_path.upper() in {"UNKNOWN", "NONE", ""}:
-        reasons.append("NO_WITHDRAWAL_PATH")
-    if opportunity.competition >= 20 or opportunity.open_prs >= 10:
-        reasons.append("SATURATED_COMPETITION")
-    text = f"{opportunity.title}\n{opportunity.description}"
-    if not external_text_is_safe(text):
-        reasons.append("PROMPT_INJECTION_RISK")
+        reasons.append("PAYOUT_UNKNOWN")
+        state = OperationalState.UNVERIFIED if state == OperationalState.EXECUTABLE else state
+
     opportunity.executor_class = route_executor(opportunity)
     if opportunity.executor_class == ExecutorClass.UNSUPPORTED:
         reasons.append("UNSUPPORTED_EXECUTOR")
+        state = OperationalState.WATCH_ONLY if state == OperationalState.EXECUTABLE else state
+    if opportunity.submission_window_open is False or opportunity.current_worker_action_available is False:
+        reasons.append("NO_CURRENT_WORKER_ACTION")
+        state = OperationalState.WATCH_ONLY if state == OperationalState.EXECUTABLE else state
+    elif opportunity.submission_window_open is not True or opportunity.current_worker_action_available is not True:
+        reasons.append("NO_CURRENT_WORKER_ACTION")
+        state = OperationalState.UNVERIFIED if state == OperationalState.EXECUTABLE else state
+    if opportunity.canonical_identity_eligible is False:
+        reasons.append("IDENTITY_NOT_READY")
+        state = OperationalState.HUMAN_GATE if state == OperationalState.EXECUTABLE else state
+    elif opportunity.canonical_identity_eligible is not True:
+        reasons.append("IDENTITY_NOT_READY")
+        state = OperationalState.UNVERIFIED if state == OperationalState.EXECUTABLE else state
+    if opportunity.credential_boundary_ready is False:
+        reasons.append("IDENTITY_NOT_READY")
+        state = OperationalState.HUMAN_GATE if state == OperationalState.EXECUTABLE else state
+    elif opportunity.credential_boundary_ready is not True:
+        reasons.append("IDENTITY_NOT_READY")
+        state = OperationalState.UNVERIFIED if state == OperationalState.EXECUTABLE else state
+    if opportunity.already_submitted_by_atm is True:
+        reasons.append("ALREADY_SUBMITTED")
+        state = OperationalState.WATCH_ONLY if state == OperationalState.EXECUTABLE else state
+    elif opportunity.already_submitted_by_atm is None:
+        reasons.append("ALREADY_SUBMITTED")
+        state = OperationalState.UNVERIFIED if state == OperationalState.EXECUTABLE else state
+    if opportunity.human_gate and state == OperationalState.EXECUTABLE:
+        state = OperationalState.HUMAN_GATE
 
     opportunity.rejection_reasons = sorted(set(reasons))
-    if opportunity.rejection_reasons:
-        opportunity.disposition = RadarDisposition.REJECT
+    opportunity.operational_state = state
+    opportunity.disposition = _legacy_disposition(state)
+    if state != OperationalState.EXECUTABLE:
         opportunity.money_velocity_score = Decimal("0")
         return opportunity
-    if opportunity.human_gate:
-        opportunity.disposition = RadarDisposition.HUMAN_GATE
-    elif opportunity.funding_status == FundingStatus.VERIFIED:
-        opportunity.disposition = RadarDisposition.ATTACK_NOW
-    else:
-        opportunity.disposition = RadarDisposition.MONITOR
 
     minutes = Decimal(max(1, opportunity.estimated_execution_minutes))
     competition_penalty = Decimal("1") / Decimal(1 + max(0, opportunity.competition) + max(0, opportunity.open_prs))
@@ -316,9 +447,64 @@ def qualify(opportunity: UniversalOpportunity, *, floor_usd: Decimal = Decimal("
     if latest:
         age_hours = Decimal(str(max(0.0, (now - latest.astimezone(timezone.utc)).total_seconds() / 3600)))
         freshness = max(Decimal("0.10"), Decimal("1") - min(Decimal("0.90"), age_hours / Decimal("720")))
-    funding = Decimal("1") if opportunity.funding_status == FundingStatus.VERIFIED else Decimal("0.35")
-    opportunity.money_velocity_score = (opportunity.payout_net * competition_penalty * freshness * funding / minutes).quantize(Decimal("0.000001"))
+    opportunity.money_velocity_score = (opportunity.payout_net * competition_penalty * freshness / minutes).quantize(Decimal("0.000001"))
     return opportunity
+
+
+def taskmarket_admission(
+    task: dict[str, Any],
+    *,
+    canonical_wallet: str,
+    existing_submission: bool,
+    signer_ready: bool,
+    now: datetime | None = None,
+) -> tuple[OperationalState, tuple[str, ...]]:
+    """Canon decision over a freshly re-fetched first-party TaskMarket object."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    reasons: list[str] = []
+    if existing_submission:
+        return OperationalState.WATCH_ONLY, ("ALREADY_SUBMITTED",)
+    if str(task.get("status") or "").lower() != "open" or str(task.get("phase") or "").lower() not in {"active", "open"}:
+        reasons.append("CLOSED")
+    if task.get("submissionWindowOpen") is not True:
+        reasons.append("NO_CURRENT_WORKER_ACTION")
+    if task.get("stakeRequired") is not False:
+        reasons.append("STAKE_REQUIRED")
+    if not task.get("escrowTxHash") or Decimal(str(task.get("netReward") or "0")) <= 0:
+        reasons.append("UNVERIFIED_FUNDING")
+    expiry = task.get("expiryTime")
+    if expiry:
+        try:
+            if datetime.fromisoformat(str(expiry).replace("Z", "+00:00")) <= now:
+                reasons.append("EXPIRED")
+        except ValueError:
+            reasons.append("STALE_FETCH")
+    actions = [
+        row for row in (task.get("pendingActions") or [])
+        if isinstance(row, dict) and row.get("role") == "worker" and row.get("action") == "submit"
+    ]
+    if len(actions) != 1:
+        reasons.append("NO_CURRENT_WORKER_ACTION")
+    else:
+        action = actions[0]
+        eligible = str(action.get("eligibleAddress") or "").lower()
+        if eligible and eligible != canonical_wallet.lower():
+            reasons.append("IDENTITY_NOT_READY")
+        if action.get("requiresPayment") is not False or action.get("paymentAmount") not in (None, "", 0, "0"):
+            reasons.append("PAID_ENTRY")
+    if not signer_ready:
+        reasons.append("IDENTITY_NOT_READY")
+    if not reasons:
+        return OperationalState.EXECUTABLE, ()
+    if any(code in reasons for code in ("CLOSED", "EXPIRED")):
+        state = OperationalState.STALE
+    elif "IDENTITY_NOT_READY" in reasons:
+        state = OperationalState.HUMAN_GATE
+    elif any(code in reasons for code in ("UNVERIFIED_FUNDING", "STALE_FETCH")):
+        state = OperationalState.UNVERIFIED
+    else:
+        state = OperationalState.WATCH_ONLY
+    return state, tuple(sorted(set(reasons)))
 
 
 class UniversalRadar:
@@ -334,63 +520,80 @@ class UniversalRadar:
         health: dict[str, PlatformHealth] = {}
         errors: dict[str, str] = {}
         by_id: dict[str, UniversalOpportunity] = {}
+        duplicate_count = 0
         sources = self.registry.ordered()
 
         def run(source: RadarSource) -> tuple[str, list[UniversalOpportunity]]:
             return source.name, source.discover(self.floor_usd)
 
-        with ThreadPoolExecutor(max_workers=max(1, min(8, len(sources)))) as pool:
+        pool = ThreadPoolExecutor(max_workers=max(1, min(8, len(sources))))
+        try:
             future_map = {pool.submit(run, source): source for source in sources}
-            try:
-                completed = as_completed(future_map, timeout=max(self.per_source_timeout, 1.0) * max(1, len(sources)))
-                for future in completed:
-                    source = future_map[future]
-                    try:
-                        name, found = future.result(timeout=0)
-                        for raw in found:
-                            item = qualify(raw, floor_usd=self.floor_usd, now=now)
-                            old = by_id.get(item.canonical_id)
-                            if old is None or item.money_velocity_score > old.money_velocity_score:
-                                by_id[item.canonical_id] = item
-                        health[name] = PlatformHealth(
-                            source=name,
-                            state=SourceState.HEALTHY,
-                            checked_at=now,
-                            open_count=len(found),
-                            detail="read-only scan completed",
-                        )
-                    except SourceUnavailable as exc:
-                        health[source.name] = PlatformHealth(
-                            source=source.name, state=exc.state, checked_at=now, detail=exc.detail[:300]
-                        )
-                        errors[source.name] = exc.detail[:300]
-                    except PermissionError as exc:
-                        health[source.name] = PlatformHealth(
-                            source=source.name, state=SourceState.AUTH_REQUIRED, checked_at=now, detail="auth required"
-                        )
-                        errors[source.name] = type(exc).__name__
-                    except Exception as exc:  # platform isolation boundary
-                        state = SourceState.RATE_LIMITED if "429" in str(exc) else SourceState.DEGRADED
-                        health[source.name] = PlatformHealth(source=source.name, state=state, checked_at=now, detail=type(exc).__name__)
-                        errors[source.name] = f"{type(exc).__name__}:{str(exc)[:180]}"
-            except FutureTimeout:
-                pass
-            for future, source in future_map.items():
-                if not future.done():
-                    future.cancel()
-                    health[source.name] = PlatformHealth(
-                        source=source.name, state=SourceState.DEGRADED, checked_at=now, detail="per-source timeout"
+            completed, overdue = wait(future_map, timeout=self.per_source_timeout)
+            for future in completed:
+                source = future_map[future]
+                try:
+                    name, found = future.result(timeout=0)
+                    for raw in found:
+                        raw.source_state = SourceState.HEALTHY
+                        raw.source_checked_at = now
+                        raw.external_object_exists = True
+                        if raw.external_status == "UNKNOWN" and getattr(raw, "status", None):
+                            raw.external_status = str(getattr(raw, "status"))
+                        item = qualify(raw, floor_usd=self.floor_usd, now=now)
+                        old = by_id.get(item.canonical_id)
+                        if old is not None:
+                            duplicate_count += 1
+                            item.rejection_reasons = sorted(set(item.rejection_reasons + ["CANONICAL_DUPLICATE"]))
+                        if old is None or item.money_velocity_score > old.money_velocity_score:
+                            by_id[item.canonical_id] = item
+                    health[name] = PlatformHealth(
+                        source=name,
+                        state=SourceState.HEALTHY,
+                        checked_at=now,
+                        open_count=len(found),
+                        detail="read-only scan completed",
                     )
-                    errors[source.name] = "TIMEOUT"
+                except SourceUnavailable as exc:
+                    health[source.name] = PlatformHealth(
+                        source=source.name, state=exc.state, checked_at=now, detail=exc.detail[:300]
+                    )
+                    errors[source.name] = exc.detail[:300]
+                except PermissionError as exc:
+                    health[source.name] = PlatformHealth(
+                        source=source.name, state=SourceState.AUTH_REQUIRED, checked_at=now, detail="auth required"
+                    )
+                    errors[source.name] = type(exc).__name__
+                except Exception as exc:  # platform isolation boundary
+                    state = SourceState.RATE_LIMITED if "429" in str(exc) else SourceState.DEGRADED
+                    health[source.name] = PlatformHealth(source=source.name, state=state, checked_at=now, detail=type(exc).__name__)
+                    errors[source.name] = f"{type(exc).__name__}:{str(exc)[:180]}"
+            for future in overdue:
+                source = future_map[future]
+                future.cancel()
+                health[source.name] = PlatformHealth(
+                    source=source.name, state=SourceState.DEGRADED, checked_at=now, detail="per-source timeout"
+                )
+                errors[source.name] = "TIMEOUT"
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
         opportunities = sorted(
             by_id.values(), key=lambda item: (item.money_velocity_score, item.payout_net, item.canonical_id), reverse=True
         )
+        rejection_counts: dict[str, int] = {}
+        for item in opportunities:
+            for reason in item.rejection_reasons:
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+        if duplicate_count:
+            rejection_counts["CANONICAL_DUPLICATE"] = duplicate_count
         return RadarSnapshot(
             generated_at=now,
             opportunities=opportunities,
             platform_health=[health.get(src.name) or PlatformHealth(source=src.name, state=SourceState.UNKNOWN, checked_at=now) for src in sources],
             source_errors=errors,
+            rejection_counts=rejection_counts,
+            canonical_duplicate_count=duplicate_count,
             outgoing_spend_usd=Decimal("0"),
         )
 

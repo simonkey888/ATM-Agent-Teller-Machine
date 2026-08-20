@@ -295,6 +295,9 @@ def status_payload(state: RuntimeState, ledger: PaymentLedger, target_store: Mon
         "last_result": state.last_result,
         "last_error": state.last_error,
         "validated_payment_proof_count": len(proofs),
+        "payout_destinations": ledger.payout_destinations(
+            str(os.getenv("ATM_PAYMENT_RECIPIENT_PUBLIC_IDENTIFIER") or v1.CANONICAL_PAYOUT_WALLET), now=utcnow()
+        ),
         **metrics,
     }
 

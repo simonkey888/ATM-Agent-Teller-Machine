@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
 import time
 from decimal import Decimal
 from pathlib import Path
@@ -30,6 +32,13 @@ SECRETLESS_PHASE_LANES = {
     Phase.WORK: "MAKERS",
     Phase.CHECK: "CHECKERS",
 }
+
+
+def continuous_authority_fence() -> None:
+    script = Path(__file__).resolve().parents[1] / "scripts" / "atm-authority-fence.py"
+    check = subprocess.run([sys.executable, str(script)], text=True, capture_output=True, timeout=30)
+    if check.returncode != 0:
+        raise RuntimeError("CONTINUOUS_AUTHORITY_FENCE_FAILED:" + (check.stderr or check.stdout)[-500:])
 
 
 def publish_local_deliverable_if_needed(state, prior_phase: Phase) -> None:
@@ -152,7 +161,9 @@ def main() -> int:
                 adapters = core.build_adapters(config)
 
                 # WATCHERS remain useful even while a different task is executing.
+                continuous_authority_fence()
                 watcher_stats = run_watchers(config, state, adapters, ledger)
+                continuous_authority_fence()
                 run_cycle_oci(config, state, adapters, ledger)
 
                 if state.human_gate:

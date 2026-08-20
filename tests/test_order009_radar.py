@@ -119,11 +119,12 @@ class Order009RadarTests(unittest.TestCase):
 
     def test_worker_fixes_aud_p0_truth_and_schema_defects(self):
         text = (Path(__file__).resolve().parents[1] / "worker" / "src" / "index.js").read_text(encoding="utf-8")
-        for marker in ("ATM UNIVERSAL RADAR SNAPSHOT", "active_leases", "eligible_provenance", "states", 'return "UNKNOWN"', "authoritative_paid===true", 'payment_state==="WITHDRAWABLE"', "/api/money-board", "PLATFORM HEALTH"):
+        for marker in ("ATM UNIVERSAL RADAR SNAPSHOT", "operational_state", "rejection_counts", "UNKNOWN", "trustedComment", "deriveOperationalStatus", "/api/money-board", "EXECUTABLE OPPORTUNITIES"):
             self.assertIn(marker, text)
         self.assertNotIn('pending_usd??"0"', text)
         self.assertNotIn('accepted_usd??"0"', text)
         self.assertNotIn('settled_usd??"0"', text)
+        self.assertNotIn("ROBOTICS_SUBMITTED_NET", text)
 
     def test_deploy_is_strict_pivot_allowlist_and_not_wildcard(self):
         text = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "deploy-cloudflare.yml").read_text(encoding="utf-8")
