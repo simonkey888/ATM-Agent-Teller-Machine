@@ -22,6 +22,36 @@ def get_text(url: str, timeout: int = 20) -> str:
         return response.read().decode("utf-8", errors="replace")
 
 
+def _safe_candidate_diagnostic(candidate: object, text: str) -> str:
+    if not isinstance(candidate, dict):
+        return f"candidate_type={type(candidate).__name__} text_len={len(text)}"
+    parts = ((candidate.get("content") or {}).get("parts") or []) if isinstance(candidate.get("content"), dict) else []
+    part_shapes = []
+    for part in parts[:8]:
+        if not isinstance(part, dict):
+            part_shapes.append(type(part).__name__)
+            continue
+        part_shapes.append(
+            {
+                "keys": sorted(str(k) for k in part.keys()),
+                "text_len": len(str(part.get("text") or "")),
+                "thought": bool(part.get("thought")),
+            }
+        )
+    # The probe prompt contains no user data or credentials, so a short candidate
+    # prefix is safe and lets CI distinguish a model-format issue from no output.
+    return json.dumps(
+        {
+            "finish_reason": candidate.get("finishReason"),
+            "candidate_keys": sorted(str(k) for k in candidate.keys()),
+            "part_shapes": part_shapes,
+            "text_len": len(text),
+            "text_prefix": text[:160],
+        },
+        sort_keys=True,
+    )
+
+
 def google_generate(key: str) -> dict[str, str]:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(MODEL, safe='')}:generateContent?key={urllib.parse.quote(key, safe='')}"
     body = json.dumps(
@@ -49,11 +79,17 @@ def google_generate(key: str) -> dict[str, str]:
     candidates = payload.get("candidates") or []
     if not candidates:
         raise RuntimeError("Gemma 4 live probe returned no candidate")
-    parts = ((candidates[0].get("content") or {}).get("parts") or [])
+    candidate = candidates[0]
+    parts = ((candidate.get("content") or {}).get("parts") or []) if isinstance(candidate, dict) else []
     text = "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict)).strip()
-    parsed = json.loads(text)
+    if not text:
+        raise RuntimeError("Gemma 4 structured probe returned no text: " + _safe_candidate_diagnostic(candidate, text))
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Gemma 4 structured probe invalid JSON: " + _safe_candidate_diagnostic(candidate, text)) from exc
     if not isinstance(parsed, dict):
-        raise RuntimeError("Gemma 4 structured probe did not return an object")
+        raise RuntimeError("Gemma 4 structured probe did not return an object: " + _safe_candidate_diagnostic(candidate, text))
     return {str(k): str(v) for k, v in parsed.items()}
 
 
