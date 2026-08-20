@@ -15,6 +15,20 @@ from atm_core.payments import PaymentLedger, PaymentNotFinal, PaymentValidationE
 from atm_core.runtime import ProcessLock, SingletonLockError
 from atm_core.security import redact_text
 from atm_core.state import StateStore
+from atm_core.work_conserving import (
+    detach_external_wait,
+    isolated_lane_environment,
+    next_delay_seconds,
+    watch_generic_in_flight,
+)
+
+
+SECRETLESS_PHASE_LANES = {
+    Phase.DISCOVER: "SCOUTS",
+    Phase.VERIFY: "FALSIFIERS",
+    Phase.WORK: "MAKERS",
+    Phase.CHECK: "CHECKERS",
+}
 
 
 def publish_local_deliverable_if_needed(state, prior_phase: Phase) -> None:
@@ -45,10 +59,11 @@ def publish_local_deliverable_if_needed(state, prior_phase: Phase) -> None:
 
 
 def run_cycle_oci(config, state, adapters, ledger) -> None:
-    """PAUSE blocks new economic mutation but preserves safe monitor/payment lanes."""
+    """Run one economic phase while preserving secretless untrusted lanes and nonblocking waits."""
     paused = core.PAUSE_FILE.exists()
     if paused and state.phase not in {Phase.MONITOR, Phase.PAYMENT_VERIFY}:
-        core.refresh_discovery_cache(config, adapters)
+        with isolated_lane_environment("SCOUTS"):
+            core.refresh_discovery_cache(config, adapters)
         state.last_result = {
             "status": "PAUSED_SAFE_MONITOR_ONLY",
             "held_phase": state.phase.value,
@@ -57,12 +72,44 @@ def run_cycle_oci(config, state, adapters, ledger) -> None:
         state.cycle += 1
         return
     prior_phase = state.phase
-    core.run_cycle(config, state, adapters, ledger)
+    lane = SECRETLESS_PHASE_LANES.get(prior_phase, "ECONOMIC_AUTHORITY")
+    with isolated_lane_environment(lane):
+        core.run_cycle(config, state, adapters, ledger)
     publish_local_deliverable_if_needed(state, prior_phase)
+    detach_external_wait(state, prior_phase)
+
+
+def run_watchers(config, state, adapters, ledger) -> dict[str, int]:
+    """Monitor durable external waits without occupying the maker/checker lane."""
+    before = len(state.in_flight)
+    # TaskMarket has stronger source-specific award/payment semantics in core.
+    core.monitor_in_flight(config, state, adapters, ledger, limit=8)
+    generic_checked = watch_generic_in_flight(
+        config,
+        state,
+        adapters,
+        ledger,
+        v1.adapter_for,
+        limit=8,
+    )
+    active = sum(1 for row in state.in_flight if not bool(getattr(row, "inflight_terminal", False)))
+    return {"tracked": before, "active": active, "generic_checked": generic_checked}
+
+
+def runtime_status(state, ledger, targets, watcher_stats: dict[str, int] | None = None) -> dict:
+    payload = core.status_payload(state, ledger, targets)
+    payload["WORK_CONSERVING_RUNTIME"] = True
+    payload["IN_FLIGHT_COUNT"] = len(state.in_flight)
+    payload["IN_FLIGHT_ACTIVE"] = sum(
+        1 for row in state.in_flight if not bool(getattr(row, "inflight_terminal", False))
+    )
+    if watcher_stats is not None:
+        payload["WATCHER_STATS"] = watcher_stats
+    return payload
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="ATM OCI always-on supervisor")
+    parser = argparse.ArgumentParser(description="ATM OCI always-on work-conserving supervisor")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--status", action="store_true")
     args = parser.parse_args()
@@ -81,7 +128,7 @@ def main() -> int:
         store.save(state)
 
     if args.status:
-        print(json.dumps(core.status_payload(state, ledger, targets), indent=2, ensure_ascii=False, default=str))
+        print(json.dumps(runtime_status(state, ledger, targets), indent=2, ensure_ascii=False, default=str))
         return 0
 
     lock = ProcessLock(core.LOCK_FILE)
@@ -93,15 +140,20 @@ def main() -> int:
 
     try:
         while True:
+            watcher_stats = {"tracked": len(state.in_flight), "active": 0, "generic_checked": 0}
             try:
                 config = v1.load_config()
                 adapters = core.build_adapters(config)
+
+                # WATCHERS remain useful even while a different task is executing.
+                watcher_stats = run_watchers(config, state, adapters, ledger)
                 run_cycle_oci(config, state, adapters, ledger)
+
                 if state.human_gate:
                     core.localize_gate(state.human_gate, state, config)
                 store.save(state)
-                payload = core.status_payload(state, ledger, targets)
-                v1.log_event("cycle-oci", payload)
+                payload = runtime_status(state, ledger, targets, watcher_stats)
+                v1.log_event("cycle-oci-work-conserving", payload)
                 if Decimal(payload["MONTHLY_REALIZED_WITHDRAWABLE_USD"]) >= Decimal(payload["MONTHLY_TARGET_USD"]):
                     v1.log_event("monthly-target-reached", payload)
             except HumanGateRequired as exc:
@@ -123,7 +175,15 @@ def main() -> int:
                 elif failed_phase == Phase.PAYMENT_VERIFY:
                     state.phase = Phase.MONITOR
                 store.save(state)
-                v1.log_event("validation-oci", {"error": str(exc), "failed_phase": failed_phase.value, "phase": state.phase.value, "opportunity_id": failed_id})
+                v1.log_event(
+                    "validation-oci",
+                    {
+                        "error": str(exc),
+                        "failed_phase": failed_phase.value,
+                        "phase": state.phase.value,
+                        "opportunity_id": failed_id,
+                    },
+                )
             except KeyboardInterrupt:
                 store.save(state)
                 return 130
@@ -133,23 +193,20 @@ def main() -> int:
                     gate = HumanGate(
                         kind="PROVIDER_ROUTE_UNAVAILABLE",
                         reason=redact_text(str(exc))[-1200:],
-                        exact_human_action="No immediate human action required; OCI ATM will continue independent discovery after provider recovery/config change.",
+                        exact_human_action="No immediate human action required; persistent ATM continues independent discovery/watch work after provider recovery/config change.",
                         resume_phase=state.phase,
                         opportunity_id=state.active_opportunity.canonical_opportunity_id if state.active_opportunity else None,
                     )
                     core.localize_gate(gate, state, config)
                 store.save(state)
-                v1.log_event("error-oci", {"error": str(exc), "phase": state.phase.value})
+                v1.log_event("error-oci", {"error": type(exc).__name__, "phase": state.phase.value})
                 if args.once:
                     raise
                 time.sleep(int(config.get("loop", {}).get("failure_backoff_seconds", 30)))
 
             if args.once:
                 return 0
-            if core.PAUSE_FILE.exists():
-                delay = int(config.get("loop", {}).get("pause_poll_seconds", 10))
-            else:
-                delay = int(config.get("loop", {}).get("phase_delay_seconds", {}).get(state.phase.value, 10))
+            delay = next_delay_seconds(config, state)
             time.sleep(delay)
     finally:
         lock.release()
