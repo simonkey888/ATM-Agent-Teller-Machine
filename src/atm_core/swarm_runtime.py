@@ -46,7 +46,13 @@ def current_pass_swarm_shadow(config: dict[str, Any], adapters: dict[str, Any], 
     minimum = config.get("min_reward_usd", 1)
     candidates: dict[str, Any] = {}
     errors: dict[str, str] = {}
-    observations = fabric.scan(adapters, discovery_order, minimum)
+    observations_list = []
+    # Concurrency bounds simultaneous source reads; it must never silently truncate
+    # discovery coverage. Scan every configured source in deterministic bounded batches.
+    for offset in range(0, len(discovery_order), fabric.max_concurrent):
+        batch = discovery_order[offset : offset + fabric.max_concurrent]
+        observations_list.extend(fabric.scan(adapters, batch, minimum))
+    observations = tuple(observations_list)
 
     for observation in observations:
         if observation.state != "OK":
@@ -112,6 +118,7 @@ def current_pass_swarm_shadow(config: dict[str, Any], adapters: dict[str, Any], 
         "observations": len(observations),
         "successful_sources": sum(1 for row in observations if row.state == "OK"),
         "degraded_sources": sum(1 for row in observations if row.state != "OK"),
+        "configured_sources_scanned": len(discovery_order),
         "bounded_concurrency": fabric.max_concurrent,
         "external_mutation_authority": False,
     }
