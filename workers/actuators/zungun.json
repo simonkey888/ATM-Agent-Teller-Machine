@@ -1,0 +1,13 @@
+{
+  "worker_id": "zungun",
+  "source_sha": "219d088ba235ae577f163021d91b42a403d8bc57",
+  "prepare_commands": [
+    ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"]
+  ],
+  "execute_commands": [
+    ["npm", "run", "test:link-blackout"]
+  ],
+  "checker_commands": [
+    ["npm", "run", "test:reconciliation"]
+  ]
+}

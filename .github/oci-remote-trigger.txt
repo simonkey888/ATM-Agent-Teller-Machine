@@ -1,0 +1,9 @@
+bootstrap=2026-08-16T23:51:49Z
+probe_run=31975900518
+probe_result=success
+retry=9
+secret_bundle=owner_corrected
+compute_inventory=oci_python_sdk
+mode=zero_spend_a1_only
+last_result=A1_CAPACITY_UNAVAILABLE_ALL_ADS
+last_run=31977849510
