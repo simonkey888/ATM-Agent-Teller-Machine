@@ -68,7 +68,7 @@ def google_generate(key: str) -> dict[str, str]:
             ],
             "generationConfig": {
                 "temperature": 0,
-                "maxOutputTokens": 64,
+                "maxOutputTokens": 1024,
                 "responseMimeType": "application/json",
             },
         }
@@ -81,13 +81,13 @@ def google_generate(key: str) -> dict[str, str]:
         raise RuntimeError("Gemma 4 live probe returned no candidate")
     candidate = candidates[0]
     parts = ((candidate.get("content") or {}).get("parts") or []) if isinstance(candidate, dict) else []
-    text = "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict)).strip()
+    text = "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict) and not part.get("thought")).strip()
     if not text:
-        raise RuntimeError("Gemma 4 structured probe returned no text: " + _safe_candidate_diagnostic(candidate, text))
+        raise RuntimeError("Gemma 4 structured probe returned no final text: " + _safe_candidate_diagnostic(candidate, text))
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise RuntimeError("Gemma 4 structured probe invalid JSON: " + _safe_candidate_diagnostic(candidate, text)) from exc
+        raise RuntimeError("Gemma 4 structured probe invalid final JSON: " + _safe_candidate_diagnostic(candidate, text)) from exc
     if not isinstance(parsed, dict):
         raise RuntimeError("Gemma 4 structured probe did not return an object: " + _safe_candidate_diagnostic(candidate, text))
     return {str(k): str(v) for k, v in parsed.items()}
