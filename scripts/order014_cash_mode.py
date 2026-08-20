@@ -173,6 +173,31 @@ def probe_agentgigs() -> dict[str, Any]:
         return {"state": type(exc).__name__.upper(), "count": "UNKNOWN", "url": url}
 
 
+def probe_clawhunt() -> dict[str, Any]:
+    url = "https://clawhunt.store/api/problems/"
+    try:
+        listed = rows(get(url), "problems", "data", "items")
+        identifiers = [str(row.get("id")) for row in listed[:5] if row.get("id") is not None]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+            current = list(pool.map(lambda identifier: get(url + identifier), identifiers))
+        objects = [row for row in current if isinstance(row, dict)]
+        funded = [
+            row for row in objects
+            if Decimal(str(row.get("escrow_amount") or "0")) > 0
+            and str(row.get("escrow_status") or "").lower() in {"funded", "held", "locked", "active"}
+        ]
+        return {
+            "state": "LIVE",
+            "count": len(listed),
+            "url": url,
+            "individual_refetch_count": len(objects),
+            "funded_sample_count": len(funded),
+            "zero_or_unfunded_sample_count": len(objects) - len(funded),
+        }
+    except Exception as exc:
+        return {"state": type(exc).__name__.upper(), "count": "UNKNOWN", "url": url, "individual_refetch_count": 0}
+
+
 def probe_existing_platforms() -> dict[str, Any]:
     url = "https://atm.simondalmasso44.workers.dev/api/platform-health"
     try:
@@ -232,7 +257,7 @@ def main() -> int:
     rails = {
         "agentgigs": probe_agentgigs(),
         "voxpact": probe_json("https://api.voxpact.com/v1/jobs/open", "jobs", "data", "items"),
-        "clawhunt": probe_json("https://clawhunt.store/api/problems/", "problems", "data", "items"),
+        "clawhunt": probe_clawhunt(),
         "taskforce": probe_json("https://www.task-force.app/api/tasks?status=OPEN", "tasks", "data", "items"),
         "existing_platform_health": platform_worker,
     }

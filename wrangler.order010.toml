@@ -1,5 +1,0 @@
-name = "atm-order010-relay"
-main = "worker/order010-relay.js"
-compatibility_date = "2026-08-16"
-workers_dev = true
-preview_urls = false

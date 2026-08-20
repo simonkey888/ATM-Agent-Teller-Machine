@@ -1,3 +1,0 @@
-probe=2026-08-16T22:16:00Z
-source_sha=0728a009fc03ca3c7f1140a9146029d4fc8c5da6
-mode=read_only
