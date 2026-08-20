@@ -19,12 +19,19 @@ jobs:
           TASK_ID: 0x664bc58934ca51fc34386bf58a5b1f0e6d4172e06c7df032d1c84b1d6960766c
         run: |
           python - <<'PY'
-          import json, os, urllib.request
+          import json, os, urllib.error, urllib.request
           task_id=os.environ['TASK_ID']
           u=f'https://api.taskmarket.dev/api/tasks/{task_id}'
           req=urllib.request.Request(u,headers={'Accept':'application/json','User-Agent':'ATM-Order009-R2/target-fetch'})
-          with urllib.request.urlopen(req,timeout=20) as r:
-              task=json.loads(r.read().decode())
+          try:
+              with urllib.request.urlopen(req,timeout=20) as r:
+                  task=json.loads(r.read().decode())
+          except urllib.error.HTTPError as exc:
+              if exc.code in {404, 410}:
+                  print(f'TARGET_RETIRED_HTTP={exc.code}')
+                  print('EXTERNAL_ECONOMIC_WRITE=false')
+                  raise SystemExit(0)
+              raise
           keep={k:task.get(k) for k in ('id','description','reward','status','mode','stakeRequired','platformFeeBps','submissionCount','awardCount','expiryTime','escrowTxHash','submissionWindowOpen','submissionVisibility','tags')}
           keep['fetched_at']=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
           body='ORDER-009-R2 TARGET EXACT SNAPSHOT\n```json\n'+json.dumps(keep,sort_keys=True)+'\n```'

@@ -33,7 +33,7 @@ checks={
  'accepted_not_withdrawable_without_chain': 'settlement_verified' in monitor and 'withdrawable = micro_to_usdc(worker_payment_micro) if settlement_verified else "0"' in monitor,
  'base_usdc_transfer_required': 'USDC_BASE' in monitor and 'TRANSFER_TOPIC' in monitor and 'USDC_TRANSFER_TO_CANONICAL_WALLET_NOT_PROVEN' in monitor,
  'moneyboard_exact_semantics': all(k in worker for k in ('opportunity_value','submitted_net','accepted_net','settled_usdc','withdrawable_usdc')),
- 'dreams_separate_non_usdc': 'dreams_estimated' in worker and 'non_usdc' in worker,
+ 'dreams_removed_from_primary_money': 'dreams_estimated' not in worker and 'Dreams est.' not in worker,
  'duplicate_guard_before_submit': submit.index('Duplicate guard for canonical wallet') < submit.index('Submit exactly once'),
  'checker_before_submit': submit.index('Exact-head independent artifact check') < submit.index('Submit exactly once'),
  'final_refetch_before_submit': submit.index('Final first-party re-fetch') < submit.index('Submit exactly once'),

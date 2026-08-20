@@ -55,7 +55,7 @@ jobs:
           worker=Path('worker/src/index.js').read_text()
           assert 'ATM UNIVERSAL RADAR SNAPSHOT' in worker
           assert 'ATM_UNIVERSAL_RADAR_PUBLIC_V3' in worker
-          assert 'EXECUTABLE' in worker and 'REJECTED_SLOP' in worker
+          assert 'EXECUTABLE_STATE' in worker and 'operational_state' in worker
           assert '9.25' not in worker
           print('UNIVERSAL_RADAR_ZERO_SPEND_CANON=PASS')
           PY
