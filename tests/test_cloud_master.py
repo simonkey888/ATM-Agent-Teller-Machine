@@ -98,6 +98,7 @@ class CloudMasterContractTests(unittest.TestCase):
         self.assertIn("CLOUDFLARE_CRON_V1", workflow)
         deploy = (root / ".github/workflows/deploy-cloudflare.yml").read_text()
         self.assertIn("actions: write", deploy)
-        self.assertIn("atm-cloud-schedule.yml/disable", deploy)
+        self.assertIn('base + "/disable"', deploy)
+        self.assertIn('state != "disabled_manually"', deploy)
         self.assertIn("ATM_LEGACY_GITHUB_CRON=DISABLED_REMOTE", deploy)
         self.assertIn("len(parts) != 3", deploy)
