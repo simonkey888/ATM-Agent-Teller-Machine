@@ -63,6 +63,16 @@ class UniversalEffectBoundary:
             "external_receipt_id TEXT,updated_at TEXT NOT NULL)"
         )
 
+    def close(self) -> None:
+        self.conn.close()
+
+    def __enter__(self) -> "UniversalEffectBoundary":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        del exc_type, exc, traceback
+        self.close()
+
     @staticmethod
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat()

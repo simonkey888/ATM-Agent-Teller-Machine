@@ -110,6 +110,8 @@ class UniversalEffectBoundaryChaosTests(unittest.TestCase):
                 restarted.committing(record.effect_key)
             restarted.redrive_proven_absent(record.effect_key)
             self.assertEqual(restarted.get(record.effect_key).state, "PREPARED")
+            restarted.close()
+            boundary.close()
 
     def test_authoritative_recovery_commits_once_and_corrupt_transition_fails(self):
         with tempfile.TemporaryDirectory() as td:
@@ -121,6 +123,7 @@ class UniversalEffectBoundaryChaosTests(unittest.TestCase):
             self.assertEqual(boundary.recover_committed(record.effect_key, "telegram-message-7").state, "COMMITTED")
             with self.assertRaises(RuntimeError):
                 boundary.precondition_refetched(record.effect_key)
+            boundary.close()
 
     def test_effect_identity_covers_external_object_hash(self):
         base = dict(canonical_identity=WALLET, canonical_opportunity_id="x", external_action="SUBMIT", canonical_args={"a": 1})

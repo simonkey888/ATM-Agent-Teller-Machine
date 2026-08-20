@@ -391,6 +391,7 @@ class TaskmarketCliLaneTests(unittest.TestCase):
             self.assertTrue(state["submitted"])
             effects = lane._effects().conn.execute("SELECT state,external_receipt_id FROM effects").fetchall()
             self.assertEqual(effects, [("COMMITTED", "sub-1")])
+            lane._effects().close()
 
     def test_final_object_change_aborts_before_submit_and_effect_prepare(self):
         with tempfile.TemporaryDirectory() as td:
@@ -410,6 +411,7 @@ class TaskmarketCliLaneTests(unittest.TestCase):
             receipt = lane.submit_checked(TASK_ID, artifact, checker_passed=True)
             self.assertEqual(receipt.submission_id, "sub-1")
             self.assertEqual(sum(1 for c in runner.calls if c[:2] == ["task", "submit"]), 1)
+            lane._effects().close()
 
 
 class TaskmarketSupervisorTests(unittest.TestCase):
