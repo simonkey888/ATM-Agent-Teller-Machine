@@ -1,4 +1,4 @@
 gate=order015-r2-exact-head-refresh
 order=ORDER-015-R2
-reason=one-canon-capability-provider-effect-boundary-live-verify-after-windows-portability
-requested_utc=2026-08-20T16:00:00Z
+reason=one-canon-capability-provider-effect-boundary-live-verify-final-dependency-gates
+requested_utc=2026-08-20T16:04:00Z

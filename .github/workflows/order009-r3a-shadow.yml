@@ -8,6 +8,7 @@ on:
       - .github/workflows/order009-r3a-shadow.yml
       - scripts/order009_r3a_shadow.py
       - src/atm_core/taskmarket_cli.py
+      - src/atm_core/effect_boundary.py
       - src/atm_core/taskmarket_maker.py
       - src/atm_core/opportunities.py
       - src/atm.py

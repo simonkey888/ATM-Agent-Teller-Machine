@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/order010-sg2-simon-gate.yml'
       - 'src/atm_core/simon_gate.py'
+      - 'src/atm_core/effect_boundary.py'
       - 'scripts/order010_simon_gate.py'
       - 'tests/test_order010_simon_gate.py'
       - 'src/atm_core/superteam_agent.py'
