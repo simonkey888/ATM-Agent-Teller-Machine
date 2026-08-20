@@ -34,6 +34,7 @@ class Order016FinalChaosTests(unittest.TestCase):
         self.assertTrue(registry["preserved_proven_capabilities"])
         self.assertFalse(registry["promotion_policy"]["llm_self_enable"])
         self.assertFalse(registry["promotion_policy"]["forge_self_enable"])
+        self.assertFalse(registry["skill_forge"]["in_process_candidate_execution"])
         required = {"executor", "checker", "tools", "network", "license_commercial", "resources", "artifact", "failure"}
         for row in registry["capabilities"]:
             self.assertEqual(set(row["contracts"]), required)
@@ -45,35 +46,19 @@ class Order016FinalChaosTests(unittest.TestCase):
         self.assertEqual(status["all_free_down_behavior"], "DEGRADED_DETERMINISTIC_SEARCH")
         self.assertNotIn("opencode-zen-free-catalog", status["route"].get("provider") or "")
 
-    def test_license_drift_fails_promotion_closed(self):
+    def test_license_and_tool_drift_fail_promotion_closed(self):
         base = self.good_evidence()
         drift = PromotionEvidence(**{**base.__dict__, "license_verified": False})
-        decision = deterministic_promotion("LICENSE_DRIFT", drift)
-        self.assertFalse(decision.promoted)
-        self.assertIn("LICENSE_VERIFIED", decision.reasons)
-
-    def test_tool_contract_drift_fails_promotion_closed(self):
-        base = self.good_evidence()
+        self.assertIn("LICENSE_VERIFIED", deterministic_promotion("LICENSE_DRIFT", drift).reasons)
         drift = PromotionEvidence(**{**base.__dict__, "tool_contract_explicit": False})
-        decision = deterministic_promotion("TOOL_DRIFT", drift)
-        self.assertFalse(decision.promoted)
-        self.assertIn("TOOL_CONTRACT_EXPLICIT", decision.reasons)
+        self.assertIn("TOOL_CONTRACT_EXPLICIT", deterministic_promotion("TOOL_DRIFT", drift).reasons)
 
-    def test_concurrent_forge_is_pure_and_cannot_self_enable_registry(self):
-        forge = SkillForge()
+    def test_concurrent_promotion_gate_is_pure_and_registry_immutable(self):
         outcomes = []
         lock = threading.Lock()
 
         def run():
-            decision = forge.evaluate(
-                "CONCURRENT_CANDIDATE",
-                lambda x: str(x).strip(),
-                lambda source, artifact: artifact == str(source).strip(),
-                {"happy": [" a "], "edge": [""], "adversarial": ["<script>"]},
-                commercial_use_ok=True,
-                supply_chain_pinned=True,
-                license_verified=True,
-            )
+            decision = deterministic_promotion("CONCURRENT_CANDIDATE", self.good_evidence())
             with lock:
                 outcomes.append(decision.promoted)
 
@@ -83,22 +68,16 @@ class Order016FinalChaosTests(unittest.TestCase):
         self.assertEqual(outcomes, [True] * 8)
         self.assertNotIn("CONCURRENT_CANDIDATE", public_registry()["preserved_proven_capabilities"])
 
-    def test_forge_crash_fails_closed(self):
-        forge = SkillForge()
+    def test_forge_crash_surface_is_removed_from_supervisor_process(self):
+        touched = {"value": False}
 
         def crash(value):
+            touched["value"] = True
             raise RuntimeError("forge crash")
 
-        decision = forge.evaluate(
-            "CRASHING",
-            crash,
-            lambda source, artifact: True,
-            {"happy": [1], "edge": [2], "adversarial": [3]},
-            commercial_use_ok=True,
-            supply_chain_pinned=True,
-            license_verified=True,
-        )
-        self.assertFalse(decision.promoted)
+        with self.assertRaisesRegex(RuntimeError, "IN_PROCESS_SKILL_FORGE_DISABLED"):
+            SkillForge().evaluate("CRASHING", crash, crash, {})
+        self.assertFalse(touched["value"])
 
     def test_scheduler_delay_is_not_relabelled_green(self):
         doctor = Doctor()
