@@ -108,9 +108,9 @@ class ZeroCostMakerRouter:
         if not candidates or not isinstance(candidates[0], dict):
             raise MakerRouteError("Gemini returned no candidate")
         parts = ((candidates[0].get("content") or {}).get("parts") or [])
-        text = "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict)).strip()
+        text = "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict) and part.get("thought") is not True).strip()
         if not text:
-            raise MakerRouteError("Gemini returned empty candidate text")
+            raise MakerRouteError("Gemini returned empty final candidate text")
         return text
 
     @staticmethod
@@ -132,7 +132,10 @@ class ZeroCostMakerRouter:
         key = os.getenv("GEMINI_API_KEY", "").strip()
         if not key:
             raise MakerRouteUnavailable("GEMINI_API_KEY absent")
-        generation_config: dict[str, Any] = {"temperature": 0.2, "maxOutputTokens": max_output_tokens}
+        generation_config: dict[str, Any] = {
+            "temperature": 0 if structured_json else 0.2,
+            "maxOutputTokens": max_output_tokens,
+        }
         if structured_json:
             generation_config["responseMimeType"] = "application/json"
         body = json.dumps(
@@ -163,7 +166,7 @@ class ZeroCostMakerRouter:
         payload: dict[str, Any] = {
             "model": route.model,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.2,
+            "temperature": 0 if structured_json else 0.2,
             "max_tokens": max_output_tokens,
         }
         if structured_json:
@@ -183,6 +186,19 @@ class ZeroCostMakerRouter:
             raise MakerRouteUnavailable(f"OpenCode unavailable:{type(exc).__name__}") from exc
         return self._openai_compatible_text(response_payload)
 
+    def _request_route(
+        self,
+        route: MakerRoute,
+        prompt: str,
+        max_output_tokens: int,
+        structured_json: bool,
+    ) -> str:
+        if route.provider == "gemini-api":
+            return self._gemini_generate(route, prompt, max_output_tokens, structured_json)
+        if route.provider == "opencode-free":
+            return self._opencode_generate(route, prompt, max_output_tokens, structured_json)
+        raise MakerRouteUnavailable(f"unsupported provider:{route.provider}")
+
     def generate(
         self,
         prompt: str,
@@ -191,7 +207,17 @@ class ZeroCostMakerRouter:
         gemini_failovers: tuple[str, ...],
         max_output_tokens: int,
         structured_json: bool = False,
+        semantic_validator: Callable[[str], None] | None = None,
+        repair_prompt: str | None = None,
     ) -> MakerGeneration:
+        """Generate with bounded zero-cost failover, including semantic failures.
+
+        semantic_validator must raise MakerRouteError when a provider response is
+        structurally unusable. One same-route repair is allowed only when an
+        explicit repair_prompt is supplied; the global request budget still caps
+        all provider/repair calls. Semantic failure then advances to the next
+        already-READY zero-cost route. Paid or unproven routes are never tried.
+        """
         failures: list[str] = []
         attempts = 0
         for route in self.routes(preferred_gemini_model, gemini_failovers):
@@ -200,15 +226,20 @@ class ZeroCostMakerRouter:
                 continue
             if attempts >= self.MAX_PROVIDER_ATTEMPTS:
                 break
-            attempts += 1
-            try:
-                if route.provider == "gemini-api":
-                    text = self._gemini_generate(route, prompt, max_output_tokens, structured_json)
-                elif route.provider == "opencode-free":
-                    text = self._opencode_generate(route, prompt, max_output_tokens, structured_json)
-                else:
-                    raise MakerRouteUnavailable(f"unsupported provider:{route.provider}")
-                return MakerGeneration(text=text, route=route)
-            except MakerRouteError as exc:
-                failures.append(f"{route.provider}/{route.model}:{type(exc).__name__}")
+            route_prompts = [prompt]
+            if repair_prompt:
+                route_prompts.append(repair_prompt)
+            for route_prompt in route_prompts:
+                if attempts >= self.MAX_PROVIDER_ATTEMPTS:
+                    break
+                attempts += 1
+                try:
+                    text = self._request_route(route, route_prompt, max_output_tokens, structured_json)
+                    if semantic_validator is not None:
+                        semantic_validator(text)
+                    return MakerGeneration(text=text, route=route)
+                except MakerRouteError as exc:
+                    failures.append(f"{route.provider}/{route.model}:{type(exc).__name__}:{str(exc)[:120]}")
+            # A semantic/transport failure after the optional one repair advances
+            # to the next READY zero-cost route. No hidden retries occur.
         raise MakerRouteUnavailable("no READY zero-cost maker route: " + " | ".join(failures))
