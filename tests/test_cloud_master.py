@@ -100,3 +100,4 @@ class CloudMasterContractTests(unittest.TestCase):
         self.assertIn("actions: write", deploy)
         self.assertIn("atm-cloud-schedule.yml/disable", deploy)
         self.assertIn("ATM_LEGACY_GITHUB_CRON=DISABLED_REMOTE", deploy)
+        self.assertIn("len(parts) != 3", deploy)

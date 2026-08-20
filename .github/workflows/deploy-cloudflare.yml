@@ -119,8 +119,8 @@ jobs:
           python - <<'PY'
           import json, os, urllib.request
 
-          parts = os.environ.get("ATM_REMOTE_BUNDLE", "").split("|")
-          if len(parts) != 4 or not parts[1].strip():
+          parts = os.environ.get("ATM_REMOTE_BUNDLE", "").replace("\r", "").strip().split("|")
+          if len(parts) != 3 or not parts[1].strip():
               raise SystemExit("ATM_SCHEDULER_SECRET_SOURCE_INVALID")
           dispatch_token = parts[1].strip()
           account = os.environ["CLOUDFLARE_ACCOUNT_ID"]
