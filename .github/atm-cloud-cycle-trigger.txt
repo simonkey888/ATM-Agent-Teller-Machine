@@ -1,4 +1,4 @@
-gate=order013-exact-head-live-refresh
+gate=order013-human-gate-correction-live-refresh
 order=ORDER-013
-reason=production-branch-heartbeat-recovery
-requested_utc=2026-08-20T12:37:00Z
+reason=aud-5356057214-individual-authority
+requested_utc=2026-08-20T13:00:00Z
