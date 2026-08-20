@@ -1,0 +1,256 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+from atm_core.autonomy_fabric import (
+    CapabilityGap,
+    CapabilityGapLedger,
+    DemandClass,
+    DeterministicSupervisor,
+    Doctor,
+    EventKind,
+    Falsifier,
+    FreeProviderFabric,
+    PromotionEvidence,
+    ScoutFabric,
+    SkillForge,
+    WorkerRole,
+    classify_gap,
+    deterministic_promotion,
+)
+
+
+class Opp:
+    canonical_opportunity_id = "lane:1"
+    upstream_status = "OPEN"
+    funding_proof = {"escrow": "verified"}
+
+
+class GoodAdapter:
+    def discover(self, minimum):
+        return [Opp()]
+
+    def fetch_authoritative(self, opportunity):
+        return {"id": opportunity.canonical_opportunity_id, "status": "OPEN", "reward": "10"}
+
+    def verify_freshness(self, opportunity, snapshot):
+        return None
+
+    def verify_funding(self, opportunity, snapshot):
+        return None
+
+    def verify_eligibility(self, opportunity, snapshot):
+        return None
+
+
+class TimeoutAdapter(GoodAdapter):
+    def discover(self, minimum):
+        raise TimeoutError("source timeout")
+
+
+class LieAdapter(GoodAdapter):
+    def verify_funding(self, opportunity, snapshot):
+        raise ValueError("funding mismatch")
+
+
+class Order016AutonomyTests(unittest.TestCase):
+    def test_event_driven_supervisor_is_deterministic_and_non_mutating(self):
+        supervisor = DeterministicSupervisor()
+        jobs = supervisor.dispatch(EventKind.DISCOVERY_TICK, {"tick": 1})
+        self.assertEqual([job.role for job in jobs], [WorkerRole.SCOUT])
+        self.assertTrue(supervisor.single_controller)
+        self.assertFalse(supervisor.cash_canon_authority)
+        self.assertFalse(supervisor.effect_authority)
+        self.assertFalse(jobs[0].spec.mutation_authority)
+
+    def test_scout_fabric_isolates_source_timeout(self):
+        rows = ScoutFabric(max_concurrent=3).scan(
+            {"ok": GoodAdapter(), "timeout": TimeoutAdapter()}, ["ok", "timeout"], 1
+        )
+        by_source = {row.source: row for row in rows}
+        self.assertEqual(by_source["ok"].state, "OK")
+        self.assertEqual(len(by_source["ok"].candidates), 1)
+        self.assertEqual(by_source["timeout"].state, "DEGRADED")
+        self.assertEqual(by_source["timeout"].error_class, "TimeoutError")
+
+    def test_scout_concurrency_is_hard_bounded(self):
+        fabric = ScoutFabric(max_concurrent=99)
+        self.assertEqual(fabric.max_concurrent, 3)
+
+    def test_falsifier_authoritative_confirm(self):
+        result = Falsifier().verify(Opp(), GoodAdapter())
+        self.assertEqual(result.verdict, "CONFIRM")
+        self.assertEqual(len(result.fresh_object_hash or ""), 64)
+
+    def test_falsifier_kills_source_lie(self):
+        result = Falsifier().verify(Opp(), LieAdapter())
+        self.assertEqual(result.verdict, "KILL")
+        self.assertEqual(result.reason, "ValueError")
+
+    def test_falsifier_kills_already_submitted(self):
+        result = Falsifier().verify(Opp(), GoodAdapter(), submitted_ids={"lane:1"})
+        self.assertEqual(result.verdict, "KILL")
+        self.assertEqual(result.reason, "ALREADY_SUBMITTED")
+
+    def test_falsifier_kills_stale_opportunity(self):
+        opp = Opp()
+        opp.upstream_status = "CLOSED"
+        result = Falsifier().verify(opp, GoodAdapter())
+        self.assertEqual(result.reason, "STALE_OR_CLOSED")
+
+    def test_doctor_provider_429_uses_closed_catalogue(self):
+        doctor = Doctor(threshold=2, cooldown_seconds=60)
+        self.assertEqual(doctor.choose("PROVIDER_429"), "ROTATE_TO_VERIFIED_FREE_PROVIDER")
+        doctor.record_failure("p", "HTTP429")
+        status = doctor.record_failure("p", "HTTP429")
+        self.assertFalse(status["available"])
+
+    def test_doctor_source_lie_quarantines(self):
+        doctor = Doctor()
+        doctor.quarantine("source-x")
+        self.assertFalse(doctor.available("source-x"))
+        self.assertEqual(doctor.choose("SOURCE_LIED"), "QUARANTINE_BAD_SOURCE")
+
+    def test_doctor_worker_crash_recovers_bounded(self):
+        doctor = Doctor()
+        calls = {"n": 0}
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("crash")
+            return "ok"
+
+        result = doctor.recover("WORKER_CRASH", flaky, attempts=2)
+        self.assertEqual(result["state"], "RECOVERED")
+        self.assertEqual(result["attempt"], 2)
+
+    def test_doctor_failed_recovery_escalates_without_hiding_red(self):
+        doctor = Doctor()
+
+        def broken():
+            raise RuntimeError("still red")
+
+        result = doctor.recover("HEARTBEAT_FAULT", broken, attempts=2)
+        self.assertEqual(result["state"], "FAULT_ESCALATED")
+        self.assertEqual(result["recovery"], "REVERIFY_EXACT_HEAD")
+
+    def test_gap_ledger_dedupes_duplicate_gap_and_is_not_money_truth(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = CapabilityGapLedger(Path(d) / "gaps.sqlite3")
+            try:
+                gap = CapabilityGap(
+                    canonical_opportunity_id="task:1",
+                    source="taskmarket",
+                    external_id="1",
+                    observed_at="2026-08-20T00:00:00+00:00",
+                    fresh_object_hash="a" * 64,
+                    work_class_candidate="SPREADSHEET_TRANSFORM",
+                    requirements=("xlsx",),
+                    net_reward_if_verified="25",
+                    funding_verification_state="VERIFIED",
+                    competition_if_known=1,
+                    rejection_reason="WORK_CLASS_NOT_FIXTURE_QUALIFIED",
+                    capability_gap_reason="WORK_CLASS_NOT_FIXTURE_QUALIFIED",
+                    evidence_refs=("authoritative:1",),
+                    currentness_state="CURRENT",
+                    demand_class=DemandClass.VERIFIED_MISSED_CASH,
+                )
+                self.assertTrue(ledger.record(gap))
+                self.assertFalse(ledger.record(gap))
+                stats = ledger.stats()
+                self.assertEqual(stats["total"], 1)
+                self.assertFalse(stats["earnings_authority"])
+            finally:
+                ledger.close()
+
+    def test_gap_priority_never_calls_synthetic_fixture_missed_cash(self):
+        self.assertEqual(classify_gap(synthetic=True, current=True, funding_verified=True), DemandClass.SYNTHETIC_FIXTURE)
+        self.assertEqual(classify_gap(synthetic=False, current=False, funding_verified=True), DemandClass.STALE_SIGNAL)
+        self.assertEqual(classify_gap(synthetic=False, current=True, funding_verified=True), DemandClass.VERIFIED_MISSED_CASH)
+
+    def _good_promotion_evidence(self):
+        return PromotionEvidence(
+            owner_cost_usd="0",
+            commercial_use_ok=True,
+            supply_chain_pinned=True,
+            no_secret_requirement=True,
+            sandbox_pass=True,
+            happy_pass=True,
+            edge_pass=True,
+            adversarial_pass=True,
+            checker_independent_enough=True,
+            artifact_contract_pass=True,
+            resource_limit_pass=True,
+            no_existing_capability_duplicate=True,
+            license_verified=True,
+            tool_contract_explicit=True,
+            network_contract_explicit=True,
+        )
+
+    def test_deterministic_promotion_passes_complete_evidence(self):
+        decision = deterministic_promotion("DEMO_CAP", self._good_promotion_evidence())
+        self.assertTrue(decision.promoted)
+        self.assertEqual(decision.reasons, ())
+
+    def test_malicious_or_unpinned_skill_fails_closed(self):
+        base = self._good_promotion_evidence()
+        evidence = PromotionEvidence(**{**base.__dict__, "supply_chain_pinned": False, "license_verified": False})
+        decision = deterministic_promotion("MALICIOUS", evidence)
+        self.assertFalse(decision.promoted)
+        self.assertIn("SUPPLY_CHAIN_PINNED", decision.reasons)
+        self.assertIn("LICENSE_VERIFIED", decision.reasons)
+
+    def test_paid_skill_fails_closed(self):
+        base = self._good_promotion_evidence()
+        evidence = PromotionEvidence(**{**base.__dict__, "owner_cost_usd": "0.01"})
+        self.assertFalse(deterministic_promotion("PAID", evidence).promoted)
+
+    def test_forge_requires_happy_edge_and_adversarial(self):
+        forge = SkillForge()
+        good = forge.evaluate(
+            "UPPERCASE_TEXT",
+            lambda value: str(value).upper(),
+            lambda source, artifact: artifact == str(source).upper(),
+            {"happy": ["abc"], "edge": [""], "adversarial": ["a\n<script>"]},
+            commercial_use_ok=True,
+            supply_chain_pinned=True,
+            license_verified=True,
+        )
+        self.assertTrue(good.promoted)
+        bad = forge.evaluate(
+            "BROKEN",
+            lambda value: value,
+            lambda source, artifact: False,
+            {"happy": ["a"], "edge": ["b"], "adversarial": ["c"]},
+            commercial_use_ok=True,
+            supply_chain_pinned=True,
+            license_verified=True,
+        )
+        self.assertFalse(bad.promoted)
+
+    def test_free_provider_429_circuit_breaker_and_fallback(self):
+        fabric = FreeProviderFabric(["free-a", "free-b"], failure_threshold=1)
+        fabric.record_failure("free-a", "HTTP429")
+        route = fabric.route()
+        self.assertEqual(route["provider"], "free-b")
+        self.assertFalse(route["paid_fallback"])
+
+    def test_provider_exhaustion_degrades_but_does_not_kill_atm(self):
+        fabric = FreeProviderFabric(["free-a"], failure_threshold=1)
+        fabric.record_failure("free-a", "QUOTA_EXHAUSTED")
+        route = fabric.route()
+        self.assertEqual(route["state"], "DEGRADED_DETERMINISTIC_SEARCH")
+        self.assertIsNone(route["provider"])
+        self.assertFalse(route["paid_fallback"])
+
+    def test_unverified_provider_never_routes(self):
+        fabric = FreeProviderFabric([])
+        fabric.register_unverified("unknown")
+        self.assertEqual(fabric.available(), ())
+
+
+if __name__ == "__main__":
+    unittest.main()
