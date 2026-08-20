@@ -92,3 +92,63 @@ jobs:
           test -n "$GEMINI_API_KEY"
           test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
           python scripts/order009_r3a_shadow.py
+
+  order016-live-proof:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.actor == 'simonkey888' &&
+      github.head_ref == 'pivot/universal-money-radar-r1' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    needs: [linux, windows, r3a-autopilot-shadow]
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Verify exact-head production health status and money truth
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          ATM_BASE_URL: https://atm.simondalmasso44.workers.dev
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import json, os, time, urllib.request
+
+          base=os.environ['ATM_BASE_URL'].rstrip('/')
+          expected=os.environ['EXPECTED_SHA']
+          deadline=time.time()+300
+          last=None
+          def get(path):
+              req=urllib.request.Request(base+path, headers={'User-Agent':'ATM-ORDER016-LiveProof/1.0','Cache-Control':'no-cache'})
+              with urllib.request.urlopen(req, timeout=20) as response:
+                  return json.load(response)
+          while time.time()<deadline:
+              try:
+                  health=get('/health')
+                  if health.get('git_sha') == expected:
+                      last=health
+                      break
+                  last=health
+              except Exception as exc:
+                  last={'error':type(exc).__name__}
+              time.sleep(10)
+          if not isinstance(last, dict) or last.get('git_sha') != expected:
+              raise SystemExit(f'LIVE_SHA_EXACT=FAIL expected={expected} last={last}')
+          status=get('/api/status')
+          board=get('/api/money-board')
+          capabilities=get('/api/capabilities')
+          providers=get('/api/providers')
+          op=last.get('status') or {}
+          checks=op.get('checks') or {}
+          assert last.get('ok') is True, last
+          assert checks.get('heartbeat_fresh') is True, checks
+          assert checks.get('version_coherent') is True, checks
+          assert checks.get('radar_current') is True, checks
+          evidence=board.get('evidence') or {}
+          assert str(evidence.get('outgoing_spend_usd','0')) == '0', evidence
+          print('LIVE_SHA_EXACT=PASS', expected)
+          print('HEALTH=' + json.dumps(last, sort_keys=True))
+          print('STATUS=' + json.dumps(status, sort_keys=True))
+          print('MONEY_BOARD=' + json.dumps(board, sort_keys=True))
+          print('CAPABILITIES=' + json.dumps(capabilities, sort_keys=True))
+          print('PROVIDERS=' + json.dumps(providers, sort_keys=True))
+          PY
