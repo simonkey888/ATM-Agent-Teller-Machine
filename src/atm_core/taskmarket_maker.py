@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from .maker_router import MakerRouteUnavailable, ZeroCostMakerRouter
+from .maker_router import MakerRouteError, MakerRouteUnavailable, ZeroCostMakerRouter
 from .zero_cost_model import ZeroCostModelGate
 
 DEFAULT_GEMMA_MODEL = "gemma-4-31b-it"
@@ -147,6 +146,8 @@ class TaskmarketZeroCostMaker:
         *,
         max_output_tokens: int,
         structured_json: bool = False,
+        semantic_validator: Callable[[str], None] | None = None,
+        repair_prompt: str | None = None,
     ) -> str:
         try:
             generated = self.router.generate(
@@ -155,6 +156,8 @@ class TaskmarketZeroCostMaker:
                 gemini_failovers=FREE_GEMMA_FAILOVER,
                 max_output_tokens=max_output_tokens,
                 structured_json=structured_json,
+                semantic_validator=semantic_validator,
+                repair_prompt=repair_prompt,
             )
         except MakerRouteUnavailable as exc:
             raise TaskmarketMakerUnavailable(str(exc)) from exc
@@ -177,6 +180,28 @@ class TaskmarketZeroCostMaker:
                 if "three" not in low:
                     raise TaskmarketMakerError("generated artifact does not contain required Three.js integration")
 
+    @staticmethod
+    def _artifact_semantic_validator(task_description: str) -> Callable[[str], None]:
+        def validate(text: str) -> None:
+            try:
+                _extract_artifact_content(text, task_description)
+            except TaskmarketMakerError as exc:
+                raise MakerRouteError(f"artifact semantic validation failed:{exc}") from exc
+        return validate
+
+    @staticmethod
+    def _checker_semantic_validator(text: str) -> None:
+        try:
+            checked = _extract_json(text)
+        except TaskmarketMakerError as exc:
+            raise MakerRouteError(f"checker semantic JSON validation failed:{exc}") from exc
+        if set(checked) != {"status", "notes"}:
+            raise MakerRouteError("checker semantic schema has unexpected keys")
+        status = str(checked.get("status") or "").strip().upper()
+        notes = checked.get("notes")
+        if status not in {"PASS", "FAIL"} or not isinstance(notes, list) or len(notes) > 8:
+            raise MakerRouteError("checker semantic schema values invalid")
+
     def make(self, *, task_id: str, task_description: str, workspace: Path) -> MakerResult:
         if not self.supported_task(task_description):
             raise TaskmarketMakerUnavailable("task is outside bounded single-file zero-cost maker capability")
@@ -195,9 +220,12 @@ TASK_DATA:
 Produce the COMPLETE final file `{filename}`. No placeholders, mockup, explanation, JSON wrapper, or commentary.
 Return ONLY the complete file content. For HTML you MAY use one normal ```html code fence; for Markdown you MAY use one normal ```markdown fence. Do not truncate the file.
 """
-        content = _extract_artifact_content(
-            self._generate(maker_prompt, max_output_tokens=16384), task_description
+        maker_text = self._generate(
+            maker_prompt,
+            max_output_tokens=16384,
+            semantic_validator=self._artifact_semantic_validator(task_description),
         )
+        content = _extract_artifact_content(maker_text, task_description)
         maker_model = self.model
         maker_provider = self.provider
         artifact = workspace / filename
@@ -222,9 +250,18 @@ ARTIFACT_DATA:
 Return exactly one JSON object with this schema and no other keys:
 {{"status":"PASS" or "FAIL","notes":["at most 8 short factual reasons"]}}
 """
-        checked = _extract_json(
-            self._generate(checker_prompt, max_output_tokens=2048, structured_json=True)
+        repair_prompt = checker_prompt + """
+
+STRICT SCHEMA REPAIR: Your prior response could not be parsed under the required checker contract. Return ONLY the required JSON object now. Do not include markdown, analysis, thoughts, code fences, or extra keys.
+"""
+        checked_text = self._generate(
+            checker_prompt,
+            max_output_tokens=4096,
+            structured_json=True,
+            semantic_validator=self._checker_semantic_validator,
+            repair_prompt=repair_prompt,
         )
+        checked = _extract_json(checked_text)
         status = str(checked.get("status") or "").strip().upper()
         notes_raw = checked.get("notes") or []
         notes = tuple(str(item)[:500] for item in notes_raw[:8]) if isinstance(notes_raw, list) else ()
