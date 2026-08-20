@@ -10,6 +10,19 @@ on:
       ATM_AGENT_TELLER_MACHINE:
         required: true
   workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact PR head deployed by the durable scheduler
+        required: true
+        type: string
+      scheduler_source:
+        description: Auditable scheduler identity
+        required: true
+        type: string
+      scheduled_time:
+        description: Cloudflare scheduled-event timestamp
+        required: true
+        type: string
   push:
     branches: [main, agent/atm-v1, pivot/universal-money-radar-r1]
     paths: [.github/atm-cloud-cycle-trigger.txt]
@@ -35,13 +48,32 @@ jobs:
       ATM_REMOTE_BUNDLE: ${{ secrets.ATM_AGENT_TELLER_MACHINE }}
       OCI_CLI_CONFIG_FILE: ${{ github.workspace }}/.oci-cloud/config
       OCI_CLI_PROFILE: ATM_REMOTE
-      ATM_SOURCE_SHA: ${{ github.sha }}
+      ATM_SOURCE_SHA: ${{ inputs.expected_sha || github.sha }}
       ATM_GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.expected_sha || github.sha }}
           persist-credentials: false
+
+      - name: Durable scheduler exact-head fence
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          SCHEDULER_SOURCE: ${{ inputs.scheduler_source }}
+          SCHEDULED_TIME: ${{ inputs.scheduled_time }}
+        run: |
+          set -euo pipefail
+          test "$SCHEDULER_SOURCE" = "CLOUDFLARE_CRON_V1"
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          remote_sha="$(git ls-remote origin refs/heads/pivot/universal-money-radar-r1 | awk '{print $1}')"
+          test "$remote_sha" = "$EXPECTED_SHA"
+          [[ "$SCHEDULED_TIME" =~ ^[0-9]{10,16}$ ]]
+          echo "ATM_DURABLE_SCHEDULER=CLOUDFLARE_CRON_V1"
+          echo "ATM_RECURRING_EXACT_HEAD=$EXPECTED_SHA"
+          echo "ATM_SCHEDULED_TIME=$SCHEDULED_TIME"
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:

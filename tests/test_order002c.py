@@ -175,7 +175,10 @@ class OciStaticContractTests(unittest.TestCase):
         self.assertIn("SAFE_KEYS", self.worker)
         for forbidden in ("private_key","seed_phrase","GITHUB_TOKEN","GOOGLE_API_KEY"):
             self.assertNotIn(forbidden, self.worker)
-        self.assertNotIn('method:"POST"', self.worker)
+        self.assertIn('/actions/workflows/${CLOUD_CYCLE_WORKFLOW}/dispatches', self.worker)
+        self.assertIn('method:"POST"', self.worker)
+        self.assertIn('if(request.method==="POST"&&u.pathname==="/webhooks/coinpay")', self.worker)
+        self.assertNotIn("request.url,inputs", self.worker)
 
 
 if __name__ == "__main__":

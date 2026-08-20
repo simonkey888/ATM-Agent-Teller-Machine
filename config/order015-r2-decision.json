@@ -4,24 +4,34 @@
   "verified_at": "2026-08-20",
   "base_head": "a3e59af6ccae566c873740bd2ab5c9c2cd22e905",
   "control_plane": {
-    "winner": "A_REFACTOR_CURRENT",
+    "winner": "SURGICAL_PIVOT_SCHEDULING_ONLY",
     "single_controller": true,
     "second_controller_created": false,
     "a": {
-      "name": "existing GitHub Actions controller plus durable SQLite and exact-head Cloudflare read plane",
-      "score": 88,
-      "decision": "ADOPT_AFTER_REFACTOR"
+      "name": "GitHub Actions cron as recurrent exact-head controller",
+      "score": 35,
+      "decision": "REJECT_AFTER_LIVE_LIVENESS_FAILURE",
+      "reasons": [
+        "scheduled workflows execute only the default branch and cannot preserve an unmerged PR head",
+        "observed scheduled cadence was 24 to 60 minutes despite a nominal five-minute cron",
+        "default-branch cycles rejected the R2 state archive"
+      ]
     },
     "b": {
-      "name": "Cloudflare Durable Objects plus Workflows plus Queues controller",
-      "score": 61,
-      "decision": "REJECT_FOR_R2",
+      "name": "Cloudflare Cron Trigger scheduling exact-head GitHub Actions ephemeral workers",
+      "score": 91,
+      "decision": "ADOPT_SCHEDULING_ONLY",
       "reasons": [
-        "would create migration and dual-authority risk",
-        "free limits hard-fail and Workflows billing dimensions apply",
-        "no measured controller bottleneck justifies the pivot"
+        "one zero-cost durable cron can dispatch the exact deployed PR SHA",
+        "GitHub Actions retains the existing CAS lease and economic authority fence",
+        "no Durable Object, Workflow, Queue, wallet, Canon or second controller is introduced"
       ]
-    }
+    },
+    "heartbeat_slo_seconds": 900,
+    "heartbeat_slo_changed": false,
+    "scheduler": "CLOUDFLARE_CRON_V1",
+    "scheduler_cadence": "*/5 * * * *",
+    "ephemeral_worker": "GITHUB_ACTIONS"
   },
   "economic_invariants": {
     "outgoing_spend_usd": "0",

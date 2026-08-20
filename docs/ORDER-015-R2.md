@@ -27,3 +27,9 @@ The provider registry requires official terms, official pricing, no credit card,
 The Cloudflare read plane exposes the sanitized canonical registries at `/api/capabilities` and `/api/providers`. Exact-head deployment fails unless the browser and video benchmarks reproduce, the two R2 capability rows are enabled, OpenCode remains discovery-only, Cash Mode is `ACTIVE` or `SEARCH`, the heartbeat and radar SHA match the deployed commit, and the existing ORDER-012 submission remains present without a duplicate submit.
 
 All invariants remain: one ATM, one controller, one wallet, no merge, no gas, no subscription, no paid model/API, no spend, continuous discovery, continuous `IN_FLIGHT`, and settlement watch.
+
+## AUD liveness correction
+
+AUD `5358674042` invalidated the GitHub-schedule part of decision A without invalidating the functional R2 patch. GitHub's `schedule` event executes only the latest commit on the default branch, so the unmerged PR workflow could never provide recurrent exact-head authority. The observed default-branch runs were also best-effort at roughly 24–60 minute intervals rather than the configured five minutes, and the most recent runs failed closed because the pre-R2 code rejected the extended R2 state archive. The last healthy exact-head cycle was therefore a push event, not recurrent proof.
+
+The corrected decision is a scheduling-only `SURGICAL_PIVOT`: the existing canonical Cloudflare Worker owns one zero-cost `*/5` Cron Trigger and dispatches the exact deployed SHA to `atm-cloud-cycle.yml`. GitHub Actions remains an ephemeral worker. The existing `atm-economic-authority` concurrency group, remote exact-head fence, CAS lease, Canon, wallet, state and mutation boundary remain the sole economic authority. The default-branch GitHub cron is disabled rather than widened, and the 900-second health SLO is unchanged.

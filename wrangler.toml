@@ -3,3 +3,6 @@ main = "worker/src/index.js"
 compatibility_date = "2026-08-16"
 workers_dev = true
 preview_urls = false
+
+[triggers]
+crons = ["*/5 * * * *"]

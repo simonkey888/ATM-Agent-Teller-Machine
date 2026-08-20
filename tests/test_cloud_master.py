@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import tempfile
 import threading
 import unittest
@@ -89,11 +88,15 @@ class CloudMasterContractTests(unittest.TestCase):
         self.assertNotIn("larger", workflow.lower())
         self.assertIn("group: atm-economic-authority", workflow)
         self.assertIn("cancel-in-progress: false", workflow)
-        self.assertIn("uses: ./.github/workflows/atm-cloud-cycle.yml", scheduler)
-        self.assertIn("secrets: inherit", scheduler)
-        match = re.search(r"cron:\s*'([^']+)'", scheduler)
-        self.assertIsNotNone(match)
-        minute_field = match.group(1).split()[0]
-        minute_values = [int(value) for value in minute_field.split(",")]
-        self.assertEqual(minute_values, list(range(3, 60, 5)))
-        self.assertNotIn(0, minute_values)
+        self.assertNotIn("schedule:", scheduler)
+        self.assertIn("workflow_dispatch:", scheduler)
+        self.assertIn("ATM_LEGACY_GITHUB_CRON=DISABLED", scheduler)
+        self.assertNotIn("uses: ./.github/workflows/atm-cloud-cycle.yml", scheduler)
+        wrangler = (root / "wrangler.toml").read_text()
+        self.assertIn('crons = ["*/5 * * * *"]', wrangler)
+        self.assertIn("expected_sha:", workflow)
+        self.assertIn("CLOUDFLARE_CRON_V1", workflow)
+        deploy = (root / ".github/workflows/deploy-cloudflare.yml").read_text()
+        self.assertIn("actions: write", deploy)
+        self.assertIn("atm-cloud-schedule.yml/disable", deploy)
+        self.assertIn("ATM_LEGACY_GITHUB_CRON=DISABLED_REMOTE", deploy)

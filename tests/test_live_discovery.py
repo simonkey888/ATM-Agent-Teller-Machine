@@ -55,7 +55,7 @@ class LiveDiscoveryContractTests(unittest.TestCase):
         self.assertTrue(found, "Taskmarket returned no current zero-upfront opportunities")
         self.assertTrue(verified, "no fresh funded Taskmarket opportunity: " + " | ".join(errors[-5:]))
 
-    def test_supervisor_selects_live_opportunity_by_realized_ev_per_effort(self):
+    def test_prefilter_ranks_live_candidate_without_implying_canon_allocation(self):
         candidates = []
         diagnostics = []
         for adapter in (WorkProtocolOpportunityAdapter(), TaskmarketOpportunityAdapter()):
@@ -66,7 +66,7 @@ class LiveDiscoveryContractTests(unittest.TestCase):
         selected = atm.choose_opportunity(candidates, max_competition=8)
         self.assertIsNotNone(selected)
         print(
-            "LIVE_EV_SELECTION "
+            "LIVE_PREFILTER_RANKING CANON_ALLOCATION=NOT_PERFORMED "
             f"id={selected.canonical_opportunity_id} source={selected.source} "
             f"reward_gross={selected.reward_gross} ev_realized={selected.ev_realized} "
             f"ev_per_effort_hour={selected.ev_per_effort_hour} competition={selected.competition}"
