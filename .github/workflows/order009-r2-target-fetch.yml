@@ -16,7 +16,7 @@ jobs:
       - name: Fetch exact target and publish sanitized snapshot
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          TASK_ID: 0x664bc58934ca51fc34386bf58a5b1f0e6d4172e06c7df032d1c84b1d6960766c
+          TASK_ID: "0x664bc58934ca51fc34386bf58a5b1f0e6d4172e06c7df032d1c84b1d6960766c"
         run: |
           python - <<'PY'
           import json, os, urllib.error, urllib.request
