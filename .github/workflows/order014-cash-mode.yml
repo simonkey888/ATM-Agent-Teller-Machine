@@ -5,6 +5,7 @@ on:
     branches: [pivot/universal-money-radar-r1]
     paths:
       - '.github/workflows/order014-cash-mode.yml'
+      - '.github/atm-cloud-cycle-trigger.txt'
       - 'scripts/order014_cash_mode.py'
       - 'src/atm_core/cash_canon.py'
       - 'tests/test_order014_cash_canon.py'
