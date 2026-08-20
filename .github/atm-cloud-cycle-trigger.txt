@@ -1,4 +1,4 @@
-gate=order016-diablique-final-terminal
+gate=order016-diablique-final-post-security
 order=ORDER-016
-reason=final-code-live-proof-security-cash-mode-exact-head
-requested_utc=2026-08-20T19:32:00Z
+reason=secretless-forge-remediation-exact-head-cash-live-security-final
+requested_utc=2026-08-20T19:40:00Z
