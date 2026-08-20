@@ -119,7 +119,7 @@ class Order009RadarTests(unittest.TestCase):
 
     def test_worker_fixes_aud_p0_truth_and_schema_defects(self):
         text = (Path(__file__).resolve().parents[1] / "worker" / "src" / "index.js").read_text(encoding="utf-8")
-        for marker in ("ATM UNIVERSAL RADAR SNAPSHOT", "operational_state", "rejection_counts", "UNKNOWN", "trustedComment", "deriveOperationalStatus", "/api/money-board", "EXECUTABLE OPPORTUNITIES"):
+        for marker in ("ATM UNIVERSAL RADAR SNAPSHOT", "operational_state", "rejection_counts", "UNKNOWN", "trustedComment", "deriveOperationalStatus", "/api/money-board", "/api/capabilities", "/api/providers", "EXECUTABLE OPPORTUNITIES"):
             self.assertIn(marker, text)
         self.assertNotIn('pending_usd??"0"', text)
         self.assertNotIn('accepted_usd??"0"', text)

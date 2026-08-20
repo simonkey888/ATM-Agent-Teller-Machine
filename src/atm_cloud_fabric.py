@@ -9,9 +9,11 @@ import atm_cloud
 import atm_fabric
 import atm_v2 as core_runtime
 from atm_core.execution_router import UniversalExecutionRouter, legacy_to_universal
+from atm_core.capability_registry import public_registry as public_capability_registry
 from atm_core.funding_gate import install_workprotocol_chain_funding_gate
 from atm_core.models import Phase
 from atm_core.opportunities import external_state_hash
+from atm_core.provider_registry import public_registry as public_provider_registry
 from atm_core.radar_registry import build_canonical_registry
 from atm_core.swarm_runtime import current_pass_swarm_shadow
 from atm_core.universal_radar import OperationalState, RadarDisposition, UniversalRadar, load_snapshot, persist_snapshot
@@ -26,6 +28,7 @@ atm_cloud.STATE_ALLOWLIST.add("economic-episodes.sqlite3")
 atm_cloud.STATE_ALLOWLIST.add("immune-memory.sqlite3")
 atm_cloud.STATE_ALLOWLIST.add("vnext-learning.sqlite3")
 atm_cloud.STATE_ALLOWLIST.add("universal-radar.json")
+atm_cloud.STATE_ALLOWLIST.add("universal-effects.sqlite3")
 install_workprotocol_chain_funding_gate()
 
 # Capability routing is a pre-CLAIM gate on the existing single supervisor. Existing
@@ -168,6 +171,8 @@ def _public_radar_item(item):
 
 def _fabric_build_status(core, state, ledger, targets, board, lease, control):
     status = _original_build_status(core, state, ledger, targets, board, lease, control)
+    status["capability_registry"] = public_capability_registry()
+    status["provider_registry"] = public_provider_registry()
     active = status.get("active_task")
     opp = getattr(state, "active_opportunity", None)
     if isinstance(active, dict) and opp is not None:
@@ -219,6 +224,10 @@ def _fabric_sanitize_status(status):
     platform_health = status.get("platform_health")
     if isinstance(platform_health, list):
         sanitized["platform_health"] = platform_health[:32]
+    for key in ("capability_registry", "provider_registry"):
+        value = status.get(key)
+        if isinstance(value, dict):
+            sanitized[key] = value
     return sanitized
 
 

@@ -463,14 +463,8 @@ class TaskmarketOpportunityAdapter(OpportunityAdapter):
         mode = str(snapshot.get("mode") or getattr(opportunity, "task_mode", "bounty")).lower()
         if mode != "bounty" or mode in self.PAID_UPFRONT_MODES:
             raise OpportunityValidationError(f"Taskmarket mode {mode} is outside zero-spend autonomous lane")
-        description = str(snapshot.get("description") or getattr(opportunity, "task_description", ""))
-        if not TaskmarketZeroCostMaker.supported_task(description):
-            raise OpportunityValidationError("Taskmarket task exceeds bounded single-file zero-cost maker")
-        task_id = opportunity.canonical_opportunity_id.split(":", 1)[1]
-        duplicate = self.lane.existing_submission(task_id)
-        if duplicate:
-            self.skipped_task_ids.add(task_id)
-            raise OpportunityValidationError("canonical wallet already has a Taskmarket submission for task")
+        # Work class, runtime executor availability and duplicate truth are owned by
+        # the single Cash Canon invoked immediately after this untrusted-text gate.
 
     def inspect_competition(self, opportunity: Opportunity, snapshot: dict[str, Any]) -> dict[str, int]:
         submissions = snapshot.get("submissions") or []
@@ -478,6 +472,29 @@ class TaskmarketOpportunityAdapter(OpportunityAdapter):
             "claims": 1 if snapshot.get("claimedBy") else 0,
             "open_prs": len(submissions) if isinstance(submissions, list) else int(snapshot.get("submissionCount") or 0),
         }
+
+    def canonical_admission(self, opportunity: Opportunity, snapshot: dict[str, Any]):
+        """Resolve signer, duplicate, capability and attack thresholds before allocation."""
+        from .cash_canon import taskmarket_cash_decision
+
+        task_id = opportunity.canonical_opportunity_id.split(":", 1)[1]
+        signer_ready = False
+        try:
+            signer_ready = bool(self.lane.preflight_signer().get("signer_present"))
+        except Exception:
+            signer_ready = False
+        decision = taskmarket_cash_decision(
+            snapshot,
+            canonical_wallet=self.lane.canonical_wallet,
+            existing_submission=self.lane.existing_submission(task_id) is not None,
+            signer_ready=signer_ready,
+            capability_runtime_ready=TaskmarketZeroCostMaker.supported_task(
+                str(snapshot.get("description") or getattr(opportunity, "task_description", ""))
+            ),
+        )
+        if not decision.allocation_allowed:
+            raise OpportunityValidationError("TaskMarket Cash Canon rejected allocation: " + ",".join(decision.reasons))
+        return decision
 
     def claim(self, opportunity: Opportunity) -> dict[str, Any]:
         mode = str(getattr(opportunity, "task_mode", "bounty")).lower()

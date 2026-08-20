@@ -76,6 +76,9 @@ class HumanGateQualification:
     current_competition_verified: bool
     payment_risk_explicit: bool
     platform_onboarding_compatible: bool
+    listing_legitimacy_passed: bool
+    work_authorization_passed: bool
+    application_truth_source: str
     rejection_reasons: tuple[str, ...]
 
     @property
@@ -171,6 +174,14 @@ class GuruPublicSource:
         ) is not None
         if prohibited_outreach:
             reasons.append("PROHIBITED_OUTREACH")
+        legitimacy_passed = re.search(
+            r"\b(?:identity impersonation|fake review|unpaid test project|recruit others for commission|"
+            r"credential harvesting|send (?:your )?(?:password|seed phrase|private key))\b",
+            block,
+            re.I,
+        ) is None
+        if not legitimacy_passed:
+            reasons.append("LISTING_LEGITIMACY_REJECTED")
         supported = any(term in block.lower() for term in self._fit_terms) and not prohibited_outreach
         if not supported:
             reasons.append("UNSUPPORTED_WORK_CLASS")
@@ -220,6 +231,9 @@ class GuruPublicSource:
             current_competition_verified=competition_verified,
             payment_risk_explicit=True,
             platform_onboarding_compatible=platform_onboarding_compatible,
+            listing_legitimacy_passed=legitimacy_passed,
+            work_authorization_passed=owner_eligible,
+            application_truth_source=lead.url,
             rejection_reasons=tuple(sorted(set(reasons))),
         )
         return refreshed, qualification

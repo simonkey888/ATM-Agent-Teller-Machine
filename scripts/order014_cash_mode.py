@@ -12,12 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from atm_core.cash_canon import (
-    AttackInputs,
-    attack_priority,
-    classify_work,
-    competition_allows_attack,
     qualified_work_classes,
-    work_class_qualified,
+    taskmarket_cash_decision,
 )
 
 
@@ -85,66 +81,34 @@ def inspect_task(task_hint: dict[str, Any], now: datetime) -> dict[str, Any]:
 
     submissions = rows(submission_payload, "submissions", "items", "data")
     duplicate = any(str(row.get("workerAddress") or "").lower() == CANONICAL_WALLET.lower() for row in submissions)
-    description = str(task.get("description") or "")
-    work_class = classify_work(description)
-    competition = int(task.get("submissionCount") or 0) + int(task.get("pitchCount") or 0)
-    net_reward = usdc(task.get("netReward"))
-    # Existing awardCount is not authoritative capacity. Fail closed to one
-    # potential award unless TaskMarket later exposes an explicit capacity field.
-    award_capacity = 1
-    observed_awards = int(task.get("awardCount") or 0)
+    decision = taskmarket_cash_decision(
+        task,
+        canonical_wallet=CANONICAL_WALLET,
+        existing_submission=duplicate,
+        # This workflow is a read-only observer of the separately fenced production
+        # signer. The economic runtime re-proves signer readiness before allocation.
+        signer_ready=True,
+        now=now,
+    )
     try:
         deadline = datetime.fromisoformat(str(task.get("expiryTime") or "").replace("Z", "+00:00"))
-        remaining = max(0, int((deadline - now).total_seconds() // 60))
     except ValueError:
         deadline = None
-        remaining = 0
-
-    inputs = AttackInputs(
-        net_reward_usd=net_reward,
-        competition=competition,
-        award_capacity=award_capacity,
-        remaining_minutes=remaining,
-        capability_match=work_class_qualified(work_class),
-        deterministic_acceptance=bool(re.search(r"pass/fail|acceptance|observable requirements|exact(?:ly)? one", description, re.I)),
-        artifact_class_proven=work_class_qualified(work_class),
-        prior_settlement_observed=False,
-        ambiguity_low=not bool(re.search(r"subjective|visual style|creatively open|strongest|best one", description, re.I)),
-    )
-    competition_ok, competition_reason = competition_allows_attack(inputs)
-    reasons: list[str] = []
-    if str(task.get("status") or "").lower() != "open" or str(task.get("phase") or "").lower() != "active":
-        reasons.append("NOT_OPEN_CURRENT")
-    if not str(task.get("escrowTxHash") or "").startswith("0x") or net_reward <= 0:
-        reasons.append("FUNDING_NOT_VERIFIED")
-    if task.get("stakeRequired") is not False:
-        reasons.append("STAKE_REQUIRED")
-    if task.get("submissionWindowOpen") is not True or not free_worker_submit(task):
-        reasons.append("NO_FREE_WORKER_ACTION")
-    if deadline is None or deadline <= now:
-        reasons.append("EXPIRED_OR_DEADLINE_UNKNOWN")
-    if duplicate:
-        reasons.append("ALREADY_SUBMITTED")
-    if work_class.value == "UNSUPPORTED":
-        reasons.append("POLICY_OR_WORK_CLASS_UNSUPPORTED")
-    elif not work_class_qualified(work_class):
-        reasons.append("WORK_CLASS_NOT_FIXTURE_QUALIFIED")
-    if not competition_ok:
-        reasons.append(competition_reason)
 
     result.update({
         "status": task.get("status"),
         "phase": task.get("phase"),
-        "net_reward_usdc": str(net_reward),
-        "competition": competition,
-        "award_capacity": award_capacity,
-        "observed_awards": observed_awards,
-        "work_class": work_class.value,
+        "net_reward_usdc": decision.net_reward_usdc,
+        "competition": decision.competition,
+        "award_capacity": 1,
+        "observed_awards": int(task.get("awardCount") or 0),
+        "work_class": decision.work_class,
         "duplicate": duplicate,
         "deadline": deadline.isoformat() if deadline else None,
-        "attack_priority": str(attack_priority(inputs)),
-        "competition_rule": competition_reason,
-        "reasons": sorted(set(reasons)),
+        "attack_priority": decision.attack_priority,
+        "canon_object_hash": decision.authoritative_object_hash,
+        "canon_disposition": decision.disposition,
+        "reasons": list(decision.reasons),
     })
     return result
 

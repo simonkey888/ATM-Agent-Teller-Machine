@@ -8,12 +8,14 @@ import re
 import socket
 import urllib.parse
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable
+
+from .capability_registry import CAPABILITY_REGISTRY, capability_enabled, enabled_capability_ids
 
 
 class WorkClass(str, Enum):
@@ -32,6 +34,8 @@ class WorkClass(str, Enum):
     SPREADSHEET_TRANSFORM = "SPREADSHEET_TRANSFORM"
     LIGHT_WEB_DESIGN = "LIGHT_WEB_DESIGN"
     WEB_QA = "WEB_QA"
+    BROWSER_PUBLIC_DYNAMIC_EXTRACTION = "BROWSER_PUBLIC_DYNAMIC_EXTRACTION"
+    VIDEO_SHORT_FORM_ASSEMBLY = "VIDEO_SHORT_FORM_ASSEMBLY"
     DATA_ANALYSIS_BOUNDED = "DATA_ANALYSIS_BOUNDED"
     UNSUPPORTED = "UNSUPPORTED"
 
@@ -45,28 +49,20 @@ class WorkClassContract:
     reason: str
 
 
-WORK_CLASS_MATRIX: tuple[WorkClassContract, ...] = (
-    WorkClassContract(WorkClass.RESEARCH_SYNTHESIS, "ZERO_COST_SOURCE_MAKER_V1", "SOURCE_MARKDOWN_CHECK_V1", True, "fixture-qualified"),
-    WorkClassContract(WorkClass.SOURCE_BACKED_FACT_TABLE, "ZERO_COST_SOURCE_TABLE_V1", "SOURCE_CSV_CHECK_V1", True, "fixture-qualified"),
-    WorkClassContract(WorkClass.CONTENT_STRUCTURED, "ZERO_COST_STRUCTURED_WRITER_V1", "STRUCTURE_LIMIT_CHECK_V1", True, "fixture-qualified"),
-    WorkClassContract(WorkClass.CSV_JSON_TRANSFORM, "DETERMINISTIC_PY_TRANSFORM_V1", "SCHEMA_INVARIANT_CHECK_V1", True, "fixture-qualified"),
-    WorkClassContract(WorkClass.DATA_ANALYSIS_BOUNDED, "DETERMINISTIC_PY_ANALYSIS_V1", "REPRODUCIBILITY_CHECK_V1", True, "fixture-qualified"),
-    WorkClassContract(WorkClass.DOCS_TECHNICAL, "ZERO_COST_DOCS_MAKER_V1", "STRUCTURE_LIMIT_CHECK_V1", True, "fixture-qualified"),
-    WorkClassContract(WorkClass.WEB_SINGLE_FILE_INTERACTIVE, "ZERO_COST_HTML_MAKER_V1", "PLAYWRIGHT_BROWSER_CHECK", False, "browser fixture not pinned"),
-    WorkClassContract(WorkClass.LIGHT_WEB_DESIGN, "ZERO_COST_HTML_MAKER_V1", "PLAYWRIGHT_BROWSER_CHECK", False, "browser fixture not pinned"),
-    WorkClassContract(WorkClass.WEB_QA, "NONE", "PLAYWRIGHT_BROWSER_CHECK", False, "browser fixture not pinned"),
-    WorkClassContract(WorkClass.TRANSLATION_LOCALIZATION, "ARGOS_CANDIDATE", "NUMBER_TERMINOLOGY_CHECK", False, "language-pair benchmark absent"),
-    WorkClassContract(WorkClass.DOCUMENT_OCR_EXTRACTION, "TESSERACT_5_5_3_CANDIDATE", "ANCHOR_CONFIDENCE_CHECK", False, "OCR benchmark absent"),
-    WorkClassContract(WorkClass.DOCUMENT_DATA_EXTRACTION, "MARKITDOWN_CANDIDATE", "PROVENANCE_CHECK", False, "untrusted-I/O sandbox benchmark absent"),
-    WorkClassContract(WorkClass.SPREADSHEET_TRANSFORM, "OPENPYXL_CANDIDATE", "REOPEN_INVARIANT_CHECK", False, "fixture benchmark absent"),
-    WorkClassContract(WorkClass.GITHUB_BOUNDED_PATCH, "EXISTING_PATCH_WORKER", "TEST_AND_DIFF_CHECK", True, "existing regression-qualified"),
-    WorkClassContract(WorkClass.API_INTEGRATION, "EXISTING_PATCH_WORKER", "TEST_AND_CONTRACT_CHECK", True, "existing regression-qualified"),
-    WorkClassContract(WorkClass.TEST_FIX, "EXISTING_PATCH_WORKER", "TARGETED_REGRESSION_CHECK", True, "existing regression-qualified"),
+WORK_CLASS_MATRIX: tuple[WorkClassContract, ...] = tuple(
+    WorkClassContract(
+        WorkClass(row.capability_id),
+        row.executor_id,
+        row.checker_id,
+        capability_enabled(row.capability_id),
+        row.benchmark_result,
+    )
+    for row in CAPABILITY_REGISTRY
 )
 
 
 def qualified_work_classes() -> tuple[str, ...]:
-    return tuple(row.work_class.value for row in WORK_CLASS_MATRIX if row.qualified)
+    return enabled_capability_ids()
 
 
 def classify_work(description: str) -> WorkClass:
@@ -81,8 +77,12 @@ def classify_work(description: str) -> WorkClass:
         return WorkClass.UNSUPPORTED
     if re.search(r"\b(recruit|referral|growth sprint|cold call|telemarket|outbound sales)\b", text):
         return WorkClass.UNSUPPORTED
-    if re.search(r"\b(mp4|video generation|photo editing|brand identity|logo design)\b", text):
+    if re.search(r"\b(photo editing|brand identity|logo design|social (?:post|publish)|upload to (?:youtube|tiktok|instagram))\b", text):
         return WorkClass.UNSUPPORTED
+    if re.search(r"\b(mp4|video|short[- ]form video|video assembly|video generation|subtitles?|ffmpeg)\b", text):
+        return WorkClass.VIDEO_SHORT_FORM_ASSEMBLY
+    if re.search(r"\b(dynamic web|javascript-rendered|browser extraction|rendered dom|single-page application)\b", text):
+        return WorkClass.BROWSER_PUBLIC_DYNAMIC_EXTRACTION
     if re.search(r"\b(translation|localization|localisation)\b", text):
         return WorkClass.TRANSLATION_LOCALIZATION
     if re.search(r"\b(ocr|scanned image|image-to-text)\b", text):
@@ -111,7 +111,7 @@ def classify_work(description: str) -> WorkClass:
 
 
 def work_class_qualified(work_class: WorkClass) -> bool:
-    return any(row.work_class == work_class and row.qualified for row in WORK_CLASS_MATRIX)
+    return capability_enabled(work_class.value)
 
 
 @dataclass(frozen=True)
@@ -125,6 +125,30 @@ class AttackInputs:
     artifact_class_proven: bool
     prior_settlement_observed: bool
     ambiguity_low: bool
+
+
+@dataclass(frozen=True)
+class TaskmarketCanonDecision:
+    disposition: str
+    reasons: tuple[str, ...]
+    task_id: str
+    authoritative_object_hash: str
+    net_reward_usdc: str
+    competition: int
+    work_class: str
+    executor_id: str
+    checker_id: str
+    attack_priority: str
+    admission_mode: str
+    allocation_allowed: bool
+
+
+SHADOW_BENCHMARK_REQUIRED = {
+    "mutation_authority": False,
+    "signer_visible": False,
+    "economic_state_unchanged": True,
+    "not_counted_as_execution": True,
+}
 
 
 def attack_priority(inputs: AttackInputs) -> Decimal:
@@ -153,6 +177,153 @@ def competition_allows_attack(inputs: AttackInputs, *, max_competition: int = 12
     ):
         return True, "OVERRIDE_MULTI_AWARD_HIGH_FIT"
     return False, "COMPETITION_ABOVE_THRESHOLD"
+
+
+def taskmarket_cash_decision(
+    task: dict[str, Any],
+    *,
+    canonical_wallet: str,
+    existing_submission: bool,
+    signer_ready: bool,
+    now: datetime | None = None,
+    max_competition: int = 12,
+    admission_mode: str = "ECONOMIC",
+    shadow_contract: dict[str, Any] | None = None,
+    capability_runtime_ready: bool | None = None,
+) -> TaskmarketCanonDecision:
+    """One allocation/mutation admission truth for a fresh first-party task object."""
+
+    observed = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    mode = str(admission_mode or "ECONOMIC").upper()
+    reasons: list[str] = []
+    task_id = str(task.get("id") or task.get("taskId") or "")
+    if not task_id:
+        reasons.append("AUTHORITATIVE_ID_MISSING")
+    if existing_submission:
+        reasons.append("ALREADY_SUBMITTED")
+    if str(task.get("status") or "").lower() != "open" or str(task.get("phase") or "").lower() not in {"active", "open"}:
+        reasons.append("CLOSED")
+    if str(task.get("mode") or "bounty").lower() != "bounty":
+        reasons.append("POLICY_REJECT")
+    if task.get("submissionWindowOpen") is not True:
+        reasons.append("NO_CURRENT_WORKER_ACTION")
+    if task.get("stakeRequired") is not False:
+        reasons.append("STAKE_REQUIRED")
+
+    net_reward = Decimal(str(task.get("netReward") or "0"))
+    net_reward_usdc = net_reward / Decimal(1_000_000) if net_reward >= Decimal("10000") else net_reward
+    if not str(task.get("escrowTxHash") or "").startswith("0x") or net_reward_usdc <= 0:
+        reasons.append("UNVERIFIED_FUNDING")
+
+    expiry = task.get("expiryTime")
+    remaining_minutes = 0
+    if expiry:
+        try:
+            deadline = datetime.fromisoformat(str(expiry).replace("Z", "+00:00")).astimezone(timezone.utc)
+            remaining_minutes = max(0, int((deadline - observed).total_seconds() // 60))
+            if deadline <= observed:
+                reasons.append("EXPIRED")
+        except ValueError:
+            reasons.append("STALE_FETCH")
+    else:
+        reasons.append("STALE_FETCH")
+
+    actions = [
+        row for row in (task.get("pendingActions") or [])
+        if isinstance(row, dict) and row.get("role") == "worker" and row.get("action") == "submit"
+    ]
+    if len(actions) != 1:
+        reasons.append("NO_CURRENT_WORKER_ACTION")
+    else:
+        action = actions[0]
+        eligible = str(action.get("eligibleAddress") or "").lower()
+        if eligible and eligible != canonical_wallet.lower():
+            reasons.append("IDENTITY_NOT_READY")
+        if action.get("requiresPayment") is not False or action.get("paymentAmount") not in (None, "", 0, "0"):
+            reasons.append("PAID_ENTRY")
+    if mode == "ECONOMIC" and not signer_ready:
+        reasons.append("IDENTITY_NOT_READY")
+
+    description = str(task.get("description") or "")
+    work_class = classify_work(description)
+    contract = next((row for row in WORK_CLASS_MATRIX if row.work_class == work_class), None)
+    capability_match = work_class_qualified(work_class)
+    if work_class == WorkClass.UNSUPPORTED:
+        reasons.append("POLICY_OR_WORK_CLASS_UNSUPPORTED")
+    elif not capability_match:
+        reasons.append("WORK_CLASS_NOT_FIXTURE_QUALIFIED")
+    if capability_runtime_ready is None:
+        capability_runtime_ready = work_class not in {
+            WorkClass.BROWSER_PUBLIC_DYNAMIC_EXTRACTION,
+            WorkClass.VIDEO_SHORT_FORM_ASSEMBLY,
+        }
+    if capability_match and not capability_runtime_ready:
+        reasons.append("CAPABILITY_RUNTIME_INPUT_OR_TOOLING_NOT_READY")
+    if work_class == WorkClass.VIDEO_SHORT_FORM_ASSEMBLY and re.search(
+        r"\b(?:paid (?:stock|voice|api)|celebrity likeness|copyrighted footage|post (?:to|on) (?:youtube|tiktok|instagram))\b",
+        description,
+        re.I,
+    ):
+        reasons.append("VIDEO_RIGHTS_OR_PAID_DEPENDENCY_UNSUPPORTED")
+
+    competition = int(task.get("submissionCount") or 0) + int(task.get("pitchCount") or 0)
+    deterministic = bool(re.search(r"pass/fail|acceptance|observable requirements|exact(?:ly)? one|required (?:duration|resolution|columns?)", description, re.I))
+    ambiguity_low = not bool(re.search(r"subjective|creatively open|strongest|best one|brand identity", description, re.I))
+    if not deterministic:
+        reasons.append("ACCEPTANCE_CRITERIA_NOT_DETERMINISTIC")
+    if not ambiguity_low:
+        reasons.append("AMBIGUITY_TOO_HIGH")
+    inputs = AttackInputs(
+        net_reward_usd=net_reward_usdc,
+        competition=competition,
+        award_capacity=1,
+        remaining_minutes=remaining_minutes,
+        capability_match=capability_match,
+        deterministic_acceptance=deterministic,
+        artifact_class_proven=capability_match,
+        prior_settlement_observed=False,
+        ambiguity_low=ambiguity_low,
+    )
+    competition_ok, competition_reason = competition_allows_attack(inputs, max_competition=max_competition)
+
+    if mode == "SHADOW_BENCHMARK":
+        supplied = shadow_contract or {}
+        for key, expected in SHADOW_BENCHMARK_REQUIRED.items():
+            if supplied.get(key) is not expected:
+                reasons.append("SHADOW_CONTRACT_INVALID")
+        budget = supplied.get("resource_budget_seconds")
+        if not isinstance(budget, int) or budget < 1 or budget > 900:
+            reasons.append("SHADOW_RESOURCE_BUDGET_INVALID")
+    elif mode != "ECONOMIC":
+        reasons.append("ADMISSION_MODE_INVALID")
+    elif not competition_ok:
+        reasons.append(competition_reason)
+
+    reasons = sorted(set(reasons))
+    if not reasons:
+        disposition = "SHADOW_BENCHMARK" if mode == "SHADOW_BENCHMARK" else "EXECUTABLE"
+    elif "ALREADY_SUBMITTED" in reasons:
+        disposition = "WATCH_ONLY"
+    elif any(item in reasons for item in ("CLOSED", "EXPIRED")):
+        disposition = "STALE"
+    elif "IDENTITY_NOT_READY" in reasons:
+        disposition = "HUMAN_GATE"
+    else:
+        disposition = "REJECTED"
+    return TaskmarketCanonDecision(
+        disposition=disposition,
+        reasons=tuple(reasons),
+        task_id=task_id,
+        authoritative_object_hash=canonical_object_hash(task),
+        net_reward_usdc=str(net_reward_usdc),
+        competition=competition,
+        work_class=work_class.value,
+        executor_id=contract.executor_id if contract else "NONE",
+        checker_id=contract.checker_id if contract else "NONE",
+        attack_priority=str(attack_priority(inputs)),
+        admission_mode=mode,
+        allocation_allowed=not reasons,
+    )
 
 
 def canonical_object_hash(value: dict[str, Any]) -> str:
@@ -294,4 +465,4 @@ def validate_structured_content(path: Path, *, required_headings: Iterable[str],
 
 
 def public_matrix() -> list[dict[str, Any]]:
-    return [asdict(row) | {"work_class": row.work_class.value} for row in WORK_CLASS_MATRIX]
+    return [row.__dict__.copy() for row in CAPABILITY_REGISTRY]

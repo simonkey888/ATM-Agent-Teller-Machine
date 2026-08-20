@@ -1,4 +1,4 @@
-gate=order014-cash-mode-live-refresh
-order=ORDER-014
-reason=cash-canon-continuous-scan
-requested_utc=2026-08-20T13:18:00Z
+gate=order015-r2-exact-head-refresh
+order=ORDER-015-R2
+reason=one-canon-capability-provider-effect-boundary-live-verify
+requested_utc=2026-08-20T15:45:00Z

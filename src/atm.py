@@ -388,6 +388,7 @@ def phase_verify(config: dict[str, Any], state: RuntimeState, adapters: dict[str
     adapter.verify_freshness(opp, snapshot)
     adapter.verify_funding(opp, snapshot)
     adapter.verify_eligibility(opp, snapshot)
+    canon_decision = adapter.canonical_admission(opp, snapshot) if hasattr(adapter, "canonical_admission") else None
     competition = adapter.inspect_competition(opp, snapshot)
     opp.competition = max(competition.values() or [0])
     opp.claims = int(competition.get("claims", opp.claims))
@@ -404,7 +405,11 @@ def phase_verify(config: dict[str, Any], state: RuntimeState, adapters: dict[str
         )
     state.active_opportunity = opp
     state.phase = Phase.CLAIM
-    state.last_result = {"status": "VERIFIED", "snapshot_hash": opp.external_state_hash}
+    state.last_result = {
+        "status": "VERIFIED",
+        "snapshot_hash": opp.external_state_hash,
+        "canon": canon_decision.__dict__ if canon_decision is not None else None,
+    }
 
 
 def phase_claim(config: dict[str, Any], state: RuntimeState, adapters: dict[str, OpportunityAdapter]) -> None:

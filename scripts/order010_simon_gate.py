@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import urllib.error
@@ -10,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from atm_core.effect_boundary import UniversalEffectBoundary, effect_key
 from atm_core.simon_gate import (
     GuruPublicSource,
     SimonGateError,
@@ -255,12 +257,49 @@ def main() -> int:
         reminder_ttl=timedelta(hours=24),
     )
     if should_notify:
-        message_id = bot.send(chat_id, notification_text(selected, activated=activated))
-        receipt["telegram_message_id"] = message_id
-        receipt["notification_fingerprint"] = notification_fingerprint(selected, required_action)
-        receipt["notified_at"] = datetime.now(timezone.utc).isoformat()
-        receipt["telegram_state"] = "NOTIFIED_SIMON"
-        receipt["state"] = "NOTIFIED_SIMON"
+        fingerprint = notification_fingerprint(selected, required_action)
+        selected_hash = hashlib.sha256(
+            json.dumps(selected.public_dict(), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        key = effect_key(
+            canonical_identity=f"telegram-chat:{chat_id}",
+            canonical_opportunity_id=f"guru:{selected.source_id}",
+            external_action="NOTIFY_HUMAN_GATE",
+            canonical_args={"notification_fingerprint": fingerprint},
+            current_external_object_hash=selected_hash,
+        )
+        receipt["effect_key"] = key
+        prior_lock = os.getenv("ATM_TELEGRAM_EFFECT_LOCK", "").strip()
+        if prior_lock == key:
+            receipt["telegram_state"] = "DEDUPED_DURABLE_EFFECT_LOCK"
+            receipt["state"] = "MONITORING_AFTER_NOTIFICATION"
+            should_notify = False
+        else:
+            lock_result = _repo_variable("ATM_TELEGRAM_EFFECT_LOCK", key)
+            receipt["effect_lock_persist"] = lock_result
+            if lock_result not in {"CREATED", "UPDATED"}:
+                receipt["telegram_state"] = "BLOCKED_DURABLE_EFFECT_LOCK"
+                receipt["state"] = "PROPOSAL_READY_FAIL_CLOSED"
+                should_notify = False
+        if should_notify:
+            effects = UniversalEffectBoundary(Path(".atm") / "universal-effects.sqlite3")
+            effect = effects.prepare(
+                canonical_identity=f"telegram-chat:{chat_id}",
+                canonical_opportunity_id=f"guru:{selected.source_id}",
+                external_action="NOTIFY_HUMAN_GATE",
+                canonical_args={"notification_fingerprint": fingerprint},
+                current_external_object_hash=selected_hash,
+            )
+            effects.precondition_refetched(effect.effect_key)
+            effects.committing(effect.effect_key)
+            message_id = bot.send(chat_id, notification_text(selected, activated=activated))
+            effects.authoritative_verify(effect.effect_key)
+            effects.committed(effect.effect_key, str(message_id))
+            receipt["telegram_message_id"] = message_id
+            receipt["notification_fingerprint"] = fingerprint
+            receipt["notified_at"] = datetime.now(timezone.utc).isoformat()
+            receipt["telegram_state"] = "NOTIFIED_SIMON"
+            receipt["state"] = "NOTIFIED_SIMON"
     else:
         receipt["telegram_state"] = "DEDUPED_ALREADY_NOTIFIED"
         if receipt["state"] == "PROPOSAL_READY":

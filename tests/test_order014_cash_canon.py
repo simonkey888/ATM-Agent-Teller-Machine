@@ -36,9 +36,13 @@ class CashCanonTests(unittest.TestCase):
         self.assertFalse(work_class_qualified(WorkClass.DOCUMENT_OCR_EXTRACTION))
         self.assertFalse(work_class_qualified(WorkClass.WEB_SINGLE_FILE_INTERACTIVE))
 
-    def test_classifier_rejects_referral_outreach_and_video(self):
-        for text in ("Recruit agents referral growth sprint", "Cold calling homeowners", "Submit an MP4 video"):
+    def test_classifier_rejects_outreach_and_classifies_benchmarked_video(self):
+        for text in ("Recruit agents referral growth sprint", "Cold calling homeowners"):
             self.assertEqual(classify_work(text), WorkClass.UNSUPPORTED)
+        self.assertEqual(
+            classify_work("Assemble an MP4 short-form video with local footage and subtitles"),
+            WorkClass.VIDEO_SHORT_FORM_ASSEMBLY,
+        )
         self.assertEqual(classify_work("source-backed Markdown report with citations"), WorkClass.RESEARCH_SYNTHESIS)
         self.assertEqual(classify_work("exact UTF-8 CSV with source URLs"), WorkClass.SOURCE_BACKED_FACT_TABLE)
         self.assertEqual(

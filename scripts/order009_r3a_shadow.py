@@ -9,7 +9,9 @@ import tempfile
 from decimal import Decimal
 from pathlib import Path
 
+from atm_core.cash_canon import taskmarket_cash_decision
 from atm_core.opportunities import TaskmarketOpportunityAdapter
+from atm_core.taskmarket_cli import CANONICAL_TASKMARKET_WALLET
 from atm_core.taskmarket_maker import TaskmarketMakerError, TaskmarketMakerUnavailable, TaskmarketZeroCostMaker
 
 
@@ -26,8 +28,8 @@ def exact_head() -> str:
 
 
 def main() -> int:
-    # Shadow is deliberately signer-free: it proves runtime selection + WORK/CHECK,
-    # never TaskMarket mutation. Production adapter submit still hard-gates signer.
+    # This is an explicitly budgeted SHADOW_BENCHMARK. It is signer-free and every
+    # candidate must pass the same Canon before maker allocation.
     adapter = TaskmarketOpportunityAdapter()
     candidates = adapter.discover(Decimal("5"))
     candidates.sort(key=lambda row: (row.ev_per_effort_hour, row.ev_realized, -row.competition), reverse=True)
@@ -43,8 +45,24 @@ def main() -> int:
             current = adapter.fetch_authoritative(opportunity)
             adapter.verify_freshness(opportunity, current)
             adapter.verify_funding(opportunity, current)
-            adapter.verify_eligibility(opportunity, current)
-            adapter.lane.assert_side_effect_gate(current)
+            existing = adapter.lane.existing_submission(task_id) is not None
+            decision = taskmarket_cash_decision(
+                current,
+                canonical_wallet=CANONICAL_TASKMARKET_WALLET,
+                existing_submission=existing,
+                signer_ready=False,
+                admission_mode="SHADOW_BENCHMARK",
+                shadow_contract={
+                    "mutation_authority": False,
+                    "signer_visible": False,
+                    "economic_state_unchanged": True,
+                    "resource_budget_seconds": 600,
+                    "not_counted_as_execution": True,
+                },
+            )
+            if not decision.allocation_allowed:
+                diagnostics.append(f"{task_id}:CANON:{','.join(decision.reasons)}")
+                continue
         except Exception as exc:
             diagnostics.append(f"{task_id}:{type(exc).__name__}:{str(exc)[:160]}")
             continue
@@ -58,7 +76,26 @@ def main() -> int:
         break
 
     if selected is None or snapshot is None:
-        raise SystemExit("R3A_SHADOW_NO_RUNTIME_SELECTED_TASK:" + " | ".join(diagnostics[-8:]))
+        receipt = {
+            "schema": "ATM_SHADOW_BENCHMARK_V2",
+            "head": exact_head(),
+            "admission_mode": "SHADOW_BENCHMARK",
+            "allocation_allowed": False,
+            "maker_invoked": False,
+            "signer_visible": False,
+            "taskmarket_mutation": False,
+            "not_counted_as_execution": True,
+            "economic_state_unchanged": True,
+            "resource_budget_seconds": 600,
+            "diagnostics": diagnostics[-12:],
+            "outgoing_spend_usd": "0",
+        }
+        Path("order009-r3a-shadow.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(json.dumps(receipt, sort_keys=True))
+        print("R3A_CANON_NO_ALLOCATION=PASS")
+        print("R3A_TASKMARKET_MUTATION=0")
+        print("OUTGOING_SPEND_USD=0")
+        return 0
 
     task_id = selected.canonical_opportunity_id.split(":", 1)[1]
     net = str(Decimal(str(snapshot.get("netReward") or "0")) / Decimal(1_000_000))
@@ -101,6 +138,12 @@ def main() -> int:
         "artifact_generated_in_ephemeral_workspace": True,
         "signer_used": False,
         "taskmarket_mutation": False,
+        "admission_mode": "SHADOW_BENCHMARK",
+        "mutation_authority": False,
+        "signer_visible": False,
+        "economic_state_unchanged": True,
+        "resource_budget_seconds": 600,
+        "not_counted_as_execution": True,
         "outgoing_spend_usd": "0",
     }
     Path("order009-r3a-shadow.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")

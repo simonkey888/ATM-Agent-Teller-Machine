@@ -14,6 +14,9 @@ from typing import Any, Callable, MutableMapping
 
 from .payments import HttpJsonClient
 from .universal_radar import OperationalState, taskmarket_admission
+from .effect_boundary import UniversalEffectBoundary
+from .taskmarket_maker import TaskmarketZeroCostMaker
+from .cash_canon import canonical_object_hash
 
 CANONICAL_TASKMARKET_WALLET = "0xd89Ef03bC3105C538529AC2657Bc4488c94ff4E4"
 TASKMARKET_PACKAGE = "@lucid-agents/taskmarket@1.11.0"
@@ -181,12 +184,19 @@ class TaskmarketCliLane:
         canonical_wallet: str = CANONICAL_TASKMARKET_WALLET,
         runner: Runner | None = None,
         http: HttpJsonClient | None = None,
+        effect_boundary: UniversalEffectBoundary | None = None,
     ):
         self.signer_home = (signer_home or Path(os.getenv("ATM_TASKMARKET_SIGNER_HOME") or Path.home())).resolve()
         self.staging_root = (staging_root or Path(os.getenv("ATM_TASKMARKET_STAGING_ROOT") or ".atm/staging")).resolve()
         self.canonical_wallet = canonical_wallet
         self.runner = runner or _default_runner
         self.http = http or HttpJsonClient()
+        self.effect_boundary = effect_boundary
+
+    def _effects(self) -> UniversalEffectBoundary:
+        if self.effect_boundary is None:
+            self.effect_boundary = UniversalEffectBoundary(self.staging_root.parent / "universal-effects.sqlite3")
+        return self.effect_boundary
 
     @property
     def keystore_path(self) -> Path:
@@ -283,6 +293,7 @@ class TaskmarketCliLane:
             canonical_wallet=self.canonical_wallet,
             existing_submission=False,
             signer_ready=True,
+            capability_runtime_ready=TaskmarketZeroCostMaker.supported_task(str(task.get("description") or "")),
         )
         if state != OperationalState.EXECUTABLE:
             if "PAID_ENTRY" in reasons:
@@ -350,14 +361,37 @@ class TaskmarketCliLane:
         self.assert_side_effect_gate(first)
         final = self.task_get(task_id)
         self.assert_side_effect_gate(final)
+        final_hash = canonical_object_hash(final)
+        if canonical_object_hash(first) != final_hash:
+            raise TaskmarketCliError("TaskMarket object changed during final precondition refetch")
+        duplicate = self.existing_submission(task_id)
+        if duplicate:
+            raise TaskmarketDuplicateSubmission(str(duplicate.get("id") or duplicate.get("submissionId") or "UNKNOWN"))
+
+        effects = self._effects()
+        effect = effects.prepare(
+            canonical_identity=self.canonical_wallet,
+            canonical_opportunity_id=f"taskmarket:{task_id}",
+            external_action="SUBMIT",
+            canonical_args={"artifact_sha256": sha256},
+            current_external_object_hash=final_hash,
+        )
+        if effect.state == "COMMITTED":
+            raise TaskmarketCliError("effect boundary says committed but authoritative submission is absent")
+        if effect.state in {"COMMITTING", "AUTHORITATIVE_VERIFY"}:
+            effect = effects.redrive_proven_absent(effect.effect_key)
+        effects.precondition_refetched(effect.effect_key)
+        effects.committing(effect.effect_key)
 
         try:
             raw = _data(self._run(["task", "submit", task_id, "--file", str(artifact)]))
         except TaskmarketCliError:
+            effects.authoritative_verify(effect.effect_key)
             recovered = self.existing_submission(task_id)
             if recovered:
                 sid = str(recovered.get("id") or recovered.get("submissionId") or "")
                 if sid and self._verify_manifest(task_id, sid, sha256):
+                    effects.committed(effect.effect_key, sid)
                     return TaskmarketSubmitReceipt(task_id, address, sid, "RECOVERED_FROM_AUTHORITATIVE_STATE", sha256, True)
             raise
 
@@ -365,10 +399,12 @@ class TaskmarketCliLane:
         submission_id = str(raw.get("submissionId") or raw.get("id") or "")
         idempotency_key = str(raw.get("idempotencyKey") or raw.get("idempotency_key") or "")
         if not ok or not submission_id or not idempotency_key:
+            effects.authoritative_verify(effect.effect_key)
             recovered = self.existing_submission(task_id)
             if recovered:
                 recovered_id = str(recovered.get("id") or recovered.get("submissionId") or "")
                 if recovered_id and self._verify_manifest(task_id, recovered_id, sha256):
+                    effects.committed(effect.effect_key, recovered_id)
                     return TaskmarketSubmitReceipt(task_id, address, recovered_id, idempotency_key or "RECOVERED_FROM_AUTHORITATIVE_STATE", sha256, True)
             raise TaskmarketCliError("TaskMarket submit response lacks ok/submissionId/idempotencyKey")
 
@@ -378,6 +414,8 @@ class TaskmarketCliLane:
             raise TaskmarketCliError("submitted ID is not authoritative for canonical wallet")
         if not self._verify_manifest(task_id, submission_id, sha256):
             raise TaskmarketCliError("TaskMarket manifest SHA256 does not match staged artifact")
+        effects.authoritative_verify(effect.effect_key)
+        effects.committed(effect.effect_key, submission_id)
         return TaskmarketSubmitReceipt(task_id, address, submission_id, idempotency_key, sha256, True)
 
 

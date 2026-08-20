@@ -133,18 +133,14 @@ class ZeroCostModelGate:
     def opencode_health(self) -> ProviderHealth:
         key = os.getenv("OPENCODE_API_KEY", "").strip()
         model = os.getenv("ATM_OPENCODE_FREE_MODEL", "deepseek-v4-flash-free").strip()
-        verified = os.getenv("ATM_OPENCODE_ZERO_COST_VERIFIED", "").strip().lower() == "true"
-        verified_at = os.getenv("ATM_OPENCODE_ZERO_COST_VERIFIED_AT", "").strip()
         if not key:
             return ProviderHealth("opencode-free", model, False, False, False, False, False, "NO_CREDENTIAL")
-        if model not in self.OPENCODE_FREE_ALLOWLIST:
-            return ProviderHealth("opencode-free", model, True, False, False, False, False, "MODEL_NOT_ZERO_COST_ALLOWLISTED")
-        if not verified or not self._fresh_attestation(verified_at):
-            return ProviderHealth("opencode-free", model, True, False, False, False, False, "CURRENT_ZERO_COST_METADATA_NOT_PROVEN")
-        rate_ok = self._opencode_rate_probe(key, model)
+        # The current official Zen catalog exposes limited-time free models but
+        # does not prove model-specific commercial paid-task use plus a disabled
+        # balance overage path. Discovery lists are not execution authority.
         return ProviderHealth(
-            "opencode-free", model, True, rate_ok, True, rate_ok, rate_ok,
-            "PASS_ZERO_COST_LIVE_PROBE" if rate_ok else "FREE_MODEL_RATE_OR_INFERENCE_UNUSABLE",
+            "opencode-free", model, True, False, False, False, False,
+            "OFFICIAL_COMMERCIAL_USE_AND_NO_OVERAGE_CONTRACT_UNPROVEN",
         )
 
     def inspect(self) -> list[ProviderHealth]:

@@ -44,8 +44,11 @@ def task_payload(*, payment=False, window=True, stake=False):
         "status": "open",
         "phase": "active",
         "mode": "bounty",
+        "description": "Produce one source-backed Markdown report in one file with exact pass/fail acceptance criteria",
+        "submissionCount": 0,
         "escrowTxHash": "0x" + "34" * 32,
         "netReward": "5550000",
+        "expiryTime": "2099-01-01T00:00:00Z",
         "submissionWindowOpen": window,
         "stakeRequired": stake,
         "pendingActions": [
@@ -113,6 +116,13 @@ class CliRunner:
         else:
             raise AssertionError(args)
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+
+class ChangingCliRunner(CliRunner):
+    def __call__(self, args, home, env):
+        if args[:2] == ["task", "get"]:
+            self.task = dict(self.task, submissionCount=int(self.task.get("submissionCount") or 0) + 1)
+        return super().__call__(args, home, env)
 
 
 class FakeTaskmarketAdapter:
@@ -379,6 +389,18 @@ class TaskmarketCliLaneTests(unittest.TestCase):
             self.assertEqual(sum(1 for c in runner.calls if c[:2] == ["task", "submit"]), 1)
             self.assertGreaterEqual(sum(1 for c in runner.calls if c[:2] == ["task", "get"]), 2)
             self.assertTrue(state["submitted"])
+            effects = lane._effects().conn.execute("SELECT state,external_receipt_id FROM effects").fetchall()
+            self.assertEqual(effects, [("COMMITTED", "sub-1")])
+
+    def test_final_object_change_aborts_before_submit_and_effect_prepare(self):
+        with tempfile.TemporaryDirectory() as td:
+            state = {}
+            runner = ChangingCliRunner(state)
+            lane, artifact, _, _ = self._lane(td, runner=runner, state=state)
+            with self.assertRaisesRegex(TaskmarketCliError, "changed during final precondition"):
+                lane.submit_checked(TASK_ID, artifact, checker_passed=True)
+            self.assertFalse(state.get("submitted"))
+            self.assertIsNone(lane.effect_boundary)
 
     def test_ambiguous_submit_is_resolved_without_retry(self):
         with tempfile.TemporaryDirectory() as td:

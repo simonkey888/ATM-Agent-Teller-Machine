@@ -146,7 +146,20 @@ class Order013CanonTests(unittest.TestCase):
         self.assertEqual(snap.source_errors["market"], "TIMEOUT")
 
     def test_taskmarket_first_party_admission_and_duplicate_preservation(self):
-        task = {"status":"open","phase":"active","submissionWindowOpen":True,"stakeRequired":False,"escrowTxHash":"0xabc","netReward":"5550000","expiryTime":"2026-08-20T23:08:24.949Z","pendingActions":[{"role":"worker","action":"submit","eligibleAddress":None,"requiresPayment":False,"paymentAmount":None}]}
+        task = {
+            "id": "0x" + "12" * 32,
+            "status": "open",
+            "phase": "active",
+            "mode": "bounty",
+            "description": "Produce one source-backed Markdown report in one file with exact pass/fail acceptance criteria",
+            "submissionCount": 0,
+            "submissionWindowOpen": True,
+            "stakeRequired": False,
+            "escrowTxHash": "0xabc",
+            "netReward": "5550000",
+            "expiryTime": "2026-08-20T23:08:24.949Z",
+            "pendingActions": [{"role": "worker", "action": "submit", "eligibleAddress": None, "requiresPayment": False, "paymentAmount": None}],
+        }
         state, reasons = taskmarket_admission(task, canonical_wallet="0x"+"1"*40, existing_submission=False, signer_ready=True, now=NOW)
         self.assertEqual((state, reasons), (OperationalState.EXECUTABLE, ()))
         state, reasons = taskmarket_admission(task, canonical_wallet="0x"+"1"*40, existing_submission=True, signer_ready=True, now=NOW)

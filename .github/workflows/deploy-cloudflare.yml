@@ -33,6 +33,14 @@ jobs:
         env:
           PYTHONPATH: src
         run: python -m unittest discover -s tests -v
+      - name: Pinned browser and local video benchmarks
+        env:
+          PYTHONPATH: src
+        run: |
+          python scripts/install_obscura_pinned.py --target /tmp/atm-obscura-v0.2.0
+          test "$(/tmp/atm-obscura-v0.2.0/obscura --version)" = "obscura 0.2.0"
+          python scripts/order015_browser_benchmark.py --obscura /tmp/atm-obscura-v0.2.0/obscura
+          python scripts/order015_video_benchmark.py
       - name: Worker syntax
         run: node --check worker/src/index.js
 
@@ -103,6 +111,8 @@ jobs:
                   opps = json.loads(get("/api/opportunities", attempt))
                   platforms = json.loads(get("/api/platform-health", attempt))
                   money = json.loads(get("/api/money-board", attempt))
+                  capabilities = json.loads(get("/api/capabilities", attempt))
+                  providers = json.loads(get("/api/providers", attempt))
                   page = get("/", attempt)
                   radar = status.get("radar") or {}
                   operational = status.get("operational_status") or {}
@@ -118,6 +128,16 @@ jobs:
                       raise RuntimeError(f"money_stages_missing:{sorted(stages)}")
                   if stages.get("submitted_net") in (None,"UNKNOWN","0",0):
                       raise RuntimeError("order012_submitted_net_missing")
+                  if capabilities.get("schema") != "ATM_CAPABILITY_REGISTRY_V2":
+                      raise RuntimeError(f"capability_registry_missing:{capabilities.get('schema')}")
+                  enabled = {row.get("capability_id") for row in capabilities.get("capabilities",[]) if row.get("enabled") is True}
+                  if not {"BROWSER_PUBLIC_DYNAMIC_EXTRACTION","VIDEO_SHORT_FORM_ASSEMBLY"}.issubset(enabled):
+                      raise RuntimeError(f"order015_capabilities_missing:{sorted(enabled)}")
+                  if providers.get("schema") != "ATM_FREE_MODEL_PROVIDER_REGISTRY_V2":
+                      raise RuntimeError(f"provider_registry_missing:{providers.get('schema')}")
+                  opencode = next((row for row in providers.get("providers",[]) if row.get("provider_id")=="opencode-zen-free-catalog"),{})
+                  if not str(opencode.get("admission") or "").startswith("DISCOVERY_ONLY_"):
+                      raise RuntimeError("unproven_free_provider_not_fail_closed")
                   destinations = status.get("payout_destinations") or []
                   by_label = {str(row.get("display_label")): row for row in destinations if isinstance(row, dict)}
                   if "MetaMask / Base USDC" not in by_label or by_label.get("Santander", {}).get("verification_state") != "NOT_CONNECTED":

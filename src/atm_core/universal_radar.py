@@ -458,53 +458,27 @@ def taskmarket_admission(
     existing_submission: bool,
     signer_ready: bool,
     now: datetime | None = None,
+    capability_runtime_ready: bool | None = None,
 ) -> tuple[OperationalState, tuple[str, ...]]:
-    """Canon decision over a freshly re-fetched first-party TaskMarket object."""
-    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    reasons: list[str] = []
-    if existing_submission:
-        return OperationalState.WATCH_ONLY, ("ALREADY_SUBMITTED",)
-    if str(task.get("status") or "").lower() != "open" or str(task.get("phase") or "").lower() not in {"active", "open"}:
-        reasons.append("CLOSED")
-    if task.get("submissionWindowOpen") is not True:
-        reasons.append("NO_CURRENT_WORKER_ACTION")
-    if task.get("stakeRequired") is not False:
-        reasons.append("STAKE_REQUIRED")
-    if not task.get("escrowTxHash") or Decimal(str(task.get("netReward") or "0")) <= 0:
-        reasons.append("UNVERIFIED_FUNDING")
-    expiry = task.get("expiryTime")
-    if expiry:
-        try:
-            if datetime.fromisoformat(str(expiry).replace("Z", "+00:00")) <= now:
-                reasons.append("EXPIRED")
-        except ValueError:
-            reasons.append("STALE_FETCH")
-    actions = [
-        row for row in (task.get("pendingActions") or [])
-        if isinstance(row, dict) and row.get("role") == "worker" and row.get("action") == "submit"
-    ]
-    if len(actions) != 1:
-        reasons.append("NO_CURRENT_WORKER_ACTION")
-    else:
-        action = actions[0]
-        eligible = str(action.get("eligibleAddress") or "").lower()
-        if eligible and eligible != canonical_wallet.lower():
-            reasons.append("IDENTITY_NOT_READY")
-        if action.get("requiresPayment") is not False or action.get("paymentAmount") not in (None, "", 0, "0"):
-            reasons.append("PAID_ENTRY")
-    if not signer_ready:
-        reasons.append("IDENTITY_NOT_READY")
-    if not reasons:
-        return OperationalState.EXECUTABLE, ()
-    if any(code in reasons for code in ("CLOSED", "EXPIRED")):
-        state = OperationalState.STALE
-    elif "IDENTITY_NOT_READY" in reasons:
-        state = OperationalState.HUMAN_GATE
-    elif any(code in reasons for code in ("UNVERIFIED_FUNDING", "STALE_FETCH")):
-        state = OperationalState.UNVERIFIED
-    else:
-        state = OperationalState.WATCH_ONLY
-    return state, tuple(sorted(set(reasons)))
+    """Compatibility view over the single TaskMarket Cash Canon."""
+    from .cash_canon import taskmarket_cash_decision
+
+    decision = taskmarket_cash_decision(
+        task,
+        canonical_wallet=canonical_wallet,
+        existing_submission=existing_submission,
+        signer_ready=signer_ready,
+        now=now,
+        capability_runtime_ready=capability_runtime_ready,
+    )
+    mapping = {
+        "EXECUTABLE": OperationalState.EXECUTABLE,
+        "WATCH_ONLY": OperationalState.WATCH_ONLY,
+        "HUMAN_GATE": OperationalState.HUMAN_GATE,
+        "STALE": OperationalState.STALE,
+        "REJECTED": OperationalState.WATCH_ONLY,
+    }
+    return mapping[decision.disposition], decision.reasons
 
 
 class UniversalRadar:

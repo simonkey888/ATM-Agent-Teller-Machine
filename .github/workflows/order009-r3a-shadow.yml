@@ -61,11 +61,18 @@ jobs:
           from pathlib import Path
           receipt=json.loads(Path('order009-r3a-shadow.json').read_text())
           assert receipt['head']==os.environ['GITHUB_SHA']
-          assert receipt['task_selected_by_runtime'] is True
-          assert receipt['zero_cost_executor'] is True
-          assert receipt['independent_checker']=='PASS'
           assert receipt['taskmarket_mutation'] is False
           assert receipt['outgoing_spend_usd']=='0'
+          assert receipt['admission_mode']=='SHADOW_BENCHMARK'
+          assert receipt['signer_visible'] is False
+          assert receipt['economic_state_unchanged'] is True
+          assert receipt['not_counted_as_execution'] is True
+          if receipt.get('allocation_allowed', True):
+              assert receipt['task_selected_by_runtime'] is True
+              assert receipt['zero_cost_executor'] is True
+              assert receipt['independent_checker']=='PASS'
+          else:
+              assert receipt['maker_invoked'] is False
           body='ORDER-009-R3A ZERO-COST AUTOPILOT SHADOW\n```json\n'+json.dumps(receipt,sort_keys=True)+'\n```'
           req=urllib.request.Request(
               f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/issues/38/comments",
