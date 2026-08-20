@@ -8,18 +8,28 @@ import atm as v1
 import atm_cloud
 import atm_fabric
 import atm_v2 as core_runtime
+from atm_core.autonomy_fabric import (
+    CapabilityGap,
+    CapabilityGapLedger,
+    DeterministicSupervisor,
+    EventKind,
+    classify_gap,
+)
 from atm_core.execution_router import UniversalExecutionRouter, legacy_to_universal
-from atm_core.capability_registry import public_registry as public_capability_registry
+from atm_core.capability_registry_v3 import public_registry as public_capability_registry
 from atm_core.funding_gate import install_workprotocol_chain_funding_gate
 from atm_core.models import Phase
 from atm_core.opportunities import external_state_hash
+from atm_core.provider_fabric import public_provider_fabric
 from atm_core.provider_registry import public_registry as public_provider_registry
 from atm_core.radar_registry import build_canonical_registry
 from atm_core.swarm_runtime import current_pass_swarm_shadow
 from atm_core.universal_radar import OperationalState, RadarDisposition, UniversalRadar, load_snapshot, persist_snapshot
 
 
-RADAR_SNAPSHOT = Path(__file__).resolve().parents[1] / ".atm" / "universal-radar.json"
+STATE_ROOT = Path(__file__).resolve().parents[1] / ".atm"
+RADAR_SNAPSHOT = STATE_ROOT / "universal-radar.json"
+CAPABILITY_GAP_LEDGER = STATE_ROOT / "capability-gaps.sqlite3"
 
 # Extend the existing canonical durable cloud state; do not introduce a second supervisor.
 atm_cloud.STATE_ALLOWLIST.add("worker-fabric.sqlite3")
@@ -29,12 +39,49 @@ atm_cloud.STATE_ALLOWLIST.add("immune-memory.sqlite3")
 atm_cloud.STATE_ALLOWLIST.add("vnext-learning.sqlite3")
 atm_cloud.STATE_ALLOWLIST.add("universal-radar.json")
 atm_cloud.STATE_ALLOWLIST.add("universal-effects.sqlite3")
+atm_cloud.STATE_ALLOWLIST.add("capability-gaps.sqlite3")
 install_workprotocol_chain_funding_gate()
 
 # Capability routing is a pre-CLAIM gate on the existing single supervisor. Existing
 # specialist worker code remains preserved as a deferred backend; it no longer gets a
 # chance to claim merely because a worker manifest can match a task.
 _original_phase_verify_v2 = core_runtime.phase_verify_v2
+
+
+def _record_gap(opp, normalized, availability) -> tuple[bool, str | None]:
+    """Persist authoritative missed-demand evidence without creating economic truth."""
+    try:
+        funding_verified = str(normalized.funding_status.value).upper() == "VERIFIED"
+        current = bool(normalized.external_object_exists and normalized.submission_window_open)
+        gap = CapabilityGap(
+            canonical_opportunity_id=str(opp.canonical_opportunity_id),
+            source=str(normalized.source),
+            external_id=str(normalized.external_id),
+            observed_at=normalized.source_checked_at.isoformat(),
+            fresh_object_hash=str(normalized.source_state_hash),
+            work_class_candidate=str(normalized.executor_class.value),
+            requirements=tuple(str(value) for value in normalized.required_capabilities),
+            net_reward_if_verified=str(normalized.payout_net),
+            funding_verification_state="VERIFIED" if funding_verified else "UNVERIFIED",
+            competition_if_known=int(normalized.competition),
+            rejection_reason="WORK_CLASS_NOT_FIXTURE_QUALIFIED"
+            if availability.reason in {"UNSUPPORTED_CAPABILITY", "NO_MATERIAL_EXECUTION_PATH"}
+            else str(availability.reason),
+            capability_gap_reason=str(availability.reason),
+            evidence_refs=(str(normalized.canonical_url), f"source_state_hash:{normalized.source_state_hash}"),
+            currentness_state="CURRENT_AUTHORITATIVE_PREFLIGHT" if current else "NOT_CURRENT",
+            demand_class=classify_gap(synthetic=False, current=current, funding_verified=funding_verified),
+            synthetic=False,
+        )
+        ledger = CapabilityGapLedger(CAPABILITY_GAP_LEDGER)
+        try:
+            inserted = ledger.record(gap)
+        finally:
+            ledger.close()
+        return inserted, gap.fingerprint()
+    except Exception:
+        # Gap learning is advisory and must never bypass or block the fail-closed claim gate.
+        return False, None
 
 
 def _capability_first_phase_verify(config, state, adapters):
@@ -54,11 +101,14 @@ def _capability_first_phase_verify(config, state, adapters):
     opp.executor_availability = availability.model_dump(mode="json")
     opp.universal_source_state_hash = normalized.source_state_hash
     if not allowed:
+        inserted, fingerprint = _record_gap(opp, normalized, availability)
         state.last_result = {
             "status": "DO_NOT_CLAIM_EXECUTOR_UNAVAILABLE",
             "opportunity_id": opp.canonical_opportunity_id,
             "executor_class": normalized.executor_class.value,
             "executor_reason": availability.reason,
+            "capability_gap_recorded": bool(inserted),
+            "capability_gap_fingerprint": fingerprint,
             "outgoing_spend_usd": "0",
         }
         state.active_opportunity = None
@@ -122,6 +172,7 @@ def _universal_swarm_shadow(config, adapters, board):
                 "radar_disposition": item.disposition.value,
                 "operational_state": item.operational_state.value,
                 "withdrawal_path": item.withdrawal_path,
+                "scout_observed_at": snapshot.generated_at.isoformat(),
             }
             board.upsert_candidate(
                 payload,
@@ -132,6 +183,8 @@ def _universal_swarm_shadow(config, adapters, board):
                 status="NORMALIZED",
             )
         result["universal_radar"] = {
+            "state": "ACTIVE",
+            "generated_at": snapshot.generated_at.isoformat(),
             "sources": len(snapshot.platform_health),
             "opportunities": len(snapshot.opportunities),
             "attack_now": sum(1 for item in snapshot.opportunities if item.disposition == RadarDisposition.ATTACK_NOW),
@@ -169,10 +222,50 @@ def _public_radar_item(item):
     }
 
 
+def _gap_status() -> dict:
+    if not CAPABILITY_GAP_LEDGER.exists():
+        return {"schema": "ATM_CAPABILITY_GAP_LEDGER_V1", "total": 0, "verified_missed_cash_signals": 0, "synthetic": 0, "earnings_authority": False, "priority": []}
+    ledger = CapabilityGapLedger(CAPABILITY_GAP_LEDGER)
+    try:
+        status = ledger.stats()
+        status["priority"] = [
+            {
+                "canonical_id": row.get("canonical_id"),
+                "source": row.get("source"),
+                "work_class": row.get("work_class"),
+                "funding_state": row.get("funding_state"),
+                "rejection_reason": row.get("rejection_reason"),
+                "demand_class": row.get("demand_class"),
+                "synthetic": bool(row.get("synthetic")),
+                "priority": ledger.priority(row),
+            }
+            for row in ledger.prioritized(limit=8)
+        ]
+        return status
+    finally:
+        ledger.close()
+
+
 def _fabric_build_status(core, state, ledger, targets, board, lease, control):
     status = _original_build_status(core, state, ledger, targets, board, lease, control)
     status["capability_registry"] = public_capability_registry()
     status["provider_registry"] = public_provider_registry()
+    status["free_provider_fabric"] = public_provider_fabric()
+    status["capability_gap_ledger"] = _gap_status()
+    supervisor = DeterministicSupervisor()
+    status["autonomy_fabric"] = {
+        "schema": supervisor.schema,
+        "single_controller": supervisor.single_controller,
+        "cash_canon_authority": supervisor.cash_canon_authority,
+        "effect_authority": supervisor.effect_authority,
+        "event_driven": True,
+        "ephemeral_workers": True,
+        "structural_tool_allowlists": True,
+        "discovery_tick_roles": [job.role.value for job in supervisor.dispatch(EventKind.DISCOVERY_TICK)],
+        "new_candidate_roles": [job.role.value for job in supervisor.dispatch(EventKind.NEW_CANDIDATE)],
+        "cash_mode": "ACTIVE",
+        "outgoing_spend_usd": "0",
+    }
     active = status.get("active_task")
     opp = getattr(state, "active_opportunity", None)
     if isinstance(active, dict) and opp is not None:
@@ -224,7 +317,13 @@ def _fabric_sanitize_status(status):
     platform_health = status.get("platform_health")
     if isinstance(platform_health, list):
         sanitized["platform_health"] = platform_health[:32]
-    for key in ("capability_registry", "provider_registry"):
+    for key in (
+        "capability_registry",
+        "provider_registry",
+        "free_provider_fabric",
+        "capability_gap_ledger",
+        "autonomy_fabric",
+    ):
         value = status.get(key)
         if isinstance(value, dict):
             sanitized[key] = value
