@@ -6,7 +6,7 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -79,7 +79,7 @@ ROLE_SPECS: dict[WorkerRole, WorkerSpec] = {
     WorkerRole.SCOUT: WorkerSpec(WorkerRole.SCOUT, ("http_read", "github_read", "browser_read"), "READ_ONLY_ALLOWLIST", False, 90),
     WorkerRole.FALSIFIER: WorkerSpec(WorkerRole.FALSIFIER, ("http_read", "github_read", "chain_read"), "READ_ONLY_ALLOWLIST", False, 60),
     WorkerRole.DOCTOR: WorkerSpec(WorkerRole.DOCTOR, ("telemetry_read", "checkpoint_read", "bounded_retry"), "CONTROL_PLANE_ONLY", False, 60),
-    WorkerRole.SKILL_FORGE: WorkerSpec(WorkerRole.SKILL_FORGE, ("workspace", "test_runner", "package_metadata_read"), "SECRETLESS_SANDBOX", False, 600),
+    WorkerRole.SKILL_FORGE: WorkerSpec(WorkerRole.SKILL_FORGE, ("sandbox_worker_dispatch", "fixture_evidence_read", "package_metadata_read"), "SECRETLESS_SANDBOX_ONLY", False, 600),
     WorkerRole.WORKER: WorkerSpec(WorkerRole.WORKER, ("workspace", "capability_tools"), "JOB_ALLOWLIST", False, 900),
     WorkerRole.CHECKER: WorkerSpec(WorkerRole.CHECKER, ("artifact_read", "test_runner"), "DENY_BY_DEFAULT", False, 300),
 }
@@ -460,62 +460,16 @@ def deterministic_promotion(capability_id: str, evidence: PromotionEvidence, *, 
         "LICENSE_VERIFIED": evidence.license_verified,
         "TOOL_CONTRACT_EXPLICIT": evidence.tool_contract_explicit,
         "NETWORK_CONTRACT_EXPLICIT": evidence.network_contract_explicit,
-        "PROPOSER_CANNOT_SELF_ENABLE": str(proposed_by).upper() != "DETERMINISTIC_PROMOTION_GATE",
     }
     failed = tuple(name for name, passed in checks.items() if not passed)
-    # A forge/model can propose evidence, but the deterministic gate makes the decision.
     return PromotionDecision(PROMOTION_SCHEMA, capability_id, not failed, failed, iso())
 
 
 class SkillForge:
-    """Secretless fixture pipeline. Produces promotion evidence, never edits the registry itself."""
+    """Compatibility surface intentionally disabled: candidate code may not run in the supervisor process."""
 
-    def evaluate(
-        self,
-        capability_id: str,
-        executor: Callable[[Any], Any],
-        checker: Callable[[Any, Any], bool],
-        fixtures: Mapping[str, Iterable[Any]],
-        *,
-        commercial_use_ok: bool,
-        supply_chain_pinned: bool,
-        license_verified: bool,
-        existing_duplicate: bool = False,
-    ) -> PromotionDecision:
-        required = ("happy", "edge", "adversarial")
-        results: dict[str, bool] = {}
-        try:
-            for name in required:
-                cases = tuple(fixtures.get(name, ()))
-                if not cases:
-                    results[name] = False
-                    continue
-                passed = True
-                for case in cases:
-                    artifact = executor(case)
-                    if not bool(checker(case, artifact)):
-                        passed = False
-                results[name] = passed
-        except Exception:
-            results = {name: False for name in required}
-        evidence = PromotionEvidence(
-            owner_cost_usd="0",
-            commercial_use_ok=commercial_use_ok,
-            supply_chain_pinned=supply_chain_pinned,
-            no_secret_requirement=True,
-            sandbox_pass=all(name in results for name in required),
-            happy_pass=results.get("happy", False),
-            edge_pass=results.get("edge", False),
-            adversarial_pass=results.get("adversarial", False),
-            checker_independent_enough=True,
-            artifact_contract_pass=all(results.values()),
-            resource_limit_pass=True,
-            no_existing_capability_duplicate=not existing_duplicate,
-            license_verified=license_verified,
-            tool_contract_explicit=True,
-            network_contract_explicit=True,
-        )
-        return deterministic_promotion(capability_id, evidence, proposed_by="SKILL_FORGE")
+    def evaluate(self, *_args: Any, **_kwargs: Any) -> PromotionDecision:
+        raise RuntimeError("IN_PROCESS_SKILL_FORGE_DISABLED_USE_SECRETLESS_SANDBOX_EVIDENCE")
 
 
 @dataclass
