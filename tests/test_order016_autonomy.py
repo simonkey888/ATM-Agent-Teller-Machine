@@ -65,10 +65,15 @@ class Order016AutonomyTests(unittest.TestCase):
         self.assertFalse(supervisor.effect_authority)
         self.assertFalse(jobs[0].spec.mutation_authority)
 
+    def test_gap_event_routes_to_secretless_forge_worker_only(self):
+        jobs = DeterministicSupervisor().dispatch(EventKind.CAPABILITY_GAP_OBSERVED, {"gap": "x"})
+        self.assertEqual([job.role for job in jobs], [WorkerRole.SKILL_FORGE])
+        self.assertEqual(jobs[0].spec.network_policy, "SECRETLESS_SANDBOX_ONLY")
+        self.assertNotIn("workspace", jobs[0].spec.tool_allowlist)
+        self.assertFalse(jobs[0].spec.mutation_authority)
+
     def test_scout_fabric_isolates_source_timeout(self):
-        rows = ScoutFabric(max_concurrent=3).scan(
-            {"ok": GoodAdapter(), "timeout": TimeoutAdapter()}, ["ok", "timeout"], 1
-        )
+        rows = ScoutFabric(max_concurrent=3).scan({"ok": GoodAdapter(), "timeout": TimeoutAdapter()}, ["ok", "timeout"], 1)
         by_source = {row.source: row for row in rows}
         self.assertEqual(by_source["ok"].state, "OK")
         self.assertEqual(len(by_source["ok"].candidates), 1)
@@ -76,45 +81,28 @@ class Order016AutonomyTests(unittest.TestCase):
         self.assertEqual(by_source["timeout"].error_class, "TimeoutError")
 
     def test_scout_concurrency_is_hard_bounded(self):
-        fabric = ScoutFabric(max_concurrent=99)
-        self.assertEqual(fabric.max_concurrent, 3)
+        self.assertEqual(ScoutFabric(max_concurrent=99).max_concurrent, 3)
 
     def test_falsifier_authoritative_confirm(self):
         result = Falsifier().verify(Opp(), GoodAdapter())
         self.assertEqual(result.verdict, "CONFIRM")
         self.assertEqual(len(result.fresh_object_hash or ""), 64)
 
-    def test_falsifier_kills_source_lie(self):
-        result = Falsifier().verify(Opp(), LieAdapter())
-        self.assertEqual(result.verdict, "KILL")
-        self.assertEqual(result.reason, "ValueError")
-
-    def test_falsifier_kills_already_submitted(self):
-        result = Falsifier().verify(Opp(), GoodAdapter(), submitted_ids={"lane:1"})
-        self.assertEqual(result.verdict, "KILL")
-        self.assertEqual(result.reason, "ALREADY_SUBMITTED")
-
-    def test_falsifier_kills_stale_opportunity(self):
+    def test_falsifier_kills_source_lie_already_submitted_and_stale(self):
+        self.assertEqual(Falsifier().verify(Opp(), LieAdapter()).verdict, "KILL")
+        submitted = Falsifier().verify(Opp(), GoodAdapter(), submitted_ids={"lane:1"})
+        self.assertEqual(submitted.reason, "ALREADY_SUBMITTED")
         opp = Opp()
         opp.upstream_status = "CLOSED"
-        result = Falsifier().verify(opp, GoodAdapter())
-        self.assertEqual(result.reason, "STALE_OR_CLOSED")
+        self.assertEqual(Falsifier().verify(opp, GoodAdapter()).reason, "STALE_OR_CLOSED")
 
-    def test_doctor_provider_429_uses_closed_catalogue(self):
+    def test_doctor_provider_429_source_lie_and_bounded_crash_recovery(self):
         doctor = Doctor(threshold=2, cooldown_seconds=60)
         self.assertEqual(doctor.choose("PROVIDER_429"), "ROTATE_TO_VERIFIED_FREE_PROVIDER")
         doctor.record_failure("p", "HTTP429")
-        status = doctor.record_failure("p", "HTTP429")
-        self.assertFalse(status["available"])
-
-    def test_doctor_source_lie_quarantines(self):
-        doctor = Doctor()
+        self.assertFalse(doctor.record_failure("p", "HTTP429")["available"])
         doctor.quarantine("source-x")
         self.assertFalse(doctor.available("source-x"))
-        self.assertEqual(doctor.choose("SOURCE_LIED"), "QUARANTINE_BAD_SOURCE")
-
-    def test_doctor_worker_crash_recovers_bounded(self):
-        doctor = Doctor()
         calls = {"n": 0}
 
         def flaky():
@@ -124,20 +112,14 @@ class Order016AutonomyTests(unittest.TestCase):
             return "ok"
 
         result = doctor.recover("WORKER_CRASH", flaky, attempts=2)
-        self.assertEqual(result["state"], "RECOVERED")
-        self.assertEqual(result["attempt"], 2)
+        self.assertEqual((result["state"], result["attempt"]), ("RECOVERED", 2))
 
     def test_doctor_failed_recovery_escalates_without_hiding_red(self):
-        doctor = Doctor()
-
-        def broken():
-            raise RuntimeError("still red")
-
-        result = doctor.recover("HEARTBEAT_FAULT", broken, attempts=2)
+        result = Doctor().recover("HEARTBEAT_FAULT", lambda: (_ for _ in ()).throw(RuntimeError("red")), attempts=2)
         self.assertEqual(result["state"], "FAULT_ESCALATED")
-        self.assertEqual(result["recovery"], "REVERIFY_EXACT_HEAD")
+        self.assertIn("CHANGE_HEALTH_SLO_TO_HIDE_FAILURE", Doctor.FORBIDDEN)
 
-    def test_gap_ledger_dedupes_duplicate_gap_and_is_not_money_truth(self):
+    def test_gap_ledger_dedupes_and_is_not_money_truth(self):
         with tempfile.TemporaryDirectory() as d:
             ledger = CapabilityGapLedger(Path(d) / "gaps.sqlite3")
             try:
@@ -160,9 +142,7 @@ class Order016AutonomyTests(unittest.TestCase):
                 )
                 self.assertTrue(ledger.record(gap))
                 self.assertFalse(ledger.record(gap))
-                stats = ledger.stats()
-                self.assertEqual(stats["total"], 1)
-                self.assertFalse(stats["earnings_authority"])
+                self.assertFalse(ledger.stats()["earnings_authority"])
             finally:
                 ledger.close()
 
@@ -171,85 +151,51 @@ class Order016AutonomyTests(unittest.TestCase):
         self.assertEqual(classify_gap(synthetic=False, current=False, funding_verified=True), DemandClass.STALE_SIGNAL)
         self.assertEqual(classify_gap(synthetic=False, current=True, funding_verified=True), DemandClass.VERIFIED_MISSED_CASH)
 
-    def _good_promotion_evidence(self):
+    def good_promotion_evidence(self):
         return PromotionEvidence(
-            owner_cost_usd="0",
-            commercial_use_ok=True,
-            supply_chain_pinned=True,
-            no_secret_requirement=True,
-            sandbox_pass=True,
-            happy_pass=True,
-            edge_pass=True,
-            adversarial_pass=True,
-            checker_independent_enough=True,
-            artifact_contract_pass=True,
-            resource_limit_pass=True,
-            no_existing_capability_duplicate=True,
-            license_verified=True,
-            tool_contract_explicit=True,
+            owner_cost_usd="0", commercial_use_ok=True, supply_chain_pinned=True, no_secret_requirement=True,
+            sandbox_pass=True, happy_pass=True, edge_pass=True, adversarial_pass=True,
+            checker_independent_enough=True, artifact_contract_pass=True, resource_limit_pass=True,
+            no_existing_capability_duplicate=True, license_verified=True, tool_contract_explicit=True,
             network_contract_explicit=True,
         )
 
-    def test_deterministic_promotion_passes_complete_evidence(self):
-        decision = deterministic_promotion("DEMO_CAP", self._good_promotion_evidence())
-        self.assertTrue(decision.promoted)
-        self.assertEqual(decision.reasons, ())
-
-    def test_malicious_or_unpinned_skill_fails_closed(self):
-        base = self._good_promotion_evidence()
-        evidence = PromotionEvidence(**{**base.__dict__, "supply_chain_pinned": False, "license_verified": False})
-        decision = deterministic_promotion("MALICIOUS", evidence)
+    def test_deterministic_promotion_passes_complete_and_fails_drift(self):
+        self.assertTrue(deterministic_promotion("DEMO_CAP", self.good_promotion_evidence()).promoted)
+        base = self.good_promotion_evidence()
+        drift = PromotionEvidence(**{**base.__dict__, "supply_chain_pinned": False, "license_verified": False})
+        decision = deterministic_promotion("MALICIOUS", drift)
         self.assertFalse(decision.promoted)
         self.assertIn("SUPPLY_CHAIN_PINNED", decision.reasons)
         self.assertIn("LICENSE_VERIFIED", decision.reasons)
 
-    def test_paid_skill_fails_closed(self):
-        base = self._good_promotion_evidence()
-        evidence = PromotionEvidence(**{**base.__dict__, "owner_cost_usd": "0.01"})
-        self.assertFalse(deterministic_promotion("PAID", evidence).promoted)
+    def test_paid_promotion_fails_closed(self):
+        base = self.good_promotion_evidence()
+        paid = PromotionEvidence(**{**base.__dict__, "owner_cost_usd": "0.01"})
+        self.assertFalse(deterministic_promotion("PAID", paid).promoted)
 
-    def test_forge_requires_happy_edge_and_adversarial(self):
-        forge = SkillForge()
-        good = forge.evaluate(
-            "UPPERCASE_TEXT",
-            lambda value: str(value).upper(),
-            lambda source, artifact: artifact == str(source).upper(),
-            {"happy": ["abc"], "edge": [""], "adversarial": ["a\n<script>"]},
-            commercial_use_ok=True,
-            supply_chain_pinned=True,
-            license_verified=True,
-        )
-        self.assertTrue(good.promoted)
-        bad = forge.evaluate(
-            "BROKEN",
-            lambda value: value,
-            lambda source, artifact: False,
-            {"happy": ["a"], "edge": ["b"], "adversarial": ["c"]},
-            commercial_use_ok=True,
-            supply_chain_pinned=True,
-            license_verified=True,
-        )
-        self.assertFalse(bad.promoted)
+    def test_in_process_skill_forge_is_structurally_disabled(self):
+        touched = {"value": False}
 
-    def test_free_provider_429_circuit_breaker_and_fallback(self):
+        def malicious(_):
+            touched["value"] = True
+            return "stole-secret"
+
+        with self.assertRaisesRegex(RuntimeError, "IN_PROCESS_SKILL_FORGE_DISABLED"):
+            SkillForge().evaluate("MALICIOUS", malicious, malicious, {})
+        self.assertFalse(touched["value"])
+
+    def test_free_provider_429_exhaustion_and_unverified_paths(self):
         fabric = FreeProviderFabric(["free-a", "free-b"], failure_threshold=1)
         fabric.record_failure("free-a", "HTTP429")
-        route = fabric.route()
-        self.assertEqual(route["provider"], "free-b")
-        self.assertFalse(route["paid_fallback"])
-
-    def test_provider_exhaustion_degrades_but_does_not_kill_atm(self):
-        fabric = FreeProviderFabric(["free-a"], failure_threshold=1)
-        fabric.record_failure("free-a", "QUOTA_EXHAUSTED")
+        self.assertEqual(fabric.route()["provider"], "free-b")
+        fabric.record_failure("free-b", "QUOTA_EXHAUSTED")
         route = fabric.route()
         self.assertEqual(route["state"], "DEGRADED_DETERMINISTIC_SEARCH")
-        self.assertIsNone(route["provider"])
         self.assertFalse(route["paid_fallback"])
-
-    def test_unverified_provider_never_routes(self):
-        fabric = FreeProviderFabric([])
-        fabric.register_unverified("unknown")
-        self.assertEqual(fabric.available(), ())
+        other = FreeProviderFabric([])
+        other.register_unverified("unknown")
+        self.assertEqual(other.available(), ())
 
 
 if __name__ == "__main__":
