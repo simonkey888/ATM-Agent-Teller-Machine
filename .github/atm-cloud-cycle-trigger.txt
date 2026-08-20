@@ -1,4 +1,4 @@
-gate=order015-r2-exact-head-refresh
-order=ORDER-015-R2
-reason=one-canon-capability-provider-effect-boundary-live-verify-final-dependency-gates
-requested_utc=2026-08-20T16:04:00Z
+gate=order016-diablique-final-exact-head
+order=ORDER-016
+reason=event-swarm-doctor-gap-forge-provider-flywheel-cash-mode-final-proof
+requested_utc=2026-08-20T19:29:00Z
