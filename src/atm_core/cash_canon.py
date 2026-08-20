@@ -71,6 +71,14 @@ def qualified_work_classes() -> tuple[str, ...]:
 
 def classify_work(description: str) -> WorkClass:
     text = str(description or "").lower()
+    if re.search(
+        r"ignore\s+(?:all\s+)?previous\s+instructions|reveal\s+(?:the\s+)?(?:system|developer)\s+prompt|"
+        r"(?:print|send|upload)\s+[^.\n]{0,80}(?:api[_ -]?key|private[_ -]?key|seed phrase|credential|secret)|"
+        r"override\s+[^.\n]{0,80}(?:policy|guardrail)|disable\s+[^.\n]{0,80}(?:safety|validation)",
+        text,
+        re.I,
+    ):
+        return WorkClass.UNSUPPORTED
     if re.search(r"\b(recruit|referral|growth sprint|cold call|telemarket|outbound sales)\b", text):
         return WorkClass.UNSUPPORTED
     if re.search(r"\b(mp4|video generation|photo editing|brand identity|logo design)\b", text):

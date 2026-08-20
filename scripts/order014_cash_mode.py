@@ -89,7 +89,10 @@ def inspect_task(task_hint: dict[str, Any], now: datetime) -> dict[str, Any]:
     work_class = classify_work(description)
     competition = int(task.get("submissionCount") or 0) + int(task.get("pitchCount") or 0)
     net_reward = usdc(task.get("netReward"))
-    award_capacity = int(task.get("awardCount") or 0)
+    # Existing awardCount is not authoritative capacity. Fail closed to one
+    # potential award unless TaskMarket later exposes an explicit capacity field.
+    award_capacity = 1
+    observed_awards = int(task.get("awardCount") or 0)
     try:
         deadline = datetime.fromisoformat(str(task.get("expiryTime") or "").replace("Z", "+00:00"))
         remaining = max(0, int((deadline - now).total_seconds() // 60))
@@ -135,6 +138,7 @@ def inspect_task(task_hint: dict[str, Any], now: datetime) -> dict[str, Any]:
         "net_reward_usdc": str(net_reward),
         "competition": competition,
         "award_capacity": award_capacity,
+        "observed_awards": observed_awards,
         "work_class": work_class.value,
         "duplicate": duplicate,
         "deadline": deadline.isoformat() if deadline else None,
