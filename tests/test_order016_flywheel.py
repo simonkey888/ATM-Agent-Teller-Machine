@@ -5,17 +5,45 @@ import unittest
 from atm_core.autonomy_fabric import Doctor
 from atm_core.learning import SkillCapsule, SkillStage
 from atm_core.playbook_learning import playbook_candidate
-from atm_core.skill_forge import DemandDrivenSkillForge, FORGE_STAGES, public_skill_forge_contract
+from atm_core.skill_forge import (
+    DemandDrivenSkillForge,
+    FORGE_STAGES,
+    FIXTURE_CLASSES,
+    SandboxFixtureEvidence,
+    public_skill_forge_contract,
+)
 
 
 class Order016FlywheelTests(unittest.TestCase):
-    def fixtures(self):
-        return {
-            "happy": ["abc"],
-            "edge": [""],
-            "adversarial": ["<script>alert(1)</script>"],
-            "market_shaped": ["Customer deliverable: normalize these 3 rows; preserve quoted commas."],
+    def sandbox_evidence(self, *, omit: str | None = None, secret_count: int = 0, network_policy: str = "DENY"):
+        return [
+            SandboxFixtureEvidence(
+                fixture_class=name,
+                sandbox_id=f"sandbox-{name}",
+                process_isolated=True,
+                environment_secret_count=secret_count,
+                network_policy=network_policy,
+                tool_allowlist_enforced=True,
+                executor_pass=True,
+                checker_pass=True,
+                artifact_contract_pass=True,
+            )
+            for name in FIXTURE_CLASSES
+            if name != omit
+        ]
+
+    def evaluate(self, evidence, **overrides):
+        kwargs = {
+            "commercial_use_ok": True,
+            "supply_chain_pinned": True,
+            "license_verified": True,
+            "existing_duplicate": False,
+            "falsification_pass": True,
+            "benchmark_pass": True,
+            "owner_cost_usd": "0",
         }
+        kwargs.update(overrides)
+        return DemandDrivenSkillForge().evaluate("CANDIDATE", evidence, **kwargs)
 
     def test_forge_pipeline_contains_full_order016_sequence(self):
         expected = (
@@ -27,81 +55,38 @@ class Order016FlywheelTests(unittest.TestCase):
         contract = public_skill_forge_contract()
         self.assertFalse(contract["registry_mutation_authority"])
         self.assertFalse(contract["llm_can_self_enable"])
+        self.assertFalse(contract["in_process_candidate_execution"])
+        self.assertEqual(contract["candidate_code_execution"], "EXTERNAL_SECRETLESS_SANDBOX_WORKER_ONLY")
         self.assertEqual(contract["owner_cost_ceiling_usd"], "0")
 
     def test_market_shaped_fixture_is_mandatory(self):
-        forge = DemandDrivenSkillForge()
-        incomplete = self.fixtures()
-        incomplete.pop("market_shaped")
-        decision = forge.evaluate(
-            "CSV_QUOTED_COMMAS",
-            lambda value: value,
-            lambda source, artifact: source == artifact,
-            incomplete,
-            commercial_use_ok=True,
-            supply_chain_pinned=True,
-            license_verified=True,
-        )
+        decision = self.evaluate(self.sandbox_evidence(omit="market_shaped"))
         self.assertFalse(decision.promoted)
         self.assertIn("MARKET_SHAPED_PASS", decision.failures)
 
-    def test_complete_forge_promotes_decision_but_does_not_mutate_registry(self):
-        forge = DemandDrivenSkillForge()
-        decision = forge.evaluate(
-            "CSV_QUOTED_COMMAS",
-            lambda value: value,
-            lambda source, artifact: source == artifact,
-            self.fixtures(),
-            commercial_use_ok=True,
-            supply_chain_pinned=True,
-            license_verified=True,
-        )
+    def test_complete_sandbox_evidence_promotes_decision_but_not_registry(self):
+        decision = self.evaluate(self.sandbox_evidence())
         self.assertTrue(decision.promoted)
         self.assertFalse(decision.registry_mutated)
 
     def test_falsifier_or_benchmark_failure_blocks_promotion(self):
-        forge = DemandDrivenSkillForge()
-        for kwargs, expected in (
-            ({"falsifier": lambda capability, results: False}, "FALSIFICATION_PASS"),
-            ({"benchmark": lambda capability, results: False}, "BENCHMARK_PASS"),
-        ):
-            with self.subTest(expected=expected):
-                decision = forge.evaluate(
-                    "CANDIDATE",
-                    lambda value: value,
-                    lambda source, artifact: source == artifact,
-                    self.fixtures(),
-                    commercial_use_ok=True,
-                    supply_chain_pinned=True,
-                    license_verified=True,
-                    **kwargs,
-                )
-                self.assertFalse(decision.promoted)
-                self.assertIn(expected, decision.failures)
+        decision = self.evaluate(self.sandbox_evidence(), falsification_pass=False)
+        self.assertIn("FALSIFICATION_PASS", decision.failures)
+        decision = self.evaluate(self.sandbox_evidence(), benchmark_pass=False)
+        self.assertIn("BENCHMARK_PASS", decision.failures)
 
-    def test_duplicate_capability_and_license_drift_fail_closed(self):
-        forge = DemandDrivenSkillForge()
-        duplicate = forge.evaluate(
-            "DUP",
-            lambda value: value,
-            lambda source, artifact: True,
-            self.fixtures(),
-            commercial_use_ok=True,
-            supply_chain_pinned=True,
-            license_verified=True,
-            existing_duplicate=True,
-        )
-        self.assertIn("NO_EXISTING_CAPABILITY_DUPLICATE", duplicate.failures)
-        drift = forge.evaluate(
-            "LICENSE_DRIFT",
-            lambda value: value,
-            lambda source, artifact: True,
-            self.fixtures(),
-            commercial_use_ok=True,
-            supply_chain_pinned=True,
-            license_verified=False,
-        )
-        self.assertIn("LICENSE_VERIFIED", drift.failures)
+    def test_duplicate_license_tool_and_cost_drift_fail_closed(self):
+        self.assertIn("NO_EXISTING_CAPABILITY_DUPLICATE", self.evaluate(self.sandbox_evidence(), existing_duplicate=True).failures)
+        self.assertIn("LICENSE_VERIFIED", self.evaluate(self.sandbox_evidence(), license_verified=False).failures)
+        self.assertIn("ZERO_SPEND", self.evaluate(self.sandbox_evidence(), owner_cost_usd="0.01").failures)
+
+    def test_malicious_sandbox_attestation_with_secret_or_network_escape_fails(self):
+        secret = self.evaluate(self.sandbox_evidence(secret_count=1))
+        self.assertFalse(secret.promoted)
+        self.assertIn("ADVERSARIAL_PASS", secret.failures)
+        network = self.evaluate(self.sandbox_evidence(network_policy="UNRESTRICTED"))
+        self.assertFalse(network.promoted)
+        self.assertIn("MARKET_SHAPED_PASS", network.failures)
 
     def test_checker_failure_has_bounded_doctor_recovery(self):
         doctor = Doctor()
