@@ -1,4 +1,4 @@
-gate=order013-human-gate-correction-live-refresh
-order=ORDER-013
-reason=aud-5356057214-individual-authority
-requested_utc=2026-08-20T13:00:00Z
+gate=order014-cash-mode-live-refresh
+order=ORDER-014
+reason=cash-canon-continuous-scan
+requested_utc=2026-08-20T13:05:00Z
