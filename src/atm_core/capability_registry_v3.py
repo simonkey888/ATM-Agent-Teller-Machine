@@ -5,6 +5,7 @@ from typing import Any, Iterable
 
 from .autonomy_fabric import PromotionDecision
 from .capability_registry import CAPABILITY_REGISTRY, capability_enabled
+from .skill_forge import public_skill_forge_contract
 
 
 REGISTRY_SCHEMA_V3 = "ATM_CAPABILITY_REGISTRY_V3"
@@ -55,5 +56,6 @@ def public_registry(promotions: Iterable[PromotionDecision] = ()) -> dict[str, A
             "owner_cost_ceiling_usd": "0",
             "fail_closed": True,
         },
+        "skill_forge": public_skill_forge_contract(),
         "promotion_decisions": promotion_rows,
     }
