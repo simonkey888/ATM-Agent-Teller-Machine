@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from decimal import Decimal
+from pathlib import Path
 
+import atm_v2_oci
 from atm_core.models import Opportunity, Phase, RuntimeState
+from atm_core.payments import PaymentLedger, PaymentNotFinal
 from atm_core.work_conserving import (
     MUTATION_SECRETS,
     detach_external_wait,
@@ -25,6 +29,16 @@ class _Adapter:
 
     def fetch_payment(self, opp, recipient):
         return []
+
+
+class _TaskmarketAdapter(_Adapter):
+    def monitor(self, opp):
+        del opp
+        return {"status": "open", "awards": []}
+
+    def fetch_payment(self, opp, recipient):
+        del opp, recipient
+        raise PaymentNotFinal("not settled")
 
 
 class WorkConservingRuntimeTests(unittest.TestCase):
@@ -80,6 +94,23 @@ class WorkConservingRuntimeTests(unittest.TestCase):
         self.assertEqual(getattr(state.in_flight[0], "inflight_stage"), "ACCEPTED")
         self.assertFalse(bool(getattr(state.in_flight[0], "inflight_terminal", False)))
         self.assertEqual(state.phase, Phase.DISCOVER)
+
+    def test_real_oci_run_watchers_seam_tracks_taskmarket_without_blocking(self):
+        with tempfile.TemporaryDirectory() as td:
+            opp = self._opp("taskmarket").model_copy(
+                update={"inflight_stage": "SUBMITTED", "inflight_terminal": False}
+            )
+            state = RuntimeState(phase=Phase.DISCOVER, in_flight=[opp])
+            config = {"payment_recipient_public_identifier": "0xd89Ef03bC3105C538529AC2657Bc4488c94ff4E4"}
+            stats = atm_v2_oci.run_watchers(
+                config,
+                state,
+                {"taskmarket": _TaskmarketAdapter()},
+                PaymentLedger(Path(td) / "ledger.jsonl"),
+            )
+            self.assertEqual(stats, {"tracked": 1, "active": 1, "generic_checked": 0})
+            self.assertEqual(state.in_flight[0].inflight_stage, "SUBMITTED")
+            self.assertEqual(state.phase, Phase.DISCOVER)
 
     def test_delay_is_work_conserving_but_never_busy_loops(self):
         config = {

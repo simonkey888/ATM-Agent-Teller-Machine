@@ -151,6 +151,17 @@ class MandatoryR3ANegativeControls(unittest.TestCase):
             self.assertEqual(calls, [["actions"]])
             self.assertNotIn(["init"], calls)
 
+    def test_live_workflows_bind_environment_and_forbid_ephemeral_workprotocol_identity(self):
+        root = Path(__file__).resolve().parents[1]
+        submit = (root / ".github" / "workflows" / "order009-r3-submit.yml").read_text(encoding="utf-8")
+        cash_loop = (root / ".github" / "workflows" / "order010-cash-loop.yml").read_text(encoding="utf-8")
+        workprotocol = (root / "scripts" / "order010_workprotocol_live.py").read_text(encoding="utf-8")
+        self.assertIn("environment: atm-production", submit)
+        self.assertIn("group: atm-economic-authority", submit)
+        self.assertIn("if: ${{ false }}", cash_loop)
+        self.assertNotIn("/api/agents/register", workprotocol)
+        self.assertIn("WORKPROTOCOL_DURABLE_IDENTITY_REQUIRED", workprotocol)
+
 
 if __name__ == "__main__":
     unittest.main()

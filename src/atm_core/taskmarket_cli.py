@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -8,12 +10,13 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, MutableMapping
 
 from .payments import HttpJsonClient
 
 CANONICAL_TASKMARKET_WALLET = "0xd89Ef03bC3105C538529AC2657Bc4488c94ff4E4"
 TASKMARKET_PACKAGE = "@lucid-agents/taskmarket@latest"
+TASKMARKET_PRODUCTION_API = "https://api.taskmarket.dev"
 
 
 class TaskmarketCliError(RuntimeError):
@@ -304,3 +307,81 @@ class TaskmarketCliLane:
         if not self._verify_manifest(task_id, submission_id, sha256):
             raise TaskmarketCliError("TaskMarket manifest SHA256 does not match staged artifact")
         return TaskmarketSubmitReceipt(task_id, address, submission_id, idempotency_key, sha256, True)
+
+
+def materialize_supervisor_keystore(
+    *,
+    lane: TaskmarketCliLane | None = None,
+    environ: MutableMapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Materialize only the existing encrypted keystore into the trusted signer home.
+
+    The transport value is removed before this function returns, including failure
+    paths. No wallet creation/import operation is exposed here.
+    """
+
+    lane = lane or TaskmarketCliLane()
+    env = os.environ if environ is None else environ
+    encoded = str(env.get("TASKMARKET_KEYSTORE_B64") or "").strip()
+    configured_api = str(env.get("TASKMARKET_API_URL") or TASKMARKET_PRODUCTION_API).rstrip("/")
+    if configured_api != TASKMARKET_PRODUCTION_API:
+        env.pop("TASKMARKET_KEYSTORE_B64", None)
+        raise TaskmarketCliError("TaskMarket API URL is not the intended production backend")
+    env["TASKMARKET_API_URL"] = TASKMARKET_PRODUCTION_API
+
+    path = lane.keystore_path
+    if not encoded:
+        if not path.is_file():
+            return {"ready": False, "materialized": False, "reason": "ENCRYPTED_KEYSTORE_ABSENT"}
+        address = lane.address()
+        return {"ready": True, "materialized": False, "wallet": address, "transport_secret_removed": True}
+
+    try:
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise TaskmarketCliError("TaskMarket encrypted keystore transport is invalid base64") from exc
+    finally:
+        env.pop("TASKMARKET_KEYSTORE_B64", None)
+
+    try:
+        parsed = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TaskmarketCliError("TaskMarket encrypted keystore is not valid JSON") from exc
+    required = ("encryptedKey", "walletAddress", "deviceId", "apiToken")
+    if not isinstance(parsed, dict) or not all(isinstance(parsed.get(key), str) and parsed[key] for key in required):
+        raise TaskmarketCliError("TaskMarket encrypted keystore shape is invalid")
+    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", parsed["walletAddress"]):
+        raise TaskmarketCliError("TaskMarket encrypted keystore wallet field is invalid")
+    if parsed["walletAddress"].lower() != lane.canonical_wallet.lower():
+        raise TaskmarketCliError("TaskMarket encrypted keystore wallet mismatch")
+
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.parent.is_symlink() or not path.parent.is_dir():
+        raise TaskmarketCliError("TaskMarket signer directory is not a private real directory")
+    os.chmod(path.parent, 0o700)
+    if path.exists():
+        if not path.is_file() or path.is_symlink() or path.read_bytes() != payload:
+            raise TaskmarketCliError("TaskMarket signer home contains a conflicting keystore")
+        materialized = False
+    else:
+        temporary = path.with_name(path.name + f".tmp-{os.getpid()}")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        materialized = True
+    os.chmod(path, 0o600)
+    address = lane.address()
+    return {
+        "ready": True,
+        "materialized": materialized,
+        "wallet": address,
+        "transport_secret_removed": "TASKMARKET_KEYSTORE_B64" not in env,
+    }

@@ -393,6 +393,11 @@ def phase_claim(config: dict[str, Any], state: RuntimeState, adapters: dict[str,
         state.phase = Phase.DISCOVER
         return
     adapter = adapter_for(adapters, opp)
+    if opp.source == "taskmarket":
+        try:
+            adapter.lane.preflight_signer()
+        except Exception as exc:
+            raise OpportunityValidationError(f"Taskmarket signer preflight failed: {type(exc).__name__}") from exc
     result = adapter.claim(opp)
     if isinstance(result, dict) and result.get("claim_required") is False:
         opp.idempotency_key = f"claim-not-required:{opp.canonical_opportunity_id}"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import json
@@ -27,6 +28,7 @@ from atm_core.taskmarket_cli import (  # noqa: E402
     TaskmarketCliError,
     TaskmarketCliLane,
     TaskmarketDuplicateSubmission,
+    materialize_supervisor_keystore,
 )
 from atm_core.taskmarket_maker import MakerResult  # noqa: E402
 
@@ -168,6 +170,66 @@ class TaskmarketCliLaneTests(unittest.TestCase):
             with self.assertRaises(TaskmarketCapabilityBlocked):
                 lane.address()
             self.assertEqual(runner.calls, [])
+
+    def test_supervisor_materializes_existing_encrypted_keystore_then_removes_transport(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            state = {}
+            runner = CliRunner(state)
+            lane = TaskmarketCliLane(signer_home=root / "signer", staging_root=root / "staging", runner=runner)
+            keystore = {
+                "encryptedKey": "ciphertext-only",
+                "walletAddress": CANONICAL_TASKMARKET_WALLET,
+                "deviceId": "device-1",
+                "apiToken": "opaque-device-token",
+            }
+            env = {
+                "TASKMARKET_KEYSTORE_B64": base64.b64encode(json.dumps(keystore).encode()).decode(),
+                "TASKMARKET_API_URL": "https://api.taskmarket.dev",
+            }
+            result = materialize_supervisor_keystore(lane=lane, environ=env)
+            self.assertTrue(result["ready"])
+            self.assertTrue(result["materialized"])
+            self.assertEqual(result["wallet"].lower(), CANONICAL_TASKMARKET_WALLET.lower())
+            self.assertNotIn("TASKMARKET_KEYSTORE_B64", env)
+            self.assertEqual(lane.keystore_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(lane.keystore_path.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(runner.calls, [["address"]])
+
+    def test_supervisor_rejects_conflicting_wallet_and_still_removes_transport(self):
+        with tempfile.TemporaryDirectory() as td:
+            lane = TaskmarketCliLane(signer_home=Path(td) / "signer", staging_root=Path(td) / "staging")
+            keystore = {
+                "encryptedKey": "ciphertext-only",
+                "walletAddress": "0x" + "11" * 20,
+                "deviceId": "device-1",
+                "apiToken": "opaque-device-token",
+            }
+            env = {"TASKMARKET_KEYSTORE_B64": base64.b64encode(json.dumps(keystore).encode()).decode()}
+            with self.assertRaisesRegex(TaskmarketCliError, "wallet mismatch"):
+                materialize_supervisor_keystore(lane=lane, environ=env)
+            self.assertNotIn("TASKMARKET_KEYSTORE_B64", env)
+
+    def test_supervisor_rejects_symlinked_signer_directory(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            signer = root / "signer"
+            signer.mkdir()
+            target = root / "attacker-controlled"
+            target.mkdir()
+            (signer / ".taskmarket").symlink_to(target, target_is_directory=True)
+            lane = TaskmarketCliLane(signer_home=signer, staging_root=root / "staging")
+            keystore = {
+                "encryptedKey": "ciphertext-only",
+                "walletAddress": CANONICAL_TASKMARKET_WALLET,
+                "deviceId": "device-1",
+                "apiToken": "opaque-device-token",
+            }
+            env = {"TASKMARKET_KEYSTORE_B64": base64.b64encode(json.dumps(keystore).encode()).decode()}
+            with self.assertRaisesRegex(TaskmarketCliError, "private real directory"):
+                materialize_supervisor_keystore(lane=lane, environ=env)
+            self.assertFalse((target / "keystore.json").exists())
+            self.assertNotIn("TASKMARKET_KEYSTORE_B64", env)
 
     def test_wallet_mismatch_no_mutation(self):
         with tempfile.TemporaryDirectory() as td:

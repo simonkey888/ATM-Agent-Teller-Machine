@@ -171,9 +171,25 @@ class ATMTests(unittest.TestCase):
         )
         state = atm.RuntimeState(phase=atm.Phase.CLAIM, active_opportunity=opp)
         adapter = TaskmarketOpportunityAdapter(http=FakeHttp())
-        atm.phase_claim({}, state, {"taskmarket": adapter})
+        with patch.object(adapter.lane, "preflight_signer", return_value={"wallet": adapter.lane.canonical_wallet}):
+            atm.phase_claim({}, state, {"taskmarket": adapter})
         self.assertEqual(state.phase, atm.Phase.WORK)
         self.assertEqual(state.last_result["status"], "CLAIM_NOT_REQUIRED")
+
+    def test_taskmarket_signer_is_required_before_work_phase(self):
+        opp = atm.Opportunity(
+            canonical_opportunity_id="taskmarket:bounty-1",
+            source="taskmarket",
+            authoritative_url="https://taskmarket.dev/tasks/bounty-1",
+            upstream_status="open",
+            reward_gross=Decimal("100"),
+            task_mode="bounty",
+        )
+        state = atm.RuntimeState(phase=atm.Phase.CLAIM, active_opportunity=opp)
+        adapter = TaskmarketOpportunityAdapter(http=FakeHttp())
+        with self.assertRaisesRegex(atm.OpportunityValidationError, "signer preflight failed"):
+            atm.phase_claim({}, state, {"taskmarket": adapter})
+        self.assertEqual(state.phase, atm.Phase.CLAIM)
 
 
 if __name__ == "__main__":

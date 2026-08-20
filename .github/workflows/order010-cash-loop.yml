@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   workprotocol-live:
+    if: ${{ false }} # scoped-disabled until durable identity and independent Base escrow proof both pass
     runs-on: ubuntu-latest
     timeout-minutes: 18
     steps:
@@ -107,6 +108,7 @@ jobs:
 
   lane-probe:
     runs-on: ubuntu-latest
+    environment: atm-production
     timeout-minutes: 5
     env:
       TASKBOUNTY_API_KEY: ${{ secrets.TASKBOUNTY_API_KEY }}

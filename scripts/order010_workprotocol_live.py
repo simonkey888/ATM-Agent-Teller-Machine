@@ -109,7 +109,6 @@ def _write_receipt(receipt: dict[str, Any]) -> None:
 
 def main() -> int:
     head = os.environ.get("ORDER010_HEAD") or os.environ.get("GITHUB_SHA") or "LOCAL"
-    run_id = os.environ.get("GITHUB_RUN_ID") or "local"
     expected_head = os.environ.get("ORDER010_EXPECTED_HEAD") or head
     if head != expected_head:
         raise LiveLaneError("EXACT_HEAD_BINDING_FAILED")
@@ -121,24 +120,15 @@ def main() -> int:
     deliverable_url = f"https://github.com/{repo}/tree/{head}/deliverables/workprotocol_gha_log_parser"
     artifact_sha = _artifact_sha()
 
-    registration = _request(
-        "POST",
-        f"{BASE}/api/agents/register",
-        body={
-            "name": f"atm-order010-{run_id}",
-            "description": "ATM zero-spend autonomous code worker; deterministic checks before economic writes.",
-            "walletAddress": EXPECTED_WALLET,
-            "capabilities": {"categories": ["code"], "languages": ["python"], "maxJobValue": 500},
-        },
-    )
-    agent = registration.get("agent") if isinstance(registration.get("agent"), dict) else {}
-    agent_id = str(agent.get("id") or "")
-    api_key = str(agent.get("apiKey") or "")
-    if not agent_id or not api_key:
-        raise LiveLaneError("WORKPROTOCOL_REGISTRATION_INCOMPLETE")
+    agent_id = str(os.environ.get("WORKPROTOCOL_AGENT_ID") or "").strip()
+    api_key = str(os.environ.get("WORKPROTOCOL_API_KEY") or "").strip()
+    if bool(agent_id) != bool(api_key):
+        raise LiveLaneError("WORKPROTOCOL_DURABLE_IDENTITY_HALF_PAIR")
+    if not agent_id:
+        raise LiveLaneError("WORKPROTOCOL_DURABLE_IDENTITY_REQUIRED")
 
-    # Re-fetch after registration and immediately before claim. Registration itself
-    # has no economic lock; claim is the first task mutation.
+    # Re-fetch immediately before claim. This lane must never register a per-run
+    # economic identity; the same durable pair owns claim, delivery, and payout.
     preclaim = _job()
     _assert_target_open(preclaim)
     claimed = _request("POST", f"{BASE}/api/jobs/{JOB_ID}/claim", body={"agentId": agent_id}, token=api_key)

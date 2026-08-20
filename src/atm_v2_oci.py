@@ -15,6 +15,7 @@ from atm_core.payments import PaymentLedger, PaymentNotFinal, PaymentValidationE
 from atm_core.runtime import ProcessLock, SingletonLockError
 from atm_core.security import redact_text
 from atm_core.state import StateStore
+from atm_core.taskmarket_cli import TaskmarketCliError, materialize_supervisor_keystore
 from atm_core.work_conserving import (
     detach_external_wait,
     isolated_lane_environment,
@@ -83,7 +84,7 @@ def run_watchers(config, state, adapters, ledger) -> dict[str, int]:
     """Monitor durable external waits without occupying the maker/checker lane."""
     before = len(state.in_flight)
     # TaskMarket has stronger source-specific award/payment semantics in core.
-    core.monitor_in_flight(config, state, adapters, ledger, limit=8)
+    v1.monitor_in_flight(config, state, adapters, ledger, limit=8)
     generic_checked = watch_generic_in_flight(
         config,
         state,
@@ -115,6 +116,11 @@ def main() -> int:
     args = parser.parse_args()
 
     config = v1.load_config()
+    try:
+        signer_status = materialize_supervisor_keystore()
+    except TaskmarketCliError as exc:
+        signer_status = {"ready": False, "materialized": False, "reason": type(exc).__name__}
+    v1.log_event("taskmarket-signer-bootstrap", signer_status)
     store = StateStore(core.STATE_FILE)
     state = store.load(max(core.MONTH1_FLOOR, Decimal(str(config.get("target_paid_usd", 500)))))
     ledger = PaymentLedger(core.PAYMENT_LEDGER_FILE)
