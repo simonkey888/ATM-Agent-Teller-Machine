@@ -154,18 +154,32 @@ jobs:
           python - <<'PY'
           import json, os
           from pathlib import Path
+          from atm_core.taskmarket_cli import evaluate_taskmarket_legal_status
           obj=json.loads(Path('/tmp/legal.json').read_text()); data=obj.get('data',obj) if isinstance(obj,dict) else {}
-          accepted=data.get('accepted') is True
-          print('LEGAL='+('CURRENT_ACCEPTED' if accepted else 'NOT_CURRENT_SCOPED_GATE'))
-          print('BUNDLE_VERSION='+str(data.get('bundleVersion') or data.get('version') or 'UNAVAILABLE'))
-          print('BUNDLE_DIGEST='+str(data.get('bundleDigest') or 'UNAVAILABLE'))
+          legal=evaluate_taskmarket_legal_status(data)
+          print('LEGAL_WRITE_READY='+str(legal['write_ready']).lower())
+          print('LEGAL_PARSE_OK='+str(legal['parse_ok']).lower())
+          print('LEGAL_ACCEPTED='+str(legal['accepted']).lower())
+          print('LEGAL_ENFORCEMENT_ENABLED='+str(legal['enforcement_enabled']).lower())
+          print('LEGAL_STATUS='+legal['status'])
+          print('BUNDLE_VERSION='+legal['bundle_version'])
+          print('BUNDLE_DIGEST='+legal['bundle_digest'])
           for i,d in enumerate((data.get('documents') or [])[:4],1): print(f'POLICY_URL_{i}='+str(d.get('url') or 'UNAVAILABLE'))
-          with open(os.environ['GITHUB_OUTPUT'],'a') as out: out.write('accepted='+str(accepted).lower()+'\n')
-          if not accepted: raise SystemExit('TASKMARKET_LEGAL_NOT_CURRENT')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out:
+              out.write('write_ready='+str(legal['write_ready']).lower()+'\n')
+              out.write('parse_ok='+str(legal['parse_ok']).lower()+'\n')
+              out.write('accepted='+str(legal['accepted']).lower()+'\n')
+              out.write('enforcement_enabled='+str(legal['enforcement_enabled']).lower()+'\n')
+              out.write('status='+legal['status']+'\n')
+              out.write('bundle_version='+legal['bundle_version']+'\n')
+              out.write('bundle_digest='+legal['bundle_digest']+'\n')
+              out.write('blocker='+legal['blocker']+'\n')
+          if not legal['parse_ok']: raise SystemExit('TASKMARKET_LEGAL_STATUS_UNKNOWN')
+          if not legal['write_ready']: raise SystemExit('TASKMARKET_LEGAL_ACCEPTANCE_REQUIRED')
           PY
 
       - name: First-party task gate
-        if: steps.legal.outputs.accepted == 'true'
+        if: steps.legal.outputs.write_ready == 'true'
         id: cli
         run: |
           set -Eeuo pipefail
@@ -241,7 +255,14 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           KEY_PRESENT: ${{ steps.key.outputs.present }}
           WALLET_MATCH: ${{ steps.wallet.outputs.match }}
+          LEGAL_WRITE_READY: ${{ steps.legal.outputs.write_ready }}
+          LEGAL_PARSE_OK: ${{ steps.legal.outputs.parse_ok }}
           LEGAL_ACCEPTED: ${{ steps.legal.outputs.accepted }}
+          LEGAL_ENFORCEMENT_ENABLED: ${{ steps.legal.outputs.enforcement_enabled }}
+          LEGAL_STATUS: ${{ steps.legal.outputs.status }}
+          LEGAL_BUNDLE_VERSION: ${{ steps.legal.outputs.bundle_version }}
+          LEGAL_BUNDLE_DIGEST: ${{ steps.legal.outputs.bundle_digest }}
+          LEGAL_BLOCKER: ${{ steps.legal.outputs.blocker }}
           DUPLICATE_EXISTS: ${{ steps.duplicate.outputs.exists }}
           DUPLICATE_ID: ${{ steps.duplicate.outputs.id }}
           SUBMIT_ATTEMPTED: ${{ steps.submit.outputs.attempted }}
@@ -272,7 +293,7 @@ jobs:
           if verified: state='SUBMITTED'; blocker=''
           elif os.environ.get('KEY_PRESENT')!='true': state='BLOCKED_CAPABILITY';blocker='TASKMARKET_KEYSTORE_B64'
           elif os.environ.get('WALLET_MATCH')!='true': state='FAILED_CLOSED';blocker='TASKMARKET_WALLET_MISMATCH'
-          elif os.environ.get('LEGAL_ACCEPTED')!='true': state='FAILED_CLOSED';blocker='TASKMARKET_LEGAL_NOT_CURRENT'
+          elif os.environ.get('LEGAL_WRITE_READY')!='true': state='FAILED_CLOSED';blocker=os.environ.get('LEGAL_BLOCKER') or 'TASKMARKET_LEGAL_STATUS_UNKNOWN'
           else: state='FAILED_CLOSED';blocker='SUBMISSION_NOT_VERIFIED'
           task_req=urllib.request.Request(f'https://api.taskmarket.dev/api/tasks/{tid}',headers={'Accept':'application/json','User-Agent':'ATM-ORDER012-task/1'})
           with urllib.request.urlopen(task_req,timeout=20) as r: task=json.loads(r.read().decode())
@@ -289,13 +310,17 @@ jobs:
               'taskmarket_environment':'atm-production','signer_bootstrap':'ENCRYPTED_B64_TO_PRIVATE_HOME',
               'transport_secret_removed_before_untrusted_lanes':True,'canonical_wallet':os.environ['CANONICAL_WALLET'],
               'watcher_real_seam_regression':True,'workprotocol_ephemeral_registration_disabled':True,
+              'false_legal_gate_corrected_from_aud_comment':5354754294,
               'single_economic_concurrency_group':'atm-economic-authority','outgoing_spend_usd':'0'
           }
           integrated={
               'schema':'ATM_ORDER012_INTEGRATED_VERIFY_V1','head':os.environ['GITHUB_SHA'],
               'artifact_check_passed':os.environ.get('ARTIFACT_OK')=='true','public_current_gate_passed':os.environ.get('PUBLIC_OK')=='true',
               'encrypted_keystore_present':os.environ.get('KEY_PRESENT')=='true','canonical_wallet_verified':os.environ.get('WALLET_MATCH')=='true',
-              'legal_gate_passed':os.environ.get('LEGAL_ACCEPTED')=='true','final_free_submit_gate_passed':os.environ.get('FINAL_OK')=='true',
+              'legal_write_ready':os.environ.get('LEGAL_WRITE_READY')=='true','legal_accepted':os.environ.get('LEGAL_ACCEPTED')=='true',
+              'legal_enforcement_enabled':os.environ.get('LEGAL_ENFORCEMENT_ENABLED')=='true','legal_status':os.environ.get('LEGAL_STATUS'),
+              'legal_bundle_version':os.environ.get('LEGAL_BUNDLE_VERSION'),'legal_bundle_digest':os.environ.get('LEGAL_BUNDLE_DIGEST'),
+              'final_free_submit_gate_passed':os.environ.get('FINAL_OK')=='true',
               'submission_verified':verified,'outgoing_spend_usd':'0'
           }
           live={

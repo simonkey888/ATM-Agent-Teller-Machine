@@ -108,6 +108,45 @@ def _extract_address(obj: dict[str, Any]) -> str:
     return ""
 
 
+def evaluate_taskmarket_legal_status(data: dict[str, Any]) -> dict[str, Any]:
+    """Derive write readiness from the authoritative first-party legal status.
+
+    A disabled enforcement gate permits the CLI/server to decide the write.
+    Unknown shapes fail closed and never imply operator acceptance.
+    """
+
+    accepted = data.get("accepted")
+    enforcement_enabled = data.get("enforcementEnabled")
+    raw_status = data.get("status")
+    status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
+    parse_ok = (
+        isinstance(accepted, bool)
+        and isinstance(enforcement_enabled, bool)
+        and status in {"current", "draft"}
+    )
+    write_ready = bool(parse_ok and (accepted or not enforcement_enabled))
+    if not parse_ok:
+        blocker = "TASKMARKET_LEGAL_STATUS_UNKNOWN"
+    elif not write_ready:
+        blocker = "TASKMARKET_LEGAL_ACCEPTANCE_REQUIRED"
+    else:
+        blocker = ""
+    def safe_metadata(value: Any) -> str:
+        text = str(value or "")
+        return text if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}", text) else "UNAVAILABLE"
+
+    return {
+        "parse_ok": parse_ok,
+        "write_ready": write_ready,
+        "accepted": accepted if isinstance(accepted, bool) else None,
+        "enforcement_enabled": enforcement_enabled if isinstance(enforcement_enabled, bool) else None,
+        "status": status or "unknown",
+        "bundle_version": safe_metadata(data.get("bundleVersion") or data.get("version")),
+        "bundle_digest": safe_metadata(data.get("bundleDigest")),
+        "blocker": blocker,
+    }
+
+
 class TaskmarketCliLane:
     """Supervisor-owned first-party CLI signer boundary."""
 
@@ -160,20 +199,11 @@ class TaskmarketCliLane:
 
     def legal_allows_write(self) -> bool:
         data = _data(self._run(["legal", "status"]))
-        accepted = data.get("accepted") is True
-        enforcement_value = None
-        for key in ("enforced", "enforcementEnabled", "acceptanceRequired", "legalEnforced"):
-            if key in data:
-                enforcement_value = data.get(key)
-                break
-        if enforcement_value is False:
-            return True
-        if enforcement_value is True:
-            if not accepted:
-                raise TaskmarketCliError("TaskMarket legal acceptance is currently enforced and not accepted")
-            return True
-        if not accepted:
-            raise TaskmarketCliError("TaskMarket legal enforcement state is unknown and acceptance is not current")
+        status = evaluate_taskmarket_legal_status(data)
+        if not status["parse_ok"]:
+            raise TaskmarketCliError("TaskMarket legal status is malformed or unknown")
+        if not status["write_ready"]:
+            raise TaskmarketCliError("TaskMarket legal acceptance is currently enforced and not accepted")
         return True
 
     def preflight_signer(self) -> dict[str, Any]:

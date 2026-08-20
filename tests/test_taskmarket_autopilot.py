@@ -28,6 +28,7 @@ from atm_core.taskmarket_cli import (  # noqa: E402
     TaskmarketCliError,
     TaskmarketCliLane,
     TaskmarketDuplicateSubmission,
+    evaluate_taskmarket_legal_status,
     materialize_supervisor_keystore,
 )
 from atm_core.taskmarket_maker import MakerResult  # noqa: E402
@@ -81,7 +82,11 @@ class CliRunner:
     def __init__(self, state, *, address=CANONICAL_TASKMARKET_WALLET, legal=None, task=None, fail_submit=False):
         self.state = state
         self.address_value = address
-        self.legal = legal if legal is not None else {"accepted": False, "enforced": False}
+        self.legal = (
+            legal
+            if legal is not None
+            else {"accepted": False, "enforcementEnabled": False, "status": "draft"}
+        )
         self.task = task if task is not None else task_payload()
         self.fail_submit = fail_submit
         self.calls = []
@@ -243,18 +248,76 @@ class TaskmarketCliLaneTests(unittest.TestCase):
     def test_legal_draft_enforcement_false_not_blocked(self):
         with tempfile.TemporaryDirectory() as td:
             state = {}
-            runner = CliRunner(state, legal={"accepted": False, "enforced": False})
+            runner = CliRunner(
+                state,
+                legal={"accepted": False, "enforcementEnabled": False, "status": "draft"},
+            )
             lane, _, _, _ = self._lane(td, runner=runner, state=state)
             self.assertTrue(lane.legal_allows_write())
 
     def test_legal_enforced_and_unaccepted_no_mutation(self):
         with tempfile.TemporaryDirectory() as td:
             state = {}
-            runner = CliRunner(state, legal={"accepted": False, "enforced": True})
+            runner = CliRunner(
+                state,
+                legal={"accepted": False, "enforcementEnabled": True, "status": "current"},
+            )
             lane, artifact, _, _ = self._lane(td, runner=runner, state=state)
             with self.assertRaisesRegex(TaskmarketCliError, "enforced"):
                 lane.submit_checked(TASK_ID, artifact, checker_passed=True)
             self.assertFalse(state.get("submitted"))
+
+    def test_legal_write_readiness_truth_table_and_unknown_fail_closed(self):
+        accepted = evaluate_taskmarket_legal_status(
+            {"accepted": True, "enforcementEnabled": True, "status": "current"}
+        )
+        self.assertTrue(accepted["write_ready"])
+        self.assertTrue(accepted["parse_ok"])
+
+        enforced = evaluate_taskmarket_legal_status(
+            {"accepted": False, "enforcementEnabled": True, "status": "current"}
+        )
+        self.assertFalse(enforced["write_ready"])
+        self.assertEqual(enforced["blocker"], "TASKMARKET_LEGAL_ACCEPTANCE_REQUIRED")
+
+        draft = evaluate_taskmarket_legal_status(
+            {
+                "accepted": False,
+                "enforcementEnabled": False,
+                "status": "draft",
+                "bundleVersion": "2026-07-draft-2",
+                "bundleDigest": "sha256:test",
+            }
+        )
+        self.assertTrue(draft["write_ready"])
+        self.assertEqual(draft["status"], "draft")
+        self.assertEqual(draft["bundle_version"], "2026-07-draft-2")
+
+        unsafe_metadata = evaluate_taskmarket_legal_status(
+            {
+                "accepted": False,
+                "enforcementEnabled": False,
+                "status": "draft",
+                "bundleVersion": "draft\ninjected=true",
+                "bundleDigest": "sha256:test\ninjected=true",
+            }
+        )
+        self.assertTrue(unsafe_metadata["write_ready"])
+        self.assertEqual(unsafe_metadata["bundle_version"], "UNAVAILABLE")
+        self.assertEqual(unsafe_metadata["bundle_digest"], "UNAVAILABLE")
+
+        for malformed in (
+            {},
+            {"accepted": False, "enforcementEnabled": False},
+            {"accepted": "false", "enforcementEnabled": False, "status": "draft"},
+            {"accepted": False, "enforcementEnabled": "false", "status": "draft"},
+            {"accepted": False, "enforcementEnabled": False, "status": "unknown"},
+        ):
+            with self.subTest(malformed=malformed):
+                result = evaluate_taskmarket_legal_status(malformed)
+                self.assertFalse(result["write_ready"])
+                self.assertFalse(result["parse_ok"])
+                self.assertEqual(result["blocker"], "TASKMARKET_LEGAL_STATUS_UNKNOWN")
 
     def test_requires_payment_true_no_mutation(self):
         with tempfile.TemporaryDirectory() as td:
