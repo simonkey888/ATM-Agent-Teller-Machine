@@ -21,6 +21,7 @@ from atm_core.opportunities import (
     external_state_hash,
     local_atm_value,
 )
+from atm_core.order019_recovery import choose_swarm_candidate
 from atm_core.payments import PaymentLedger, PaymentNotFinal, PaymentValidationError
 from atm_core.runtime import ProcessLock, SingletonLockError
 from atm_core.security import redact_text
@@ -200,30 +201,42 @@ def _swarm_eligible_order(path: Path | None = None) -> list[str] | None:
     return [str(row[0]) for row in rows]
 
 
-def _choose_discovery_candidate(found: list[Any], hard_cap: Decimal) -> tuple[Any | None, str]:
+def _choose_discovery_candidate(
+    found: list[Any],
+    hard_cap: Decimal,
+    *,
+    adapters: dict[str, Any] | None = None,
+    config: dict[str, Any] | None = None,
+    with_ledger: bool = False,
+):
     eligible_order = _swarm_eligible_order()
     if eligible_order is None:
-        return choose_money_velocity(found, hard_default_hours=hard_cap), "SEQUENTIAL_FALLBACK_NO_BOARD"
+        selected = choose_money_velocity(found, hard_default_hours=hard_cap)
+        result = (selected, "SEQUENTIAL_FALLBACK_NO_BOARD", [])
+        return result if with_ledger else result[:2]
 
-    # Never execute an old board payload directly. Economic authority may only
-    # admit a falsifier-confirmed candidate that was rediscovered in this exact
-    # authoritative DISCOVER pass and still passes the canonical economic gates.
-    fresh_by_id = {o.canonical_opportunity_id: o for o in found}
-    for opportunity_id in eligible_order:
-        candidate = fresh_by_id.get(opportunity_id)
-        if candidate is None:
-            continue
-        selected = choose_money_velocity([candidate], hard_default_hours=hard_cap)
-        if selected is not None:
-            return selected, "SWARM_MONEY_BOARD"
-    return None, "SWARM_MONEY_BOARD"
+    selected, ledger = choose_swarm_candidate(
+        found,
+        eligible_order,
+        adapters=adapters or {},
+        config=config or {},
+        hard_cap=hard_cap,
+    )
+    result = (selected, "SWARM_MONEY_BOARD", ledger)
+    return result if with_ledger else result[:2]
 
 
 def phase_discover(config: dict[str, Any], state: RuntimeState, adapters: dict[str, Any]) -> None:
     found = discover_candidates(config, adapters)
     configured = Decimal(str(config.get("max_task_hours", 3)))
     hard_cap = min(HARD_DEFAULT_HOURS, max(Decimal("0.25"), configured))
-    selected, selector = _choose_discovery_candidate(found, hard_cap)
+    selected, selector, rejection_ledger = _choose_discovery_candidate(
+        found,
+        hard_cap,
+        adapters=adapters,
+        config=config,
+        with_ledger=True,
+    )
     if selected:
         state.active_opportunity = selected
         state.phase = Phase.VERIFY
@@ -232,9 +245,15 @@ def phase_discover(config: dict[str, Any], state: RuntimeState, adapters: dict[s
             "opportunity": selected.model_dump(mode="json"),
             "money_velocity": str(money_velocity(selected)),
             "selector": selector,
+            "candidate_trace": rejection_ledger,
         }
     else:
-        state.last_result = {"status": "NO_ELIGIBLE_OPPORTUNITY", "count": len(found), "selector": selector}
+        state.last_result = {
+            "status": "NO_ELIGIBLE_OPPORTUNITY",
+            "count": len(found),
+            "selector": selector,
+            "rejection_ledger": rejection_ledger,
+        }
 
 
 def phase_verify_v2(config: dict[str, Any], state: RuntimeState, adapters: dict[str, Any]) -> None:
@@ -250,7 +269,10 @@ def phase_verify_v2(config: dict[str, Any], state: RuntimeState, adapters: dict[
     adapter.verify_eligibility(opp, snapshot)
     canon_decision = adapter.canonical_admission(opp, snapshot) if hasattr(adapter, "canonical_admission") else None
     competition = adapter.inspect_competition(opp, snapshot)
-    opp.competition = max(competition.values() or [0])
+    if "competition" in competition:
+        opp.competition = int(competition["competition"])
+    else:
+        opp.competition = max(competition.values() or [0])
     opp.claims = int(competition.get("claims", opp.claims))
     opp.open_prs = int(competition.get("open_prs", opp.open_prs))
 
@@ -396,7 +418,12 @@ def main() -> int:
                 store.save(state)
                 v1.log_event(
                     "validation-v2",
-                    {"error": str(exc), "failed_phase": failed_phase.value, "phase": state.phase.value, "opportunity_id": failed_id},
+                    {
+                        "error": str(exc),
+                        "failed_phase": failed_phase.value,
+                        "phase": state.phase.value,
+                        "opportunity_id": failed_id,
+                    },
                 )
             except KeyboardInterrupt:
                 store.save(state)

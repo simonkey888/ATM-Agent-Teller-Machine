@@ -9,6 +9,8 @@ on:
         required: true
       ATM_AGENT_TELLER_MACHINE:
         required: true
+      TASKMARKET_KEYSTORE_B64:
+        required: false
   workflow_dispatch:
     inputs:
       expected_sha:
@@ -41,6 +43,7 @@ concurrency:
 jobs:
   cloud-cycle:
     runs-on: ubuntu-latest
+    environment: atm-production
     timeout-minutes: 5
     env:
       OCI_CONFIG_SECRET: ${{ secrets.OCI_CONFIG }}
@@ -79,6 +82,10 @@ jobs:
         with:
           python-version: '3.11'
 
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+
       - name: Zero-spend runner and repository guard
         shell: bash
         env:
@@ -105,6 +112,33 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --disable-pip-version-check -e . 'oci>=2.180,<3'
+
+      - name: Materialize existing TaskMarket signer boundary
+        shell: bash
+        env:
+          PYTHONPATH: src
+          TASKMARKET_API_URL: https://api.taskmarket.dev
+          TASKMARKET_KEYSTORE_B64: ${{ secrets.TASKMARKET_KEYSTORE_B64 }}
+          ATM_TASKMARKET_SIGNER_HOME: ${{ runner.temp }}/atm-taskmarket-signer
+        run: |
+          set -Eeuo pipefail
+          if [ -z "${TASKMARKET_KEYSTORE_B64:-}" ]; then
+            echo "TASKMARKET_SIGNER_SECRET_ABSENT"
+            exit 78
+          fi
+          python - <<'PY'
+          from atm_core.taskmarket_cli import CANONICAL_TASKMARKET_WALLET, materialize_supervisor_keystore
+          result = materialize_supervisor_keystore()
+          if not result.get('ready'):
+              raise SystemExit('TASKMARKET_SIGNER_SECRET_ABSENT')
+          if not result.get('transport_secret_removed'):
+              raise SystemExit('TASKMARKET_SIGNER_TRANSPORT_NOT_REMOVED')
+          if str(result.get('wallet') or '').lower() != CANONICAL_TASKMARKET_WALLET.lower():
+              raise SystemExit('TASKMARKET_SIGNER_WALLET_MISMATCH')
+          print('TASKMARKET_SIGNER_READY=true')
+          print('TASKMARKET_SIGNER_CANONICAL_WALLET_MATCH=true')
+          print('TASKMARKET_SIGNER_TRANSPORT_REMOVED=true')
+          PY
 
       - name: Materialize temporary OCI API profile
         shell: bash
@@ -140,6 +174,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           ATM_CLOUD_SLICE_SECONDS: '150'
           ATM_CLOUD_MAX_PHASES: '4'
+          ATM_TASKMARKET_SIGNER_HOME: ${{ runner.temp }}/atm-taskmarket-signer
         run: |
           set -euo pipefail
           set +x

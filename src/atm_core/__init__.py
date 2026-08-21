@@ -35,3 +35,9 @@ if os.name == "nt" and _WINDOWS_ORIGINAL_RUN is not None:
 from .order018_free_provider_directive import install as _install_order018_free_provider_directive
 
 _install_order018_free_provider_directive()
+
+# ORDER-019 recovers truthful admission/revalidation semantics on top of the
+# existing single Cash Canon and effect boundary. It introduces no new authority.
+from .order019_recovery import install as _install_order019_recovery
+
+_install_order019_recovery()
