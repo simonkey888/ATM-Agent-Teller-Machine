@@ -206,6 +206,85 @@ def _rank_key(opportunity: Any, metrics: AtomicCashMetrics) -> tuple[Any, ...]:
     )
 
 
+def _taskmarket_terminal_reason(exc: Exception) -> str:
+    text = str(exc)
+    lowered = text.lower()
+    if "already_submitted" in lowered:
+        return "ALREADY_SUBMITTED"
+    if "expired" in lowered:
+        return "EXPIRED"
+    if "submission window" in lowered:
+        return "NO_CURRENT_WORKER_ACTION"
+    if "not open" in lowered:
+        return "CLOSED"
+    if "reward is zero" in lowered:
+        return "ZERO_REWARD"
+    if "lacks explicit escrow" in lowered:
+        return "UNVERIFIED_FUNDING"
+    if "stakerequired=true" in lowered:
+        return "STAKE_REQUIRED"
+    if "outside zero-spend autonomous lane" in lowered:
+        return "POLICY_REJECT"
+    return "TASKMARKET_CANON_PREFLIGHT_REJECTED"
+
+
+def _taskmarket_read_only_preflight(candidate: Any, adapters: dict[str, Any]) -> dict[str, Any] | None:
+    """Run existing TaskMarket VERIFY/Canon gates before ranking, with no effect authority.
+
+    This exists only to make selector fallthrough explicit. A wallet-matched
+    submission blocks duplicate economic effects but is never, by itself,
+    evidence that ATM authored that submission.
+    """
+    if str(getattr(candidate, "source", "") or "").lower() != "taskmarket":
+        return None
+    adapter = adapters.get("taskmarket")
+    if adapter is None:
+        return {
+            "result": "REJECTED_CANON_PREFLIGHT",
+            "reason": "SOURCE_ADAPTER_MISSING:taskmarket",
+            "first_terminal_rejection_reason": "SOURCE_ADAPTER_MISSING:taskmarket",
+        }
+
+    task_id = str(getattr(candidate, "canonical_opportunity_id", "")).split(":", 1)[-1]
+    try:
+        snapshot = adapter.fetch_authoritative(candidate)
+        adapter.verify_freshness(candidate, snapshot)
+        adapter.verify_funding(candidate, snapshot)
+        adapter.verify_eligibility(candidate, snapshot)
+        adapter.canonical_admission(candidate, snapshot)
+        return None
+    except Exception as exc:
+        reason = _taskmarket_terminal_reason(exc)
+        row: dict[str, Any] = {
+            "result": "WATCH_RECONCILE_EXISTING_SUBMISSION" if reason == "ALREADY_SUBMITTED" else "REJECTED_CANON_PREFLIGHT",
+            "reason": reason,
+            "first_terminal_rejection_reason": reason,
+            "reason_detail": str(exc)[:500],
+        }
+        if reason == "ALREADY_SUBMITTED":
+            existing = None
+            try:
+                existing = adapter.lane.existing_submission(task_id)
+            except Exception:
+                existing = None
+            if isinstance(existing, dict):
+                row.update(
+                    {
+                        "submission_id": str(existing.get("id") or existing.get("submissionId") or ""),
+                        "worker_address": str(existing.get("workerAddress") or ""),
+                        "worker_agent_id": existing.get("workerAgentId"),
+                        "submitted_at": existing.get("submittedAt"),
+                        "rejected_at": existing.get("rejectedAt"),
+                        "deliverable_hash": existing.get("deliverableHash"),
+                        "submit_tx_hash": existing.get("submitTxHash"),
+                    }
+                )
+            row["atm_origin_attribution"] = "NOT_PROVEN_BY_WALLET_MATCH"
+            row["payment_reconcile_state"] = "WATCH_ACCEPTANCE_AWARD_SETTLEMENT_BASE_RECEIPT"
+            row["duplicate_effect_allowed"] = False
+        return row
+
+
 def choose_atomic_swarm_candidate(
     found: list[Any],
     eligible_order: list[str],
@@ -217,9 +296,10 @@ def choose_atomic_swarm_candidate(
     """A1 selector: Money Velocity is diagnostic/ranking only, never admission.
 
     MoneyBoard CONFIRM remains a candidate hint. Missing durable IDs are
-    authoritatively re-fetched. Every surviving candidate is ranked; legacy
-    reject_reason is recorded but cannot silently veto a Canon candidate.
-    Canon and the effect boundary retain all economic authority downstream.
+    authoritatively re-fetched. TaskMarket candidates additionally run the
+    already-existing read-only VERIFY/Cash-Canon preflight so one terminal row
+    cannot globally early-stop allocation. Canon and the effect boundary retain
+    all economic authority downstream.
     """
     del hard_cap
     from . import money_velocity as mv
@@ -244,6 +324,18 @@ def choose_atomic_swarm_candidate(
                     "origin": origin,
                     "result": "REJECTED",
                     "reason": reason or "REDISCOVERY_MISS_UNEXPLAINED",
+                }
+            )
+            continue
+
+        taskmarket_preflight = _taskmarket_read_only_preflight(candidate, adapters)
+        if taskmarket_preflight is not None:
+            ledger.append(
+                {
+                    "canonical_id": canonical_id,
+                    "origin": origin,
+                    "external_state_hash": candidate.external_state_hash,
+                    **taskmarket_preflight,
                 }
             )
             continue
