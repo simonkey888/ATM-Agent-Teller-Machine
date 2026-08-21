@@ -13,13 +13,25 @@ def install() -> None:
         return
     _INSTALLED = True
 
-    # Linux Docker applies RLIMIT_NPROC against the host kernel UID. The former
-    # value (16) can be exhausted by unrelated hosted-runner processes before
-    # the container can exec Python. Keep a finite hard process boundary, but
-    # raise the per-UID RLIMIT/cgroup cap to 64 so the container can start while
-    # remaining tightly bounded and independently enforced by pids.max.
+    # Linux RLIMIT_NPROC is charged against the kernel UID, not the container's
+    # cgroup alone. Hosted runners may already have >16 or >64 same-UID host
+    # processes before ATM starts. Keep an explicit finite hard process ceiling
+    # while avoiding false exhaustion: the economic role sandbox uses 256 for
+    # both RLIMIT_NPROC and cgroup pids.max. CPU/memory/fd/file caps are unchanged.
     from . import role_runtime as role_runtime
     from .sandbox_boundary_v2 import SandboxLimits as _RealSandboxLimits
+
+    class _RuntimeSandboxLimits(_RealSandboxLimits):
+        def normalized(self) -> "_RuntimeSandboxLimits":
+            base = super().normalized()
+            return _RuntimeSandboxLimits(
+                cpu_seconds=base.cpu_seconds,
+                memory_mb=base.memory_mb,
+                max_file_bytes=base.max_file_bytes,
+                max_open_files=base.max_open_files,
+                max_processes=256,
+                wall_seconds=base.wall_seconds,
+            )
 
     def _runtime_limits(
         cpu_seconds: int = 30,
@@ -28,13 +40,14 @@ def install() -> None:
         max_open_files: int = 64,
         max_processes: int = 16,
         wall_seconds: int = 120,
-    ) -> _RealSandboxLimits:
-        return _RealSandboxLimits(
+    ) -> _RuntimeSandboxLimits:
+        del max_processes
+        return _RuntimeSandboxLimits(
             cpu_seconds=cpu_seconds,
             memory_mb=memory_mb,
             max_file_bytes=max_file_bytes,
             max_open_files=max_open_files,
-            max_processes=max(64, int(max_processes)),
+            max_processes=256,
             wall_seconds=wall_seconds,
         )
 
