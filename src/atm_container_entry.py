@@ -17,10 +17,24 @@ from typing import Any
 
 SANDBOX_SCHEMA = "ATM_STRUCTURAL_SANDBOX_V2"
 SECRET_MARKERS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "MNEMONIC", "SEED", "WALLET")
+# The pinned official Python image contains GPG_KEY as public release-signing
+# metadata. It is not supervisor/account authority and is fixed by the image
+# digest. No other marker-bearing image variable is exempt.
+PUBLIC_PINNED_IMAGE_ENV = frozenset({"GPG_KEY"})
+
+
+def _secret_env_names() -> tuple[str, ...]:
+    return tuple(sorted(
+        key
+        for key, value in os.environ.items()
+        if value
+        and key not in PUBLIC_PINNED_IMAGE_ENV
+        and any(marker in key.upper() for marker in SECRET_MARKERS)
+    ))
 
 
 def _secret_env_count() -> int:
-    return sum(1 for key in os.environ if any(marker in key.upper() for marker in SECRET_MARKERS))
+    return len(_secret_env_names())
 
 
 def _policy() -> dict[str, Any]:
@@ -151,7 +165,7 @@ def _run_worker(worker: Path, raw_request: str) -> tuple[int,str,str]:
 
 def main() -> int:
     parser=argparse.ArgumentParser(); parser.add_argument("--worker",required=True); parser.add_argument("--request",required=True); parser.add_argument("--response",required=True); args=parser.parse_args()
-    if _secret_env_count()!=0: raise SystemExit("SANDBOX_SECRET_ENV_PRESENT")
+    if _secret_env_count()!=0: raise SystemExit("SANDBOX_SECRET_ENV_PRESENT:" + ",".join(_secret_env_names()))
     policy=_policy(); home=Path.home().resolve()
     if home != Path("/home/atm") or list(home.iterdir()): raise SystemExit("SANDBOX_EPHEMERAL_HOME_INVALID")
     status=_status_fields()
