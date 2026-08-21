@@ -166,6 +166,11 @@ def _run_worker(worker: Path, raw_request: str) -> tuple[int,str,str]:
 def main() -> int:
     parser=argparse.ArgumentParser(); parser.add_argument("--worker",required=True); parser.add_argument("--request",required=True); parser.add_argument("--response",required=True); args=parser.parse_args()
     if _secret_env_count()!=0: raise SystemExit("SANDBOX_SECRET_ENV_PRESENT:" + ",".join(_secret_env_names()))
+    # Strip non-secret image metadata before executing the role worker so the
+    # worker's independent generic secret detector sees the same truly sterile
+    # authority surface. This never removes or ignores an owner credential.
+    for key in PUBLIC_PINNED_IMAGE_ENV:
+        os.environ.pop(key, None)
     policy=_policy(); home=Path.home().resolve()
     if home != Path("/home/atm") or list(home.iterdir()): raise SystemExit("SANDBOX_EPHEMERAL_HOME_INVALID")
     status=_status_fields()
