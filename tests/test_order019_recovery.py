@@ -5,17 +5,22 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
+import atm_core.order018_taskmarket as order018
 from atm_core.models import Opportunity
 from atm_core.money_velocity import has_funding_evidence, reject_reason
 from atm_core.opportunities import OpportunityValidationError, TaskmarketOpportunityAdapter
+from atm_core.order009_sources import TaskMarketReadOnlySource
 from atm_core.order019_recovery import (
     MAX_SAFE_MAKER_WORDS,
     capability_reason,
     choose_swarm_candidate,
     mandatory_core_ambiguous,
     refetch_board_candidate,
+    taskmarket_action_evidence,
 )
+from atm_core.taskmarket_cli import CANONICAL_TASKMARKET_WALLET
 from atm_core.taskmarket_maker import TaskmarketMakerError, TaskmarketZeroCostMaker
 from atm_core.universal_radar import (
     AgentPolicy,
@@ -30,6 +35,25 @@ from atm_core.universal_radar import (
 class _NoSignerLane:
     def signer_present(self):
         return False
+
+
+class _TaskMarketBridgeHttp:
+    def __init__(self, list_task, detail, submissions=None):
+        self.list_task = dict(list_task)
+        self.detail = dict(detail)
+        self.submissions = list(submissions or [])
+        self.urls: list[str] = []
+
+    def get_json(self, url, *, headers=None, timeout=10):
+        del headers, timeout
+        self.urls.append(url)
+        if url.endswith("/submissions"):
+            return {"submissions": list(self.submissions)}
+        if "/api/tasks/" in url and "?" not in url:
+            return dict(self.detail)
+        if "/api/tasks?" in url:
+            return {"tasks": [dict(self.list_task)]}
+        raise AssertionError(url)
 
 
 class Order019RecoveryTests(unittest.TestCase):
@@ -197,6 +221,130 @@ class Order019RecoveryTests(unittest.TestCase):
         self.assertEqual(ledger[0]["canonical_id"], board_id)
         self.assertNotEqual(ledger[0].get("reason"), "SOURCE_ADAPTER_MISSING:taskmarket-daydreams")
         self.assertIn(ledger[0]["result"], {"SELECTED_FOR_CANON_VERIFY", "RANKED_FOR_CANON_VERIFY"})
+
+    def _bridge_list_task(self, external_id: str, *, mode: str = "bounty"):
+        now = datetime.now(timezone.utc)
+        return {
+            "id": external_id,
+            "description": "Return one CSV file named result.csv. Required columns: id,name,value. Exactly 2 data rows.",
+            "reward": 10_000_000,
+            "netReward": 9_500_000,
+            "escrowTxHash": "0xabc123",
+            "status": "open",
+            "mode": mode,
+            "stakeRequired": False,
+            "platformFeeBps": 500,
+            "submissionCount": 1,
+            "awardCount": 0,
+            "submissionWindowOpen": True,
+            "createdAt": now.isoformat(),
+            "updatedAt": now.isoformat(),
+            "expiryTime": (now + timedelta(days=1)).isoformat(),
+        }
+
+    def test_taskmarket_action_bridge_bounty_submit_contract_kills_action_cost_unknown(self):
+        external_id = "0x4c887264d5ede369de6e98c6214e6c03ee8708af108305ecafa0341a675e6147"
+        now = datetime.now(timezone.utc)
+        listed = self._bridge_list_task(external_id)
+        detail = {
+            **listed,
+            "phase": "active",
+            "pendingActions": [{
+                "role": "worker",
+                "action": "submit",
+                "eligibleAddress": CANONICAL_TASKMARKET_WALLET,
+            }],
+        }
+        http = _TaskMarketBridgeHttp(listed, detail, submissions=[])
+        with patch("atm_core.order019_recovery._taskmarket_signer_boundary_ready", return_value=True):
+            row = TaskMarketReadOnlySource(http).discover(Decimal("5"))[0]
+
+        self.assertFalse(row.paid_action_required)
+        self.assertTrue(row.current_worker_action_available)
+        self.assertTrue(row.submission_window_open)
+        self.assertFalse(row.stake_required)
+        self.assertTrue(row.canonical_identity_eligible)
+        self.assertTrue(row.credential_boundary_ready)
+        self.assertFalse(row.already_submitted_by_atm)
+        self.assertEqual(row.external_status, "OPEN")
+        self.assertEqual(
+            row.taskmarket_action_evidence["cost_authority"],
+            "TASKMARKET_ENDPOINT_CONTRACT_BOUNTY_SUBMIT_NON_X402",
+        )
+        self.assertEqual(row.taskmarket_action_evidence["mode"], "bounty")
+        self.assertEqual(row.taskmarket_action_evidence["phase"], "active")
+        self.assertEqual(row.taskmarket_action_evidence["pending_actions"][0]["role"], "worker")
+        self.assertEqual(row.taskmarket_action_evidence["pending_actions"][0]["action"], "submit")
+        self.assertIsNone(row.taskmarket_action_evidence["pending_actions"][0]["requiresPayment"])
+        self.assertIsNone(row.taskmarket_action_evidence["pending_actions"][0]["paymentAmount"])
+
+        proof = order018.action_cost_proof(detail, CANONICAL_TASKMARKET_WALLET)
+        self.assertTrue(proof.zero_cost_ready)
+        checked = qualify(row.model_copy(update={
+            "source_state": SourceState.HEALTHY,
+            "source_checked_at": now,
+            "external_object_exists": True,
+        }), now=now)
+        self.assertNotIn("ACTION_COST_UNKNOWN", checked.rejection_reasons)
+        self.assertNotIn("PAID_ENTRY", checked.rejection_reasons)
+
+    def test_taskmarket_action_bridge_explicit_paid_action_is_paid_entry(self):
+        external_id = "paid-pitch"
+        now = datetime.now(timezone.utc)
+        listed = self._bridge_list_task(external_id, mode="pitch")
+        detail = {
+            **listed,
+            "phase": "active",
+            "pendingActions": [{
+                "role": "worker",
+                "action": "pitch",
+                "eligibleAddress": CANONICAL_TASKMARKET_WALLET,
+                "requiresPayment": True,
+                "paymentAmount": "1000",
+            }],
+        }
+        http = _TaskMarketBridgeHttp(listed, detail, submissions=[])
+        with patch("atm_core.order019_recovery._taskmarket_signer_boundary_ready", return_value=True):
+            row = TaskMarketReadOnlySource(http).discover(Decimal("5"))[0]
+        self.assertTrue(row.paid_action_required)
+        self.assertEqual(row.taskmarket_action_evidence["cost_authority"], "TASKMARKET_ENDPOINT_CONTRACT_X402")
+        checked = qualify(row.model_copy(update={
+            "source_state": SourceState.HEALTHY,
+            "source_checked_at": now,
+            "external_object_exists": True,
+        }), now=now)
+        self.assertIn("PAID_ENTRY", checked.rejection_reasons)
+        self.assertNotIn("ACTION_COST_UNKNOWN", checked.rejection_reasons)
+
+    def test_taskmarket_action_bridge_ambiguous_action_stays_typed_unknown(self):
+        external_id = "ambiguous-bounty"
+        now = datetime.now(timezone.utc)
+        listed = self._bridge_list_task(external_id)
+        detail = {
+            **listed,
+            "phase": "active",
+            "pendingActions": [
+                {"role": "worker", "action": "submit", "eligibleAddress": CANONICAL_TASKMARKET_WALLET},
+                {"role": "worker", "action": "submit", "eligibleAddress": CANONICAL_TASKMARKET_WALLET},
+            ],
+        }
+        evidence = taskmarket_action_evidence(detail, CANONICAL_TASKMARKET_WALLET, now=now)
+        self.assertIsNone(evidence["paid_action_required"])
+        self.assertIsNone(evidence["current_worker_action_available"])
+        self.assertEqual(evidence["cost_authority"], "UNKNOWN")
+        self.assertFalse(order018.action_cost_proof(detail, CANONICAL_TASKMARKET_WALLET).zero_cost_ready)
+
+        http = _TaskMarketBridgeHttp(listed, detail, submissions=[])
+        with patch("atm_core.order019_recovery._taskmarket_signer_boundary_ready", return_value=True):
+            row = TaskMarketReadOnlySource(http).discover(Decimal("5"))[0]
+        self.assertIsNone(row.paid_action_required)
+        checked = qualify(row.model_copy(update={
+            "source_state": SourceState.HEALTHY,
+            "source_checked_at": now,
+            "external_object_exists": True,
+        }), now=now)
+        self.assertIn("ACTION_COST_UNKNOWN", checked.rejection_reasons)
+        self.assertNotIn("PAID_ENTRY", checked.rejection_reasons)
 
     def test_absent_existing_signer_is_typed_before_canon(self):
         adapter = TaskmarketOpportunityAdapter(lane=_NoSignerLane())
