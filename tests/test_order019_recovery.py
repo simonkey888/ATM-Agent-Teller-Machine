@@ -14,6 +14,7 @@ from atm_core.order019_recovery import (
     capability_reason,
     choose_swarm_candidate,
     mandatory_core_ambiguous,
+    refetch_board_candidate,
 )
 from atm_core.taskmarket_maker import TaskmarketMakerError, TaskmarketZeroCostMaker
 from atm_core.universal_radar import (
@@ -139,6 +140,63 @@ class Order019RecoveryTests(unittest.TestCase):
         self.assertEqual([row["canonical_id"] for row in ledger], ["taskmarket:a", "taskmarket:b", "taskmarket:c"])
         self.assertTrue(all(row["result"] == "REJECTED" for row in ledger))
         self.assertTrue(all(row["reason"] == "SOURCE_ADAPTER_MISSING:taskmarket" for row in ledger))
+
+    def test_taskmarket_daydreams_board_namespace_refetches_via_taskmarket_adapter(self):
+        external_id = "0x4c887264d5ede369de6e98c6214e6c03ee8708af108305ecafa0341a675e6147"
+        board_id = f"taskmarket-daydreams:{external_id}"
+        now = datetime.now(timezone.utc)
+        calls: list[str] = []
+
+        class _Http:
+            def get(self, url):
+                calls.append(url)
+                return {
+                    "id": external_id,
+                    "title": "Deterministic CSV normalization",
+                    "description": (
+                        "Return one CSV file named result.csv. Required columns: id,name,value. "
+                        "Exactly 2 data rows."
+                    ),
+                    "mode": "bounty",
+                    "status": "open",
+                    "stakeRequired": False,
+                    "reward": 10_000_000,
+                    "submissionCount": 1,
+                    "escrowTxHash": "0xabc123",
+                    "createdAt": now.isoformat(),
+                    "updatedAt": now.isoformat(),
+                    "expiryTime": (now + timedelta(days=1)).isoformat(),
+                }
+
+        class _Adapter:
+            base_url = "https://taskmarket.dev"
+            http = _Http()
+            skipped_task_ids: set[str] = set()
+
+        adapter = _Adapter()
+        candidate, reason = refetch_board_candidate(
+            board_id,
+            adapters={"taskmarket": adapter},
+            floor=Decimal("5"),
+        )
+        self.assertEqual(reason, "")
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate.canonical_opportunity_id, f"taskmarket:{external_id}")
+        self.assertEqual(candidate.source, "taskmarket")
+        self.assertEqual(calls, [f"https://taskmarket.dev/api/tasks/{external_id}"])
+
+        selected, ledger = choose_swarm_candidate(
+            [],
+            [board_id],
+            adapters={"taskmarket": adapter},
+            config={"min_reward_usd": 5},
+            hard_cap=Decimal("3"),
+        )
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.canonical_opportunity_id, f"taskmarket:{external_id}")
+        self.assertEqual(ledger[0]["canonical_id"], board_id)
+        self.assertNotEqual(ledger[0].get("reason"), "SOURCE_ADAPTER_MISSING:taskmarket-daydreams")
+        self.assertIn(ledger[0]["result"], {"SELECTED_FOR_CANON_VERIFY", "RANKED_FOR_CANON_VERIFY"})
 
     def test_absent_existing_signer_is_typed_before_canon(self):
         adapter = TaskmarketOpportunityAdapter(lane=_NoSignerLane())
