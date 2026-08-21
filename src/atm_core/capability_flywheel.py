@@ -96,13 +96,7 @@ class CapabilityFlywheelStore:
     def summary(self) -> dict[str, Any]:
         counts = {str(row[0]): int(row[1]) for row in self.conn.execute("SELECT state,COUNT(*) FROM forge_queue GROUP BY state")}
         last = self.conn.execute("SELECT * FROM forge_queue ORDER BY updated_at DESC LIMIT 1").fetchone()
-        return {
-            "schema": FLYWHEEL_SCHEMA,
-            "queue_counts": counts,
-            "last_request": dict(last) if last else None,
-            "economic_authority": False,
-            "synthetic_is_non_economic": True,
-        }
+        return {"schema": FLYWHEEL_SCHEMA, "queue_counts": counts, "last_request": dict(last) if last else None, "economic_authority": False, "synthetic_is_non_economic": True}
 
 
 def _episode_for_gap(gap: CapabilityGap, episodes_path: Path) -> EconomicEpisode:
@@ -114,20 +108,14 @@ def _episode_for_gap(gap: CapabilityGap, episodes_path: Path) -> EconomicEpisode
             episode = store.get(episode_id)
         except KeyError:
             episode = store.create_option(
-                canonical_opportunity_id=gap.canonical_opportunity_id,
-                source=gap.source,
-                opportunity_type=f"CAPABILITY_GAP:{gap.work_class_candidate}",
-                acceptance_contract_hash=acceptance_hash,
-                funding_evidence_refs=list(gap.evidence_refs),
-                max_time_budget_seconds=900,
-                kill_condition="FORGE_FAIL_CLOSED_OR_DEMAND_STALE",
-                book="OPTION_BOOK",
+                canonical_opportunity_id=gap.canonical_opportunity_id, source=gap.source,
+                opportunity_type=f"CAPABILITY_GAP:{gap.work_class_candidate}", acceptance_contract_hash=acceptance_hash,
+                funding_evidence_refs=list(gap.evidence_refs), max_time_budget_seconds=900,
+                kill_condition="FORGE_FAIL_CLOSED_OR_DEMAND_STALE", book="OPTION_BOOK",
                 option_value={"demand_class": gap.demand_class.value, "synthetic": gap.synthetic, "economic_authority": False},
             )
         progress = dict(episode.progress_summary)
-        progress["capability_gap_fingerprint"] = gap.fingerprint()
-        progress["capability_gap_reason"] = gap.capability_gap_reason
-        progress["synthetic"] = gap.synthetic
+        progress.update({"capability_gap_fingerprint": gap.fingerprint(), "capability_gap_reason": gap.capability_gap_reason, "synthetic": gap.synthetic})
         return store.put(episode.model_copy(update={"progress_summary": progress, "economic_state": EpisodeState.OPTION}))
     finally:
         store.close()
@@ -138,11 +126,7 @@ def enqueue_gap(gap: CapabilityGap, *, flywheel_path: Path, episodes_path: Path)
     capability_id = SYNTHETIC_CAPABILITY if gap.synthetic else f"FORGE_{gap.work_class_candidate}"
     queue = CapabilityFlywheelStore(flywheel_path)
     try:
-        inserted = queue.enqueue(
-            gap_fingerprint=gap.fingerprint(), episode_id=episode.episode_id,
-            capability_id=capability_id, work_class=gap.work_class_candidate, synthetic=gap.synthetic,
-        )
-        return inserted, episode.episode_id
+        return queue.enqueue(gap_fingerprint=gap.fingerprint(), episode_id=episode.episode_id, capability_id=capability_id, work_class=gap.work_class_candidate, synthetic=gap.synthetic), episode.episode_id
     finally:
         queue.close()
 
@@ -150,27 +134,19 @@ def enqueue_gap(gap: CapabilityGap, *, flywheel_path: Path, episodes_path: Path)
 def ensure_synthetic_plumbing_if_no_real_gap(*, ledger_path: Path, flywheel_path: Path, episodes_path: Path) -> bool:
     ledger = CapabilityGapLedger(ledger_path)
     try:
-        real = ledger.conn.execute("SELECT COUNT(*) FROM capability_gaps WHERE synthetic=0").fetchone()[0]
-        synthetic = ledger.conn.execute("SELECT COUNT(*) FROM capability_gaps WHERE synthetic=1").fetchone()[0]
+        real = ledger._conn.execute("SELECT COUNT(*) FROM capability_gaps WHERE synthetic=0").fetchone()[0]
+        synthetic = ledger._conn.execute("SELECT COUNT(*) FROM capability_gaps WHERE synthetic=1").fetchone()[0]
         if int(real) > 0 or int(synthetic) > 0:
             return False
         gap = CapabilityGap(
-            canonical_opportunity_id="synthetic:order016-forge-plumbing",
-            source="synthetic-fixture",
-            external_id="order016-forge-plumbing",
-            observed_at=utcnow_iso(),
+            canonical_opportunity_id="synthetic:order016-forge-plumbing", source="synthetic-fixture",
+            external_id="order016-forge-plumbing", observed_at=utcnow_iso(),
             fresh_object_hash=hashlib.sha256(b"ORDER016_SYNTHETIC_FORGE_PLUMBING_V1").hexdigest(),
-            work_class_candidate="SYNTHETIC_TEXT_KV_NORMALIZE",
-            requirements=("text/plain",),
-            net_reward_if_verified=None,
-            funding_verification_state="SYNTHETIC_NON_ECONOMIC",
-            competition_if_known=None,
-            rejection_reason="SYNTHETIC_PLUMBING_ONLY",
-            capability_gap_reason="SYNTHETIC_PLUMBING_ONLY",
-            evidence_refs=("synthetic:ORDER016",),
-            currentness_state="SYNTHETIC",
-            demand_class=DemandClass.SYNTHETIC_FIXTURE,
-            synthetic=True,
+            work_class_candidate="SYNTHETIC_TEXT_KV_NORMALIZE", requirements=("text/plain",), net_reward_if_verified=None,
+            funding_verification_state="SYNTHETIC_NON_ECONOMIC", competition_if_known=None,
+            rejection_reason="SYNTHETIC_PLUMBING_ONLY", capability_gap_reason="SYNTHETIC_PLUMBING_ONLY",
+            evidence_refs=("synthetic:ORDER016",), currentness_state="SYNTHETIC",
+            demand_class=DemandClass.SYNTHETIC_FIXTURE, synthetic=True,
         )
         ledger.record(gap)
     finally:
@@ -182,43 +158,27 @@ def ensure_synthetic_plumbing_if_no_real_gap(*, ledger_path: Path, flywheel_path
 def _run_sandbox(capability_id: str, *, synthetic: bool, gap_fingerprint: str, episode_id: str) -> tuple[dict[str, Any], str]:
     worker_sha = sandbox_worker_sha256()
     request = {
-        "schema": SANDBOX_REQUEST_SCHEMA,
-        "capability_id": capability_id,
-        "synthetic": bool(synthetic),
-        "gap_fingerprint": gap_fingerprint,
-        "episode_id": episode_id,
-        "network_policy": "DENY",
-        "tool_policy": "FIXED_PATTERN_EXECUTOR_CHECKER_ONLY",
-        "parent_pid": os.getpid(),
-        "worker_code_sha256": worker_sha,
+        "schema": SANDBOX_REQUEST_SCHEMA, "capability_id": capability_id, "synthetic": bool(synthetic),
+        "gap_fingerprint": gap_fingerprint, "episode_id": episode_id, "network_policy": "DENY",
+        "tool_policy": "FIXED_PATTERN_EXECUTOR_CHECKER_ONLY", "parent_pid": os.getpid(), "worker_code_sha256": worker_sha,
     }
     raw = json.dumps(request, sort_keys=True, separators=(",", ":"))
-    cp = subprocess.run(
-        [sys.executable, "-I", str(SANDBOX_WORKER)], input=raw, text=True, capture_output=True,
-        cwd=str(ROOT / "src"), env=_clean_env(), timeout=60, check=False,
-    )
+    cp = subprocess.run([sys.executable, "-I", str(SANDBOX_WORKER)], input=raw, text=True, capture_output=True, cwd=str(ROOT / "src"), env=_clean_env(), timeout=60, check=False)
     if cp.returncode != 0:
         raise RuntimeError("FORGE_SANDBOX_FAILED:" + (cp.stderr or cp.stdout or "")[-500:])
     envelope = json.loads(cp.stdout)
-    result = envelope.get("result")
-    provenance = envelope.get("provenance")
-    digest = str(envelope.get("receipt_digest") or "")
+    result, provenance, digest = envelope.get("result"), envelope.get("provenance"), str(envelope.get("receipt_digest") or "")
     if not isinstance(result, dict) or not isinstance(provenance, dict):
         raise RuntimeError("FORGE_SANDBOX_RECEIPT_INVALID")
     expected_request = hashlib.sha256(raw.encode()).hexdigest()
     expected_result = hashlib.sha256(json.dumps(result, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
     expected_digest = hashlib.sha256(json.dumps(provenance, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    checks = (
-        provenance.get("worker_code_sha256") == worker_sha,
-        provenance.get("request_sha256") == expected_request,
-        provenance.get("result_sha256") == expected_result,
-        digest == expected_digest,
-        provenance.get("process_isolated") is True,
-        int(provenance.get("environment_secret_count", -1)) == 0,
-        provenance.get("network_policy") == "DENY",
-        provenance.get("tool_policy") == "FIXED_PATTERN_EXECUTOR_CHECKER_ONLY",
-    )
-    if not all(checks):
+    if not all((
+        provenance.get("worker_code_sha256") == worker_sha, provenance.get("request_sha256") == expected_request,
+        provenance.get("result_sha256") == expected_result, digest == expected_digest,
+        provenance.get("process_isolated") is True, int(provenance.get("environment_secret_count", -1)) == 0,
+        provenance.get("network_policy") == "DENY", provenance.get("tool_policy") == "FIXED_PATTERN_EXECUTOR_CHECKER_ONLY",
+    )):
         raise RuntimeError("FORGE_SANDBOX_PROVENANCE_VERIFICATION_FAILED")
     return envelope, digest
 
@@ -231,10 +191,7 @@ def run_flywheel_once(*, flywheel_path: Path, registry_path: Path) -> dict[str, 
             return {"schema": FLYWHEEL_SCHEMA, "state": "IDLE", "economic_authority": False}
         request_id = str(request["request_id"])
         try:
-            envelope, receipt_digest = _run_sandbox(
-                str(request["capability_id"]), synthetic=bool(request["synthetic"]),
-                gap_fingerprint=str(request["gap_fingerprint"]), episode_id=str(request["episode_id"]),
-            )
+            envelope, receipt_digest = _run_sandbox(str(request["capability_id"]), synthetic=bool(request["synthetic"]), gap_fingerprint=str(request["gap_fingerprint"]), episode_id=str(request["episode_id"]))
         except Exception as exc:
             queue.update(request_id, state="SANDBOX_FAILED", promotion={"error_class": type(exc).__name__})
             return {"schema": FLYWHEEL_SCHEMA, "state": "SANDBOX_FAILED", "error_class": type(exc).__name__, "economic_authority": False}
@@ -242,22 +199,15 @@ def run_flywheel_once(*, flywheel_path: Path, registry_path: Path) -> dict[str, 
         if result.get("state") != "SANDBOX_COMPLETE":
             queue.update(request_id, state="NO_SAFE_PATTERN", receipt=envelope, receipt_digest=receipt_digest)
             return {"schema": FLYWHEEL_SCHEMA, "state": "NO_SAFE_PATTERN", "request_id": request_id, "economic_authority": False}
-        evidence_rows = []
-        for raw in result.get("fixture_evidence") or []:
-            evidence_rows.append(SandboxFixtureEvidence(**{key: raw[key] for key in (
-                "fixture_class", "sandbox_id", "process_isolated", "environment_secret_count", "network_policy",
-                "tool_allowlist_enforced", "executor_pass", "checker_pass", "artifact_contract_pass",
-            )}))
+        evidence_rows = [SandboxFixtureEvidence(**{key: raw[key] for key in (
+            "fixture_class", "sandbox_id", "process_isolated", "environment_secret_count", "network_policy",
+            "tool_allowlist_enforced", "executor_pass", "checker_pass", "artifact_contract_pass",
+        )}) for raw in result.get("fixture_evidence") or []]
         capability_id = str(request["capability_id"])
         decision = DemandDrivenSkillForge().evaluate(
-            capability_id, evidence_rows,
-            commercial_use_ok=True,
-            supply_chain_pinned=True,
-            license_verified=True,
+            capability_id, evidence_rows, commercial_use_ok=True, supply_chain_pinned=True, license_verified=True,
             existing_duplicate=get_capability(capability_id) is not None,
-            falsification_pass=bool(result.get("falsification_pass")),
-            benchmark_pass=bool(result.get("benchmark_pass")),
-            owner_cost_usd="0",
+            falsification_pass=bool(result.get("falsification_pass")), benchmark_pass=bool(result.get("benchmark_pass")), owner_cost_usd="0",
         )
         decision_payload = {"schema": decision.schema, "capability_id": decision.capability_id, "promoted": decision.promoted, "failures": list(decision.failures)}
         if not decision.promoted:
@@ -266,21 +216,12 @@ def run_flywheel_once(*, flywheel_path: Path, registry_path: Path) -> dict[str, 
         evidence_digest = hashlib.sha256(json.dumps(result, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
         registry = CapabilityRegistryV3Store(registry_path)
         try:
-            persisted = registry.persist(
-                decision, evidence_digest=evidence_digest, sandbox_receipt_digest=receipt_digest,
-                synthetic=bool(request["synthetic"]), episode_id=str(request["episode_id"]),
-                gap_fingerprint=str(request["gap_fingerprint"]), supervisor_authority="ATM_SUPERVISOR_ORDER016_V1",
-            )
+            persisted = registry.persist(decision, evidence_digest=evidence_digest, sandbox_receipt_digest=receipt_digest, synthetic=bool(request["synthetic"]), episode_id=str(request["episode_id"]), gap_fingerprint=str(request["gap_fingerprint"]), supervisor_authority="ATM_SUPERVISOR_ORDER016_V1")
         finally:
             registry.close()
         state = "SYNTHETIC_PROMOTION_PROOF" if bool(request["synthetic"]) else "PROMOTED"
         queue.update(request_id, state=state, receipt=envelope, receipt_digest=receipt_digest, promotion=persisted)
-        return {
-            "schema": FLYWHEEL_SCHEMA, "state": state, "request_id": request_id,
-            "capability_id": capability_id, "synthetic_non_economic": bool(request["synthetic"]),
-            "activation_enabled": bool(persisted["activation_enabled"]), "sandbox_receipt_digest": receipt_digest,
-            "evidence_digest": evidence_digest, "economic_authority": False,
-        }
+        return {"schema": FLYWHEEL_SCHEMA, "state": state, "request_id": request_id, "capability_id": capability_id, "synthetic_non_economic": bool(request["synthetic"]), "activation_enabled": bool(persisted["activation_enabled"]), "sandbox_receipt_digest": receipt_digest, "evidence_digest": evidence_digest, "economic_authority": False}
     finally:
         queue.close()
 
