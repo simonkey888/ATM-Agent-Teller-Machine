@@ -7,7 +7,7 @@ from typing import Any, Iterable, Mapping
 
 from . import sandbox_boundary as legacy
 
-SANDBOX_SCHEMA = legacy.SANDBOX_SCHEMA
+NORMALIZED_SCHEMA = "ATM_STRUCTURAL_SANDBOX_V2"
 
 
 class WindowsStructuralSandbox(legacy.StructuralSandbox):
@@ -54,7 +54,9 @@ class WindowsStructuralSandbox(legacy.StructuralSandbox):
     def run(self, *, worker_name: str, request: Mapping[str, Any], policy, writable_paths: Iterable[Path] = ()) -> dict[str, Any]:
         envelope = super().run(worker_name=worker_name, request=request, policy=policy, writable_paths=writable_paths)
         proof = dict(envelope.get("sandbox") or {})
+        proof["schema"] = NORMALIZED_SCHEMA
         proof["backend"] = "WINDOWS_APPCONTAINER_JOB"
+        proof["owner_home_mounted"] = False
         envelope["sandbox"] = proof
         envelope["sandbox_receipt_digest"] = hashlib.sha256(json.dumps(proof, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
         return envelope
