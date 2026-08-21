@@ -5,7 +5,6 @@ import base64
 import io
 import json
 import os
-import resource
 import runpy
 import socket
 import sys
@@ -14,6 +13,11 @@ import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
+
+try:
+    import resource  # POSIX-only; the structural container backend is Linux.
+except ModuleNotFoundError:  # Windows imports this module only for static/unit probes.
+    resource = None  # type: ignore[assignment]
 
 SANDBOX_SCHEMA = "ATM_STRUCTURAL_SANDBOX_V2"
 SECRET_MARKERS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "MNEMONIC", "SEED", "WALLET")
@@ -131,6 +135,8 @@ def _cgroup_value(name: str) -> str | None:
 
 
 def _resource_observed() -> dict[str, Any]:
+    if resource is None:
+        raise RuntimeError("SANDBOX_RESOURCE_MODULE_UNAVAILABLE")
     return {
         "RLIMIT_CPU": list(resource.getrlimit(resource.RLIMIT_CPU)),
         "RLIMIT_FSIZE": list(resource.getrlimit(resource.RLIMIT_FSIZE)),
