@@ -205,10 +205,13 @@ def refetch_board_candidate(canonical_id: str, *, adapters: dict[str, Any], floo
     source, sep, external_id = str(canonical_id).partition(":")
     if not sep or not source or not external_id:
         return None, "CANONICAL_ID_INVALID"
-    adapter = adapters.get(source)
+    adapter_source = {
+        "taskmarket-daydreams": "taskmarket",
+    }.get(source, source)
+    adapter = adapters.get(adapter_source)
     if adapter is None:
-        return None, f"SOURCE_ADAPTER_MISSING:{source}"
-    if source == "taskmarket":
+        return None, f"SOURCE_ADAPTER_MISSING:{adapter_source}"
+    if adapter_source == "taskmarket":
         try:
             task = adapter.http.get(f"{adapter.base_url}/api/tasks/{urllib.parse.quote(external_id)}")
         except Exception as exc:
