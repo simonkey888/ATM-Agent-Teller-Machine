@@ -125,9 +125,9 @@ class Order019TaskmarketFallthroughTests(unittest.TestCase):
         # The first duplicate does not stop the global allocator. Both next
         # MoneyBoard IDs are independently refetched and receive their own
         # terminal result instead of silently disappearing.
-        self.assertEqual(ledger[1]["result"], "REJECTED_CANON_PREFLIGHT")
+        self.assertEqual(ledger[1]["result"], "REJECTED_SOURCE_FRESHNESS")
         self.assertEqual(ledger[1]["first_terminal_rejection_reason"], "EXPIRED")
-        self.assertEqual(ledger[2]["result"], "REJECTED_CANON_PREFLIGHT")
+        self.assertEqual(ledger[2]["result"], "REJECTED_SOURCE_FRESHNESS")
         self.assertEqual(ledger[2]["first_terminal_rejection_reason"], "EXPIRED")
         for task_id in (TARGET, NEXT_1, NEXT_2):
             self.assertGreaterEqual(sum(f"/api/tasks/{task_id}" in url for url in http.urls), 2)
