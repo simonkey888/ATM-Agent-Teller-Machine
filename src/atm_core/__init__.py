@@ -22,3 +22,9 @@ _install_order018_taskmarket()
 from .order018_runtime_fix import install as _install_order018_runtime_fix
 
 _install_order018_runtime_fix()
+
+# Dynamic free-provider candidates remain outside economic authority. They can
+# enter WORK/CHECK only after a fresh hard-zero-spend runtime proof.
+from .order018_free_provider_directive import install as _install_order018_free_provider_directive
+
+_install_order018_free_provider_directive()
