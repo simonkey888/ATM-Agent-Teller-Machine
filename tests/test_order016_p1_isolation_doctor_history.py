@@ -11,7 +11,23 @@ from atm_core.role_runtime import IsolatedRoleRunner, RoleReceiptStore
 
 
 class Order016P1IsolationDoctorHistoryTests(unittest.TestCase):
-    def test_scout_real_child_process_is_secretless_even_without_sources(self):
+    def assert_sterile_child_receipt(self, receipt, supervisor_home: Path):
+        child_home = Path(receipt["child_home_resolved"]).resolve()
+        repo_root = Path(__file__).resolve().parents[1]
+        self.assertNotEqual(child_home, supervisor_home.resolve())
+        self.assertNotEqual(child_home, repo_root)
+        self.assertFalse(child_home.is_relative_to(repo_root))
+        self.assertFalse(child_home.exists(), "ephemeral isolated HOME must be cleaned after child exit")
+        self.assertTrue(receipt["child_home_matches_request"])
+        self.assertEqual(receipt["child_home_initial_entry_count"], 0)
+        self.assertEqual(receipt["child_home_credential_files_visible"], 0)
+        self.assertTrue(receipt["isolated_home_proven"])
+        self.assertEqual(receipt["secret_env_count"], 0)
+        self.assertTrue(receipt["policy_enforced"])
+        self.assertNotEqual(receipt["child_pid"], os.getpid())
+
+    def test_scout_real_child_process_has_cross_platform_sterile_home_even_without_sources(self):
+        supervisor_home = Path.home().resolve()
         with tempfile.TemporaryDirectory() as td:
             db = Path(td) / "roles.sqlite3"
             runner = IsolatedRoleRunner(db)
@@ -23,13 +39,13 @@ class Order016P1IsolationDoctorHistoryTests(unittest.TestCase):
             store = RoleReceiptStore(db)
             try:
                 receipt = store.latest_by_role()["SCOUT"]
-                self.assertNotEqual(receipt["child_pid"], os.getpid())
-                self.assertEqual(receipt["secret_env_count"], 0)
-                self.assertTrue(receipt["policy_enforced"])
+                self.assert_sterile_child_receipt(receipt, supervisor_home)
+                self.assertIn("SCOUT", store.summary()["proven_roles"])
             finally:
                 store.close()
 
-    def test_falsifier_duplicate_is_killed_before_network_and_has_process_receipt(self):
+    def test_falsifier_duplicate_is_killed_before_network_and_keeps_valid_sterile_receipt(self):
+        supervisor_home = Path.home().resolve()
         with tempfile.TemporaryDirectory() as td:
             db = Path(td) / "roles.sqlite3"
             opp = Opportunity(
@@ -48,11 +64,14 @@ class Order016P1IsolationDoctorHistoryTests(unittest.TestCase):
             self.assertEqual((result["verdict"], result["reason"]), ("KILL", "ALREADY_SUBMITTED_OR_IN_FLIGHT"))
             store = RoleReceiptStore(db)
             try:
+                receipt = store.latest_by_role()["FALSIFIER"]
+                self.assert_sterile_child_receipt(receipt, supervisor_home)
                 self.assertIn("FALSIFIER", store.summary()["proven_roles"])
             finally:
                 store.close()
 
-    def test_doctor_typed_state_survives_process_and_restart(self):
+    def test_doctor_typed_state_survives_process_restart_and_keeps_valid_sterile_receipt(self):
+        supervisor_home = Path.home().resolve()
         with tempfile.TemporaryDirectory() as td:
             roles = Path(td) / "roles.sqlite3"
             doctor_db = Path(td) / "doctor.sqlite3"
@@ -72,7 +91,11 @@ class Order016P1IsolationDoctorHistoryTests(unittest.TestCase):
                 reopened.close()
             store = RoleReceiptStore(roles)
             try:
-                self.assertIn("DOCTOR", store.summary()["proven_roles"])
+                receipt = store.latest_by_role()["DOCTOR"]
+                self.assert_sterile_child_receipt(receipt, supervisor_home)
+                summary = store.summary()
+                self.assertIn("DOCTOR", summary["proven_roles"])
+                self.assertFalse(summary["sterile_home_proven"], "all three roles are required before global proof")
             finally:
                 store.close()
 
