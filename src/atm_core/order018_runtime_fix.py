@@ -13,6 +13,40 @@ def install() -> None:
         return
     _INSTALLED = True
 
+    # The Docker backend intentionally runs as the hosted-runner non-root UID.
+    # Docker tmpfs mounts default to root ownership, so mode=700 made /home/atm
+    # inaccessible to that child. Intercept only the module-local docker-create
+    # argv and bind the sterile-home tmpfs owner to the exact --user UID/GID.
+    # The child remains non-root; no supervisor HOME is mounted or inherited.
+    from . import sandbox_boundary_v2 as sandbox_v2
+    _real_subprocess = sandbox_v2.subprocess
+
+    class _SandboxSubprocessProxy:
+        def run(self, args, *positional, **kwargs):
+            adjusted = args
+            if isinstance(args, list) and len(args) >= 2 and str(args[1]) == "create":
+                adjusted = list(args)
+                try:
+                    user_index = adjusted.index("--user") + 1
+                    uid, gid = str(adjusted[user_index]).split(":", 1)
+                except (ValueError, IndexError):
+                    uid = gid = ""
+                if uid.isdigit() and gid.isdigit():
+                    for index, value in enumerate(adjusted[:-1]):
+                        if value != "--tmpfs":
+                            continue
+                        spec = str(adjusted[index + 1])
+                        if not spec.startswith("/home/atm:"):
+                            continue
+                        if "uid=" not in spec and "gid=" not in spec:
+                            adjusted[index + 1] = f"{spec},uid={uid},gid={gid}"
+            return _real_subprocess.run(adjusted, *positional, **kwargs)
+
+        def __getattr__(self, name: str):
+            return getattr(_real_subprocess, name)
+
+    sandbox_v2.subprocess = _SandboxSubprocessProxy()  # type: ignore[assignment]
+
     # Linux RLIMIT_NPROC is charged against the kernel UID, not the container's
     # cgroup alone. Hosted runners may already have >16 or >64 same-UID host
     # processes before ATM starts. Keep an explicit finite hard process ceiling
