@@ -4,53 +4,33 @@ import hashlib
 import json
 import os
 import sqlite3
-import subprocess
-import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from .sandbox_boundary import SANDBOX_SCHEMA, SandboxLimits, SandboxPolicy, StructuralSandbox
 
-ROLE_RUNTIME_SCHEMA = "ATM_ISOLATED_ROLE_RUNTIME_V1"
+ROLE_RUNTIME_SCHEMA = "ATM_ISOLATED_ROLE_RUNTIME_V2"
 ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = ROOT.parent
 WORKER = ROOT / "atm_role_worker.py"
-SAFE_ENV_KEYS = ("SYSTEMROOT", "WINDIR", "SSL_CERT_FILE", "SSL_CERT_DIR")
 SECRET_MARKERS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "MNEMONIC", "SEED", "WALLET")
 
 
-def _clean_env(isolated_home: Path) -> dict[str, str]:
-    """Build a secretless child environment with a real, empty home on every OS.
-
-    HOME/USERPROFILE are intentionally replaced, never inherited.  Windows' current
-    pathlib/os.path home resolution uses USERPROFILE; POSIX uses HOME.  No additional
-    Windows home variables are needed, so HOMEDRIVE/HOMEPATH remain absent.
-    """
-    home = Path(isolated_home).resolve()
-    if not home.is_dir():
-        raise RuntimeError("ROLE_ISOLATED_HOME_MISSING")
-    supervisor_home = Path.home().resolve()
-    if home == supervisor_home:
-        raise RuntimeError("ROLE_ISOLATED_HOME_EQUALS_SUPERVISOR_HOME")
-    repo = REPO_ROOT.resolve()
-    if home == repo or repo in home.parents:
-        raise RuntimeError("ROLE_ISOLATED_HOME_INSIDE_REPOSITORY")
-
-    env = {
-        "PYTHONUTF8": "1",
-        "PYTHONIOENCODING": "utf-8",
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "HOME": str(home),
-        "USERPROFILE": str(home),
-    }
-    for key in SAFE_ENV_KEYS:
-        value = os.environ.get(key)
-        if value:
-            env[key] = value
-    if any(any(marker in key.upper() for marker in SECRET_MARKERS) for key in env):
-        raise RuntimeError("ROLE_ENV_SECRET_FILTER_FAILED")
-    return env
+def _scrub_secret_fields(value: Any) -> Any:
+    """Remove credential-shaped configuration before a request crosses into a role child."""
+    if isinstance(value, Mapping):
+        out: dict[str, Any] = {}
+        for key, raw in value.items():
+            name = str(key)
+            if any(marker in name.upper() for marker in SECRET_MARKERS):
+                continue
+            out[name] = _scrub_secret_fields(raw)
+        return out
+    if isinstance(value, list):
+        return [_scrub_secret_fields(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_scrub_secret_fields(item) for item in value)
+    return value
 
 
 def worker_code_sha256() -> str:
@@ -76,6 +56,17 @@ class RoleReceipt:
     child_home_initial_entry_count: int = -1
     child_home_credential_files_visible: int = -1
     isolated_home_proven: bool = False
+    structural_sandbox_schema: str = ""
+    structural_sandbox_proven: bool = False
+    owner_home_read_denied_observed: bool = False
+    canonical_repo_write_denied_observed: bool = False
+    direct_network_denied_observed: bool = False
+    filesystem_boundary_applied: bool = False
+    network_boundary_applied: bool = False
+    resource_limits_applied: bool = False
+    process_tree_bounded: bool = False
+    resource_limits_observed: dict[str, Any] | None = None
+    sandbox_receipt_digest: str = ""
 
     @property
     def proven(self) -> bool:
@@ -91,6 +82,17 @@ class RoleReceipt:
             self.child_home_initial_entry_count == 0,
             self.child_home_credential_files_visible == 0,
             self.isolated_home_proven,
+            self.structural_sandbox_schema == SANDBOX_SCHEMA,
+            self.structural_sandbox_proven,
+            self.owner_home_read_denied_observed,
+            self.canonical_repo_write_denied_observed,
+            self.direct_network_denied_observed,
+            self.filesystem_boundary_applied,
+            self.network_boundary_applied,
+            self.resource_limits_applied,
+            self.process_tree_bounded,
+            bool(self.resource_limits_observed),
+            bool(self.sandbox_receipt_digest),
         ))
 
 
@@ -147,79 +149,91 @@ class RoleReceiptStore:
                     proven.append(role)
             except Exception:
                 continue
+        all_proven = set(proven) == set(required)
         return {
             "schema": ROLE_RUNTIME_SCHEMA,
             "required_roles": list(required),
             "proven_roles": proven,
-            "process_boundary_proven": set(proven) == set(required),
-            "secretless_env_proven": set(proven) == set(required),
-            "tool_network_policy_proven": set(proven) == set(required),
-            "sterile_home_proven": set(proven) == set(required),
+            "process_boundary_proven": all_proven,
+            "secretless_env_proven": all_proven,
+            "tool_network_policy_proven": all_proven,
+            "sterile_home_proven": all_proven,
+            "structural_sandbox_proven": all_proven,
+            "owner_home_read_denied_proven": all_proven,
+            "resource_limits_proven": all_proven,
             "latest_receipts": rows,
         }
 
 
 class IsolatedRoleRunner:
-    """Spawn fixed typed role operations with an empty-secret environment.
-
-    The child is trusted repository code, not arbitrary candidate code. It receives no
-    marketplace/model/wallet credentials and cannot request arbitrary Python/shell work.
-    Every invocation receives a fresh empty home that is removed after the process exits.
-    """
+    """Run fixed typed roles in the one shared structural sandbox boundary."""
 
     def __init__(self, receipt_db: Path, *, timeout_seconds: int = 120):
         self.receipt_db = Path(receipt_db)
         self.timeout_seconds = max(5, min(300, int(timeout_seconds)))
+        self.sandbox = StructuralSandbox(source_root=ROOT)
 
     def run(self, role: str, operation: str, payload: Mapping[str, Any], *, network_policy: str, tool_policy: str) -> dict[str, Any]:
-        with tempfile.TemporaryDirectory(prefix="atm-role-home-") as home_raw:
-            child_home = Path(home_raw).resolve()
-            request = {
-                "schema": ROLE_RUNTIME_SCHEMA,
-                "role": str(role).upper(),
-                "operation": str(operation).upper(),
-                "payload": dict(payload),
-                "network_policy": str(network_policy),
-                "tool_policy": str(tool_policy),
-                "parent_pid": os.getpid(),
-                "worker_code_sha256": worker_code_sha256(),
-                "isolated_home": str(child_home),
-            }
-            raw_request = json.dumps(request, sort_keys=True, separators=(",", ":"), default=str)
-            completed = subprocess.run(
-                [sys.executable, "-I", str(WORKER)],
-                input=raw_request,
-                text=True,
-                capture_output=True,
-                env=_clean_env(child_home),
-                cwd=str(ROOT),
-                timeout=self.timeout_seconds,
-                check=False,
-            )
-            if completed.returncode != 0:
-                tail = (completed.stderr or completed.stdout or "")[-800:]
-                raise RuntimeError(f"ISOLATED_ROLE_FAILED:{role}:{operation}:{completed.returncode}:{tail}")
-            try:
-                response = json.loads(completed.stdout)
-            except json.JSONDecodeError as exc:
-                raise RuntimeError("ISOLATED_ROLE_INVALID_RECEIPT") from exc
-            receipt_raw = response.get("receipt") if isinstance(response, dict) else None
-            result = response.get("result") if isinstance(response, dict) else None
-            if not isinstance(receipt_raw, dict) or not isinstance(result, dict):
-                raise RuntimeError("ISOLATED_ROLE_MISSING_RECEIPT")
-            receipt = RoleReceipt(**receipt_raw)
-            expected_request = hashlib.sha256(raw_request.encode()).hexdigest()
-            expected_result = hashlib.sha256(json.dumps(result, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
-            if (
-                receipt.request_sha256 != expected_request
-                or receipt.result_sha256 != expected_result
-                or Path(receipt.child_home_resolved).resolve() != child_home
-                or not receipt.proven
-            ):
-                raise RuntimeError("ISOLATED_ROLE_RECEIPT_VERIFICATION_FAILED")
-            store = RoleReceiptStore(self.receipt_db)
-            try:
-                store.put(receipt)
-            finally:
-                store.close()
+        request = {
+            "schema": ROLE_RUNTIME_SCHEMA,
+            "role": str(role).upper(),
+            "operation": str(operation).upper(),
+            "payload": _scrub_secret_fields(dict(payload)),
+            "network_policy": str(network_policy),
+            "tool_policy": str(tool_policy),
+            "parent_pid": os.getpid(),
+            "worker_code_sha256": worker_code_sha256(),
+        }
+        writable: tuple[Path, ...] = ()
+        if request["role"] == "DOCTOR":
+            state_raw = str(dict(request["payload"]).get("state_path") or "").strip()
+            if state_raw:
+                writable = (Path(state_raw).resolve().parent,)
+        limits = SandboxLimits(
+            cpu_seconds=min(30, self.timeout_seconds),
+            memory_mb=512,
+            max_file_bytes=8 * 1024 * 1024,
+            max_open_files=64,
+            max_processes=16,
+            wall_seconds=self.timeout_seconds,
+        )
+        envelope = self.sandbox.run(
+            worker_name="atm_role_worker.py",
+            request=request,
+            policy=SandboxPolicy(network_policy=str(network_policy), tool_policy=str(tool_policy), limits=limits),
+            writable_paths=writable,
+        )
+        worker_envelope = envelope.get("worker")
+        sandbox = envelope.get("sandbox")
+        if not isinstance(worker_envelope, dict) or not isinstance(sandbox, dict):
+            raise RuntimeError("ISOLATED_ROLE_MISSING_STRUCTURAL_RECEIPT")
+        receipt_raw = worker_envelope.get("receipt")
+        result = worker_envelope.get("result")
+        if not isinstance(receipt_raw, dict) or not isinstance(result, dict):
+            raise RuntimeError("ISOLATED_ROLE_MISSING_RECEIPT")
+        receipt_raw = dict(receipt_raw)
+        receipt_raw.update({
+            "structural_sandbox_schema": sandbox.get("schema"),
+            "structural_sandbox_proven": True,
+            "owner_home_read_denied_observed": bool(sandbox.get("owner_home_read_denied_observed")),
+            "canonical_repo_write_denied_observed": bool(sandbox.get("canonical_repo_write_denied_observed")),
+            "direct_network_denied_observed": bool(sandbox.get("direct_network_denied_observed")),
+            "filesystem_boundary_applied": bool(sandbox.get("filesystem_boundary_applied")),
+            "network_boundary_applied": bool(sandbox.get("network_boundary_applied")),
+            "resource_limits_applied": bool(sandbox.get("resource_limits_applied")),
+            "process_tree_bounded": bool(sandbox.get("process_tree_bounded")),
+            "resource_limits_observed": sandbox.get("resource_limits_observed"),
+            "sandbox_receipt_digest": str(envelope.get("sandbox_receipt_digest") or ""),
+            "child_home_initial_entry_count": int(sandbox.get("child_home_initial_entry_count", -1)),
+            "child_home_resolved": str(sandbox.get("child_home_resolved") or receipt_raw.get("child_home_resolved") or ""),
+        })
+        receipt = RoleReceipt(**receipt_raw)
+        expected_result = hashlib.sha256(json.dumps(result, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+        if receipt.result_sha256 != expected_result or not receipt.proven:
+            raise RuntimeError("ISOLATED_ROLE_RECEIPT_VERIFICATION_FAILED")
+        store = RoleReceiptStore(self.receipt_db)
+        try:
+            store.put(receipt)
+        finally:
+            store.close()
         return result
