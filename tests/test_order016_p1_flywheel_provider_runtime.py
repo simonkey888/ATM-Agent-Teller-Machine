@@ -48,8 +48,8 @@ class Order016P1FlywheelProviderRuntimeTests(unittest.TestCase):
             try:
                 fabric.ensure_route("gemini-api-free", "model-a")
                 self.assertEqual(fabric.status("gemini-api-free", "model-a")["state"], "UNVERIFIED")
-                health_a = ProviderHealth("google-gemini-api", "model-a", True, True, True, True, True, False, False, False, "LIVE_ZERO_COST_RATE_PROBE_OK")
-                health_b = ProviderHealth("google-gemini-api", "model-b", True, True, True, True, True, False, False, False, "LIVE_ZERO_COST_RATE_PROBE_OK")
+                health_a = ProviderHealth(provider="google-gemini-api", model="model-a", credential_present=True, model_available=True, zero_cost_tier_proven=True, rate_limit_usable=True, usable=True, reason="LIVE_ZERO_COST_RATE_PROBE_OK")
+                health_b = ProviderHealth(provider="google-gemini-api", model="model-b", credential_present=True, model_available=True, zero_cost_tier_proven=True, rate_limit_usable=True, usable=True, reason="LIVE_ZERO_COST_RATE_PROBE_OK")
                 fabric.record_probe("gemini-api-free", "model-a", health_a)
                 fabric.record_probe("gemini-api-free", "model-b", health_b)
                 self.assertEqual(fabric.route([("gemini-api-free", "model-a"), ("gemini-api-free", "model-b")])["model_id"], "model-a")
