@@ -10,3 +10,9 @@ if os.name == "nt":
     from .windows_sandbox_fixed import WindowsStructuralSandbox as _WindowsStructuralSandbox
 
     _sandbox_v2.StructuralSandbox = _WindowsStructuralSandbox
+
+# Install ORDER-018 TaskMarket truth reconciliation into the existing single Cash
+# Canon surfaces. This changes admission evidence, never economic authority.
+from .order018_taskmarket import install as _install_order018_taskmarket
+
+_install_order018_taskmarket()
