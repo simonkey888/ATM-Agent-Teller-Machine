@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 from typing import Any
 
 _INSTALLED = False
@@ -86,6 +87,59 @@ def install() -> None:
         )
 
     role_runtime.SandboxLimits = _runtime_limits  # type: ignore[assignment]
+
+    # ORDER-018 first selection is a verification queue, not an allocation.
+    # For TaskMarket, never order that queue from guessed acceptance/payment
+    # probabilities. Settlement evidence tier, executable local maker, freshness,
+    # truthful competition, bounded effort and net reward are the only ranking
+    # inputs. Exact zero-cost action + final settlement proof are still required
+    # by canonical_admission before CLAIM/WORK authority exists.
+    from . import money_velocity as mv
+
+    _legacy_choose_money_velocity = mv.choose_money_velocity
+    _tier_rank = {"S0": 0, "S1": 1, "S2": 2, "S3": 3, "S4": 4}
+
+    def _taskmarket_settlement_first_key(opportunity, now):
+        explicit_tier = str(getattr(opportunity, "settlement_tier", "") or "").upper()
+        if explicit_tier in _tier_rank:
+            tier = explicit_tier
+        else:
+            proof = opportunity.funding_proof or {}
+            funded = bool(
+                proof.get("escrow")
+                or proof.get("escrow_tx_hash")
+                or proof.get("funding_tx_hash")
+                or proof.get("settlement_tx_hash")
+            )
+            tier = "S1" if funded else "S0"
+        competition = int(opportunity.competition) if int(opportunity.competition) >= 0 else 10**9
+        effort = max(Decimal("0.01"), opportunity.total_effort_hours)
+        net_per_effort = opportunity.reward_net / effort
+        return (
+            _tier_rank[tier],
+            1 if bool(getattr(opportunity, "maker_supported", False)) else 0,
+            mv.task_alive_probability(opportunity, now),
+            -competition,
+            net_per_effort,
+            -mv.expected_minutes_to_withdrawable(opportunity),
+            opportunity.reward_net,
+        )
+
+    def _settlement_first_choose(opportunities, *, now=None, hard_default_hours=Decimal("3")):
+        rows = list(opportunities)
+        taskmarket = [
+            row for row in rows
+            if str(getattr(row, "source", "")).lower() == "taskmarket"
+            and mv.reject_reason(row, now) is None
+        ]
+        if taskmarket:
+            short = [row for row in taskmarket if row.expected_agent_hours <= hard_default_hours]
+            pool = short or taskmarket
+            return max(pool, key=lambda row: _taskmarket_settlement_first_key(row, now))
+        return _legacy_choose_money_velocity(rows, now=now, hard_default_hours=hard_default_hours)
+
+    mv.choose_money_velocity = _settlement_first_choose  # type: ignore[assignment]
+    mv.order018_taskmarket_selection_key = _taskmarket_settlement_first_key  # type: ignore[attr-defined]
 
     # ORDER-018 reconciles competition from the freshest authoritative sources.
     # Direct Canon callers still need an explicit count in the supplied fresh
