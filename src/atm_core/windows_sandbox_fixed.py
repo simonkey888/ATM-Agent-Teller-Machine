@@ -15,7 +15,6 @@ class WindowsStructuralSandbox(legacy.StructuralSandbox):
     """ORDER-018 Windows compatibility backend with the real AppContainer cwd binding fixed."""
 
     def _run_windows(self, command, env, sandbox_root, write_paths, policy):
-        # P0-RT1: signature is (command, env, cwd, sandbox_root, write_paths, limits).
         win = legacy._launch_windows_appcontainer(command, env, sandbox_root, sandbox_root, write_paths, policy.limits)
         kernel32 = legacy.ctypes.WinDLL("kernel32", use_last_error=True)
         deadline = legacy.time.monotonic() + policy.limits.wall_seconds
@@ -57,3 +56,9 @@ class WindowsStructuralSandbox(legacy.StructuralSandbox):
         envelope["sandbox"] = proof
         envelope["sandbox_receipt_digest"] = hashlib.sha256(json.dumps(proof, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
         return envelope
+
+
+# Capture the genuine Windows implementation before ORDER-018 Linux runtime
+# decorators are installed. atm_core.__init__ restores this exact method on NT,
+# so Linux broker/output hardening can never wrap the AppContainer authority.
+WINDOWS_ORIGINAL_RUN = WindowsStructuralSandbox.run
