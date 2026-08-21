@@ -19,7 +19,9 @@ SECRET_MARKERS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "MNEMONIC"
 ALLOWED = {
     ("SCOUT", "DISCOVER"): ("READ_ONLY_PUBLIC_HTTPS", "READ_ONLY_SOURCE_DISCOVERY"),
     ("FALSIFIER", "VERIFY"): ("READ_ONLY_PUBLIC_HTTPS", "AUTHORITATIVE_READ_VERIFY"),
+    ("FALSIFIER", "BOUNDARY_PROBE"): ("READ_ONLY_PUBLIC_HTTPS", "AUTHORITATIVE_READ_VERIFY"),
     ("DOCTOR", "HANDLE"): ("DENY", "DURABLE_TYPED_RECOVERY"),
+    ("DOCTOR", "INSPECT"): ("DENY", "DURABLE_TYPED_RECOVERY"),
 }
 
 
@@ -83,7 +85,6 @@ def _install_network_policy(policy: str) -> None:
 
 def _discover(payload: dict[str, Any]) -> dict[str, Any]:
     import atm_v2 as core
-
     config = dict(payload.get("config") or {})
     sources = [str(x) for x in payload.get("sources") or []]
     minimum = payload.get("minimum", 1)
@@ -105,7 +106,6 @@ def _discover(payload: dict[str, Any]) -> dict[str, Any]:
 def _verify(payload: dict[str, Any]) -> dict[str, Any]:
     import atm_v2 as core
     from atm_core.models import Opportunity
-
     raw = dict(payload.get("opportunity") or {})
     opp = Opportunity.model_validate(raw)
     submitted = {str(x) for x in payload.get("submitted_ids") or []}
@@ -131,14 +131,22 @@ def _verify(payload: dict[str, Any]) -> dict[str, Any]:
     return {"verdict": "CONFIRM", "reason": None, "fresh_object_hash": digest}
 
 
-def _doctor(payload: dict[str, Any]) -> dict[str, Any]:
+def _doctor_handle(payload: dict[str, Any]) -> dict[str, Any]:
     from atm_core.durable_doctor import DurableDoctor
-
     path = Path(str(payload["state_path"])).resolve()
     doctor = DurableDoctor(path, threshold=int(payload.get("threshold", 3)), cooldown_seconds=int(payload.get("cooldown_seconds", 300)))
     try:
         decision = doctor.handle(str(payload["fault"]), str(payload["key"]), attempt=int(payload.get("attempt", 1)))
         return {"decision": decision.__dict__, "status": doctor.status(str(payload["key"])), "summary": doctor.summary()}
+    finally:
+        doctor.close()
+
+
+def _doctor_inspect(payload: dict[str, Any]) -> dict[str, Any]:
+    from atm_core.durable_doctor import DurableDoctor
+    doctor = DurableDoctor(Path(str(payload["state_path"])).resolve(), threshold=int(payload.get("threshold", 3)), cooldown_seconds=int(payload.get("cooldown_seconds", 300)))
+    try:
+        return {"state": "BOUNDARY_READY", "summary": doctor.summary()}
     finally:
         doctor.close()
 
@@ -160,26 +168,25 @@ def main() -> int:
     if request.get("worker_code_sha256") != own_sha:
         raise SystemExit("ROLE_CODE_DIGEST_MISMATCH")
     _install_network_policy(network_policy)
+    payload = dict(request.get("payload") or {})
     if role == "SCOUT":
-        result = _discover(dict(request.get("payload") or {}))
+        result = _discover(payload)
+    elif role == "FALSIFIER" and operation == "VERIFY":
+        result = _verify(payload)
     elif role == "FALSIFIER":
-        result = _verify(dict(request.get("payload") or {}))
+        result = {"state": "BOUNDARY_READY", "submitted_history_count": len(payload.get("submitted_ids") or [])}
+    elif operation == "HANDLE":
+        result = _doctor_handle(payload)
     else:
-        result = _doctor(dict(request.get("payload") or {}))
+        result = _doctor_inspect(payload)
     result_raw = json.dumps(result, sort_keys=True, separators=(",", ":"), default=str)
     receipt = {
-        "role": role,
-        "operation": operation,
-        "child_pid": os.getpid(),
+        "role": role, "operation": operation, "child_pid": os.getpid(),
         "parent_pid": int(request.get("parent_pid") or -1),
         "process_isolated": os.getpid() != int(request.get("parent_pid") or -1),
-        "secret_env_count": _secret_env_count(),
-        "network_policy": network_policy,
-        "tool_policy": tool_policy,
-        "policy_enforced": True,
-        "worker_code_sha256": own_sha,
-        "request_sha256": hashlib.sha256(raw.encode()).hexdigest(),
-        "result_sha256": hashlib.sha256(result_raw.encode()).hexdigest(),
+        "secret_env_count": _secret_env_count(), "network_policy": network_policy, "tool_policy": tool_policy,
+        "policy_enforced": True, "worker_code_sha256": own_sha,
+        "request_sha256": hashlib.sha256(raw.encode()).hexdigest(), "result_sha256": hashlib.sha256(result_raw.encode()).hexdigest(),
     }
     sys.stdout.write(json.dumps({"result": result, "receipt": receipt}, sort_keys=True, separators=(",", ":"), default=str))
     return 0
