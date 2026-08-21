@@ -5,6 +5,7 @@ import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from atm_core.models import Opportunity
 from atm_core.swarm_runtime import current_pass_swarm_shadow
@@ -12,27 +13,8 @@ from atm_swarm import MoneyBoard
 
 
 class Adapter:
-    def __init__(self, candidate: Opportunity, *, funding_ok: bool = True):
+    def __init__(self, candidate: Opportunity):
         self.candidate = candidate
-        self.funding_ok = funding_ok
-        self.funding_checks = 0
-
-    def discover(self, minimum):
-        return [self.candidate]
-
-    def fetch_authoritative(self, opportunity):
-        return {"status": "open", "id": opportunity.canonical_opportunity_id}
-
-    def verify_freshness(self, opportunity, snapshot):
-        return None
-
-    def verify_funding(self, opportunity, snapshot):
-        self.funding_checks += 1
-        if not self.funding_ok:
-            raise ValueError("funding invalid")
-
-    def verify_eligibility(self, opportunity, snapshot):
-        return None
 
 
 class SwarmRuntimeTests(unittest.TestCase):
@@ -51,26 +33,35 @@ class SwarmRuntimeTests(unittest.TestCase):
             payout_latency_hours=Decimal("1"),
         )
 
-    def test_old_eligible_row_cannot_starve_current_pass_falsifier(self):
+    def isolated_run(self, candidate: Opportunity, verdict: str, reason=None):
+        calls = {"scout": 0, "falsifier": 0}
+        def run(_runner, role, operation, payload, **kwargs):
+            if role == "SCOUT":
+                calls["scout"] += 1
+                source = payload["sources"][0]
+                return {"observations": [{"source": source, "state": "OK", "error_class": None, "candidates": [candidate.model_dump(mode="json")]}]}
+            if role == "FALSIFIER":
+                calls["falsifier"] += 1
+                self.assertEqual(payload["opportunity"]["canonical_opportunity_id"], candidate.canonical_opportunity_id)
+                return {"verdict": verdict, "reason": reason, "fresh_object_hash": "a" * 64 if verdict == "CONFIRM" else None}
+            if role == "DOCTOR":
+                return {"decision": {"action": "REFRESH_STALE_STATE"}, "status": {}, "summary": {}}
+            raise AssertionError((role, operation))
+        return calls, run
+
+    def test_old_eligible_row_cannot_starve_current_pass_isolated_falsifier(self):
         with tempfile.TemporaryDirectory() as directory:
             board = MoneyBoard(Path(directory) / "board.sqlite3")
             try:
                 orphan = self.opportunity("disabled:old", "disabled", "1000")
-                board.upsert_candidate(
-                    orphan.model_dump(mode="json"), scout="disabled", base_score=1000, status="NORMALIZED"
-                )
+                board.upsert_candidate(orphan.model_dump(mode="json"), scout="disabled", base_score=1000, status="NORMALIZED")
                 board.mark_falsifier(orphan.canonical_opportunity_id, "CONFIRM", confidence=1.0)
-
                 current = self.opportunity("workprotocol:current", "workprotocol", "20")
-                adapter = Adapter(current)
-                result = current_pass_swarm_shadow(
-                    {"discovery_order": ["workprotocol"], "min_reward_usd": 1},
-                    {"workprotocol": adapter},
-                    board,
-                )
-
+                calls, fake_run = self.isolated_run(current, "CONFIRM")
+                with patch("atm_core.swarm_runtime.IsolatedRoleRunner.run", new=fake_run), patch("atm_core.swarm_runtime._doctor_available_sources", return_value=["workprotocol"]), patch("atm_core.swarm_runtime.canonical_non_actionable_ids", return_value=set()):
+                    result = current_pass_swarm_shadow({"discovery_order": ["workprotocol"], "min_reward_usd": 1}, {"workprotocol": Adapter(current)}, board)
                 row = board.get(current.canonical_opportunity_id)
-                self.assertEqual(adapter.funding_checks, 1)
+                self.assertEqual(calls["falsifier"], 1)
                 self.assertEqual(row["falsifier_verdict"], "CONFIRM")
                 self.assertEqual(row["status"], "ELIGIBLE")
                 self.assertIn(current.canonical_opportunity_id, result["live_candidates"])
@@ -82,21 +73,14 @@ class SwarmRuntimeTests(unittest.TestCase):
             board = MoneyBoard(Path(directory) / "board.sqlite3")
             try:
                 orphan = self.opportunity("disabled:old", "disabled", "1000")
-                board.upsert_candidate(
-                    orphan.model_dump(mode="json"), scout="disabled", base_score=1000, status="NORMALIZED"
-                )
+                board.upsert_candidate(orphan.model_dump(mode="json"), scout="disabled", base_score=1000, status="NORMALIZED")
                 board.mark_falsifier(orphan.canonical_opportunity_id, "CONFIRM", confidence=1.0)
-
                 current = self.opportunity("workprotocol:current", "workprotocol", "20")
-                adapter = Adapter(current, funding_ok=False)
-                current_pass_swarm_shadow(
-                    {"discovery_order": ["workprotocol"], "min_reward_usd": 1},
-                    {"workprotocol": adapter},
-                    board,
-                )
-
+                calls, fake_run = self.isolated_run(current, "KILL", "ValueError")
+                with patch("atm_core.swarm_runtime.IsolatedRoleRunner.run", new=fake_run), patch("atm_core.swarm_runtime._doctor_available_sources", return_value=["workprotocol"]), patch("atm_core.swarm_runtime.canonical_non_actionable_ids", return_value=set()):
+                    current_pass_swarm_shadow({"discovery_order": ["workprotocol"], "min_reward_usd": 1}, {"workprotocol": Adapter(current)}, board)
                 row = board.get(current.canonical_opportunity_id)
-                self.assertEqual(adapter.funding_checks, 1)
+                self.assertEqual(calls["falsifier"], 1)
                 self.assertEqual(row["falsifier_verdict"], "KILL")
                 self.assertEqual(row["status"], "REJECTED")
             finally:
