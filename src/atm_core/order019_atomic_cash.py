@@ -242,7 +242,7 @@ def choose_atomic_swarm_candidate(
                 {
                     "canonical_id": canonical_id,
                     "origin": origin,
-                    "result": "REJECTED_BEFORE_RANKING",
+                    "result": "REJECTED",
                     "reason": reason or "REDISCOVERY_MISS_UNEXPLAINED",
                 }
             )
