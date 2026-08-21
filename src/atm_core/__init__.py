@@ -16,3 +16,9 @@ if os.name == "nt":
 from .order018_taskmarket import install as _install_order018_taskmarket
 
 _install_order018_taskmarket()
+
+# Close exact-head hosted-runner and compatibility regressions while preserving
+# the new fail-closed competition/action-cost semantics.
+from .order018_runtime_fix import install as _install_order018_runtime_fix
+
+_install_order018_runtime_fix()
