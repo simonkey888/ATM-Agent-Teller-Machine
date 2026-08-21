@@ -31,6 +31,16 @@ def _scrub_secret_fields(value: Any) -> Any:
     return value
 
 
+def _doctor_recovery_key(value: Any) -> str:
+    """Validate the closed Doctor state key without weakening generic secret scrubbing."""
+    key = str(value or "").strip()
+    prefixes = ("source:", "provider:", "worker:", "checker:", "forge:", "heartbeat:", "state:", "effect:")
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:._/-")
+    if not key or len(key) > 256 or not key.startswith(prefixes) or any(ch not in allowed for ch in key):
+        raise ValueError("DOCTOR_RECOVERY_KEY_INVALID")
+    return key
+
+
 def _allowed_https_hosts(value: Any) -> tuple[str, ...]:
     hosts: set[str] = set()
     def walk(raw: Any) -> None:
@@ -103,8 +113,15 @@ class IsolatedRoleRunner:
     def __init__(self, receipt_db: Path, *, timeout_seconds: int=120):
         self.receipt_db=Path(receipt_db); self.timeout_seconds=max(5,min(300,int(timeout_seconds))); self.sandbox=StructuralSandbox(source_root=ROOT)
     def run(self, role: str, operation: str, payload: Mapping[str,Any], *, network_policy: str, tool_policy: str)->dict[str,Any]:
-        sanitized=_scrub_secret_fields(dict(payload))
-        request={"schema":ROLE_RUNTIME_SCHEMA,"role":str(role).upper(),"operation":str(operation).upper(),"payload":sanitized,"network_policy":str(network_policy),"tool_policy":str(tool_policy),"parent_pid":os.getpid(),"worker_code_sha256":worker_code_sha256()}
+        role_name=str(role).upper()
+        raw_payload=dict(payload)
+        sanitized=_scrub_secret_fields(raw_payload)
+        # Generic KEY fields are scrubbed everywhere. Doctor's internal durable
+        # state identifier is a typed non-secret value, so restore only that
+        # closed namespace after validation rather than weakening the scrubber.
+        if role_name=="DOCTOR" and "key" in raw_payload:
+            sanitized["key"]=_doctor_recovery_key(raw_payload["key"])
+        request={"schema":ROLE_RUNTIME_SCHEMA,"role":role_name,"operation":str(operation).upper(),"payload":sanitized,"network_policy":str(network_policy),"tool_policy":str(tool_policy),"parent_pid":os.getpid(),"worker_code_sha256":worker_code_sha256()}
         writable=()
         if request["role"]=="DOCTOR":
             state_raw=str(dict(request["payload"]).get("state_path") or "").strip()
