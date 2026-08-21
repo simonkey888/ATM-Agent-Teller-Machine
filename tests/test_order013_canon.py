@@ -91,10 +91,15 @@ class Order013CanonTests(unittest.TestCase):
         cases = [
             ({"funding_status": FundingStatus.UNVERIFIED}, "UNVERIFIED_FUNDING"),
             ({"funding_proof": {}}, "UNVERIFIED_FUNDING"),
-            ({"external_object_exists": None}, "REMOTE_404"),
-            ({"external_status": "UNKNOWN"}, "CLOSED"),
-            ({"submission_window_open": None}, "NO_CURRENT_WORKER_ACTION"),
-            ({"canonical_identity_eligible": None}, "IDENTITY_NOT_READY"),
+            ({"external_object_exists": None}, "REMOTE_EXISTENCE_UNKNOWN"),
+            ({"external_status": "UNKNOWN"}, "EXTERNAL_STATUS_UNKNOWN"),
+            ({"submission_window_open": None}, "SUBMISSION_WINDOW_UNKNOWN"),
+            ({"current_worker_action_available": None}, "WORKER_ACTION_UNKNOWN"),
+            ({"paid_action_required": None}, "ACTION_COST_UNKNOWN"),
+            ({"stake_required": None}, "STAKE_STATUS_UNKNOWN"),
+            ({"canonical_identity_eligible": None}, "IDENTITY_ELIGIBILITY_UNKNOWN"),
+            ({"credential_boundary_ready": None}, "CREDENTIAL_BOUNDARY_UNKNOWN"),
+            ({"already_submitted_by_atm": None}, "SUBMISSION_HISTORY_UNKNOWN"),
         ]
         for changes, reason in cases:
             with self.subTest(reason=reason):
