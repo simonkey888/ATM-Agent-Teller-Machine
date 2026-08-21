@@ -16,6 +16,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 SECRET_MARKERS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "MNEMONIC", "SEED", "WALLET")
+CREDENTIAL_PATH_MARKERS = (".env", "keystore", "credential", "api_key", "apikey", "token", "mnemonic", "seed", "wallet")
 ALLOWED = {
     ("SCOUT", "DISCOVER"): ("READ_ONLY_PUBLIC_HTTPS", "READ_ONLY_SOURCE_DISCOVERY"),
     ("FALSIFIER", "VERIFY"): ("READ_ONLY_PUBLIC_HTTPS", "AUTHORITATIVE_READ_VERIFY"),
@@ -27,6 +28,35 @@ ALLOWED = {
 
 def _secret_env_count() -> int:
     return sum(1 for key in os.environ if any(marker in key.upper() for marker in SECRET_MARKERS))
+
+
+def _credential_files(home: Path) -> list[Path]:
+    rows: list[Path] = []
+    for path in home.rglob("*"):
+        if not path.is_file():
+            continue
+        low = path.name.lower()
+        if any(marker in low for marker in CREDENTIAL_PATH_MARKERS):
+            rows.append(path)
+    return rows
+
+
+def _validate_isolated_home(request: dict[str, Any]) -> tuple[Path, int]:
+    configured_raw = str(request.get("isolated_home") or "").strip()
+    if not configured_raw:
+        raise SystemExit("ROLE_ISOLATED_HOME_MISSING")
+    configured = Path(configured_raw).resolve()
+    resolved = Path.home().resolve()
+    if configured != resolved:
+        raise SystemExit("ROLE_ISOLATED_HOME_RESOLUTION_MISMATCH")
+    if not configured.is_dir():
+        raise SystemExit("ROLE_ISOLATED_HOME_NOT_DIRECTORY")
+    initial_entries = list(configured.iterdir())
+    if initial_entries:
+        raise SystemExit("ROLE_ISOLATED_HOME_NOT_EMPTY")
+    if _credential_files(configured):
+        raise SystemExit("ROLE_ISOLATED_HOME_CREDENTIAL_FILE_PRESENT")
+    return configured, len(initial_entries)
 
 
 def _public_address(host: str) -> bool:
@@ -84,9 +114,13 @@ def _install_network_policy(policy: str) -> None:
 
 
 def _discover(payload: dict[str, Any]) -> dict[str, Any]:
-    import atm_v2 as core
-    config = dict(payload.get("config") or {})
     sources = [str(x) for x in payload.get("sources") or []]
+    if not sources:
+        return {"observations": []}
+
+    import atm_v2 as core
+
+    config = dict(payload.get("config") or {})
     minimum = payload.get("minimum", 1)
     adapters = core.build_adapters(config)
     rows = []
@@ -104,8 +138,8 @@ def _discover(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _verify(payload: dict[str, Any]) -> dict[str, Any]:
-    import atm_v2 as core
     from atm_core.models import Opportunity
+
     raw = dict(payload.get("opportunity") or {})
     opp = Opportunity.model_validate(raw)
     submitted = {str(x) for x in payload.get("submitted_ids") or []}
@@ -116,6 +150,9 @@ def _verify(payload: dict[str, Any]) -> dict[str, Any]:
         return {"verdict": "KILL", "reason": "STALE_OR_CLOSED", "fresh_object_hash": None}
     if not opp.funding_proof:
         return {"verdict": "KILL", "reason": "UNFUNDED", "fresh_object_hash": None}
+
+    import atm_v2 as core
+
     adapters = core.build_adapters(dict(payload.get("config") or {}))
     adapter = adapters.get(opp.source)
     if adapter is None:
@@ -133,6 +170,7 @@ def _verify(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _doctor_handle(payload: dict[str, Any]) -> dict[str, Any]:
     from atm_core.durable_doctor import DurableDoctor
+
     path = Path(str(payload["state_path"])).resolve()
     doctor = DurableDoctor(path, threshold=int(payload.get("threshold", 3)), cooldown_seconds=int(payload.get("cooldown_seconds", 300)))
     try:
@@ -144,6 +182,7 @@ def _doctor_handle(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _doctor_inspect(payload: dict[str, Any]) -> dict[str, Any]:
     from atm_core.durable_doctor import DurableDoctor
+
     doctor = DurableDoctor(Path(str(payload["state_path"])).resolve(), threshold=int(payload.get("threshold", 3)), cooldown_seconds=int(payload.get("cooldown_seconds", 300)))
     try:
         return {"state": "BOUNDARY_READY", "summary": doctor.summary()}
@@ -164,6 +203,7 @@ def main() -> int:
         raise SystemExit("ROLE_POLICY_MISMATCH")
     if _secret_env_count() != 0:
         raise SystemExit("ROLE_SECRET_ENV_PRESENT")
+    child_home, initial_entry_count = _validate_isolated_home(request)
     own_sha = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     if request.get("worker_code_sha256") != own_sha:
         raise SystemExit("ROLE_CODE_DIGEST_MISMATCH")
@@ -179,14 +219,29 @@ def main() -> int:
         result = _doctor_handle(payload)
     else:
         result = _doctor_inspect(payload)
+
+    credential_files = _credential_files(child_home)
+    if credential_files:
+        raise SystemExit("ROLE_ISOLATED_HOME_CREDENTIAL_FILE_CREATED")
     result_raw = json.dumps(result, sort_keys=True, separators=(",", ":"), default=str)
     receipt = {
-        "role": role, "operation": operation, "child_pid": os.getpid(),
+        "role": role,
+        "operation": operation,
+        "child_pid": os.getpid(),
         "parent_pid": int(request.get("parent_pid") or -1),
         "process_isolated": os.getpid() != int(request.get("parent_pid") or -1),
-        "secret_env_count": _secret_env_count(), "network_policy": network_policy, "tool_policy": tool_policy,
-        "policy_enforced": True, "worker_code_sha256": own_sha,
-        "request_sha256": hashlib.sha256(raw.encode()).hexdigest(), "result_sha256": hashlib.sha256(result_raw.encode()).hexdigest(),
+        "secret_env_count": _secret_env_count(),
+        "network_policy": network_policy,
+        "tool_policy": tool_policy,
+        "policy_enforced": True,
+        "worker_code_sha256": own_sha,
+        "request_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+        "result_sha256": hashlib.sha256(result_raw.encode()).hexdigest(),
+        "child_home_resolved": str(child_home),
+        "child_home_matches_request": child_home == Path(str(request.get("isolated_home"))).resolve(),
+        "child_home_initial_entry_count": initial_entry_count,
+        "child_home_credential_files_visible": len(credential_files),
+        "isolated_home_proven": True,
     }
     sys.stdout.write(json.dumps({"result": result, "receipt": receipt}, sort_keys=True, separators=(",", ":"), default=str))
     return 0
