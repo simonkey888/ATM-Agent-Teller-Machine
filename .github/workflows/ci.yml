@@ -141,7 +141,7 @@ jobs:
           checks=op.get('checks') or {}
           assert last.get('ok') is True, last
           assert checks.get('heartbeat_fresh') is True, checks
-          assert checks.get('version_coherent') is True, checks
+          assert checks.get('edge_runtime_radar_exact') is True, checks
           assert checks.get('radar_current') is True, checks
           evidence=board.get('evidence') or {}
           assert str(evidence.get('outgoing_spend_usd','0')) == '0', evidence
