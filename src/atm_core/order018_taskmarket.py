@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -17,12 +17,20 @@ from .models import Opportunity
 class SettlementEvidence:
     tier: str
     requester: str
-    prior_settled_tasks: int
-    settlement_tx_count: int
+    prior_settled_tasks: int | None
+    settlement_tx_count: int | None
     objective_acceptance: bool
     worker_locked: bool
     permissionless_finalize_path: bool
     evidence_digest: str
+    history_observed: bool = False
+    prior_awards: int | None = None
+    prior_submissions: int | None = None
+    median_time_to_accept_hours: str | None = None
+    payment_event_contract: str = "TaskDetailResponse.awards.settlementTxHash"
+    payment_token: str = "USDC"
+    payment_chain: str = "BASE"
+    canonical_recipient_match: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -60,12 +68,21 @@ def reconcile_competition(opportunity: Opportunity | None, detail: dict[str, Any
 
 
 def action_cost_proof(task: dict[str, Any], canonical_wallet: str) -> ActionCostProof:
-    mode=str(task.get("mode") or "bounty").lower(); required_action="submit" if mode=="bounty" else "claim" if mode=="claim" else ""
+    mode=str(task.get("mode") or "").lower()
+    # Mode names never prove price. They only identify the expected current
+    # worker action whose exact fresh row must independently prove zero cost.
+    required_action={"bounty":"submit","claim":"claim"}.get(mode,"")
     rows=[row for row in (task.get("pendingActions") or []) if isinstance(row,dict) and row.get("role")=="worker" and str(row.get("action") or "").lower()==required_action]
-    action=rows[0] if len(rows)==1 else {}; eligible=str(action.get("eligibleAddress") or "").strip().lower(); eligible_ok=bool(action) and (not eligible or eligible==canonical_wallet.lower())
-    amount=action.get("paymentAmount"); payment_zero=amount in (None,"",0,"0"); requires_false=action.get("requiresPayment") is False; known_free_mode=mode in {"bounty","claim"}
-    raw={"mode":mode,"action":required_action,"action_row":action,"stakeRequired":task.get("stakeRequired"),"canonical_wallet":canonical_wallet.lower(),"known_free_mode":known_free_mode}
-    return ActionCostProof(required_action or "UNSUPPORTED_PAID_MODE",len(rows)==1 and known_free_mode,eligible_ok,task.get("stakeRequired") is False,requires_false and known_free_mode,payment_zero and known_free_mode,"0" if known_free_mode and requires_false and payment_zero and task.get("stakeRequired") is False else "UNKNOWN_OR_NONZERO",hashlib.sha256(json.dumps(raw,sort_keys=True,separators=(",",":"),default=str).encode()).hexdigest())
+    action=rows[0] if required_action and len(rows)==1 else {}
+    eligible=str(action.get("eligibleAddress") or "").strip().lower()
+    eligible_ok=bool(action) and (not eligible or eligible==canonical_wallet.lower())
+    amount=action.get("paymentAmount")
+    payment_zero=bool(action) and amount in (None,"",0,"0")
+    requires_false=bool(action) and action.get("requiresPayment") is False
+    stake_zero=task.get("stakeRequired") is False
+    chain_proven=bool(required_action) and len(rows)==1
+    raw={"mode":mode,"expected_action":required_action or "UNPROVEN_ACTION_CHAIN","action_row":action,"stakeRequired":task.get("stakeRequired"),"canonical_wallet":canonical_wallet.lower()}
+    return ActionCostProof(required_action or "UNPROVEN_ACTION_CHAIN",chain_proven,eligible_ok,stake_zero,requires_false,payment_zero,"0" if chain_proven and requires_false and payment_zero and stake_zero else "UNKNOWN_OR_NONZERO",hashlib.sha256(json.dumps(raw,sort_keys=True,separators=(",",":"),default=str).encode()).hexdigest())
 
 
 def _objective_acceptance(description: str) -> bool:
@@ -73,26 +90,57 @@ def _objective_acceptance(description: str) -> bool:
 
 
 def derive_settlement_evidence(adapter: Any, task: dict[str, Any], *, history_limit: int=8) -> SettlementEvidence:
-    requester=str(task.get("requester") or "").strip(); settled=[]
+    requester=str(task.get("requester") or "").strip()
+    settled=[]
+    history_observed=False
+    prior_awards: int | None=None
+    prior_submissions: int | None=None
     if requester:
         try:
-            query=urllib.parse.urlencode({"status":"completed","requester":requester,"sort":"newest","limit":min(20,max(1,history_limit))}); page=adapter.http.get(f"{adapter.base_url}/api/tasks?{query}"); prior=page.get("tasks") if isinstance(page,dict) else []
-            for row in (prior or [])[:history_limit]:
-                tid=str((row or {}).get("id") or (row or {}).get("taskId") or "") if isinstance(row,dict) else ""
-                if not tid: continue
-                try: detail=adapter.http.get(f"{adapter.base_url}/api/tasks/{urllib.parse.quote(tid)}")
-                except Exception: continue
-                awards=detail.get("awards") or [] if isinstance(detail,dict) else []; txs=[str(a.get("settlementTxHash")) for a in awards if isinstance(a,dict) and str(a.get("settlementTxHash") or "").startswith("0x")]
-                if txs: settled.append({"task_id":tid,"txs":sorted(set(txs))})
-        except Exception: settled=[]
-    worker_locked=bool(str(task.get("claimedBy") or "").strip()); objective=_objective_acceptance(str(task.get("description") or "")); permissionless=any(isinstance(row,dict) and row.get("role")=="anyone" and str(row.get("action") or "").lower() in {"finalize","settle"} for row in (task.get("pendingActions") or []))
-    if not (task.get("escrowTxHash") or task.get("fundingTxHash") or task.get("createTxHash")): tier="S0"
+            query=urllib.parse.urlencode({"status":"completed","requester":requester,"sort":"newest","limit":min(20,max(1,history_limit))})
+            page=adapter.http.get(f"{adapter.base_url}/api/tasks?{query}")
+            prior=page.get("tasks") if isinstance(page,dict) else None
+            if isinstance(prior,list):
+                history_observed=True
+                prior_awards=0
+                prior_submissions=0
+                for row in prior[:history_limit]:
+                    if not isinstance(row,dict): continue
+                    raw_awards=row.get("awardCount")
+                    raw_submissions=row.get("submissionCount")
+                    if raw_awards is not None:
+                        try: prior_awards += max(0,int(raw_awards))
+                        except (TypeError,ValueError): prior_awards=None
+                    if raw_submissions is not None:
+                        try: prior_submissions += max(0,int(raw_submissions))
+                        except (TypeError,ValueError): prior_submissions=None
+                    tid=str(row.get("id") or row.get("taskId") or "")
+                    if not tid: continue
+                    try: detail=adapter.http.get(f"{adapter.base_url}/api/tasks/{urllib.parse.quote(tid)}")
+                    except Exception: continue
+                    awards=(detail.get("awards") or []) if isinstance(detail,dict) else []
+                    txs=[str(a.get("settlementTxHash")) for a in awards if isinstance(a,dict) and str(a.get("settlementTxHash") or "").startswith("0x")]
+                    if txs: settled.append({"task_id":tid,"txs":sorted(set(txs))})
+        except Exception:
+            history_observed=False
+            prior_awards=None
+            prior_submissions=None
+    worker_locked=bool(str(task.get("claimedBy") or "").strip())
+    objective=_objective_acceptance(str(task.get("description") or ""))
+    permissionless=any(isinstance(row,dict) and row.get("role")=="anyone" and str(row.get("action") or "").lower() in {"finalize","settle"} for row in (task.get("pendingActions") or []))
+    funded=bool(task.get("escrowTxHash") or task.get("fundingTxHash") or task.get("createTxHash"))
+    if not funded: tier="S0"
     elif worker_locked and objective and permissionless: tier="S4"
     elif settled and objective: tier="S3"
     elif settled: tier="S2"
     else: tier="S1"
-    raw={"requester":requester,"settled":settled,"objective":objective,"worker_locked":worker_locked,"permissionless_finalize":permissionless,"tier":tier}
-    return SettlementEvidence(tier,requester,len(settled),sum(len(x["txs"]) for x in settled),objective,worker_locked,permissionless,hashlib.sha256(json.dumps(raw,sort_keys=True,separators=(",", ":")).encode()).hexdigest())
+    raw={"requester":requester,"history_observed":history_observed,"settled":settled,"prior_awards":prior_awards,"prior_submissions":prior_submissions,"objective":objective,"worker_locked":worker_locked,"permissionless_finalize":permissionless,"tier":tier}
+    return SettlementEvidence(tier=tier,requester=requester,prior_settled_tasks=len(settled) if history_observed else None,settlement_tx_count=sum(len(x["txs"]) for x in settled) if history_observed else None,objective_acceptance=objective,worker_locked=worker_locked,permissionless_finalize_path=permissionless,evidence_digest=hashlib.sha256(json.dumps(raw,sort_keys=True,separators=(",", ":")).encode()).hexdigest(),history_observed=history_observed,prior_awards=prior_awards,prior_submissions=prior_submissions)
+
+
+def _unknown_settlement(task: dict[str,Any]) -> SettlementEvidence:
+    raw={"requester":str(task.get("requester") or ""),"history":"UNKNOWN","funded":bool(task.get("escrowTxHash") or task.get("fundingTxHash") or task.get("createTxHash"))}
+    return SettlementEvidence(tier="S1" if raw["funded"] else "S0",requester=raw["requester"],prior_settled_tasks=None,settlement_tx_count=None,objective_acceptance=_objective_acceptance(str(task.get("description") or "")),worker_locked=bool(task.get("claimedBy")),permissionless_finalize_path=False,evidence_digest=hashlib.sha256(json.dumps(raw,sort_keys=True).encode()).hexdigest(),history_observed=False,prior_awards=None,prior_submissions=None)
 
 
 def order018_taskmarket_cash_decision(task: dict[str,Any], *, canonical_wallet: str, existing_submission: bool, signer_ready: bool, now: datetime|None=None, max_competition: int=12, admission_mode: str="ECONOMIC", shadow_contract: dict[str,Any]|None=None, capability_runtime_ready: bool|None=None, effective_competition: int|None=None, action_proof: ActionCostProof|None=None, settlement_evidence: SettlementEvidence|None=None):
@@ -126,7 +174,7 @@ def order018_taskmarket_cash_decision(task: dict[str,Any], *, canonical_wallet: 
     comp=effective_competition
     if comp is None: reasons.append("COMPETITION_UNKNOWN")
     elif comp>max_competition: reasons.append("COMPETITION_ABOVE_THRESHOLD")
-    settlement=settlement_evidence or SettlementEvidence("S1",str(task.get("requester") or ""),0,0,deterministic,bool(task.get("claimedBy")),False,"UNOBSERVED")
+    settlement=settlement_evidence or _unknown_settlement(task)
     if settlement.tier=="S0": reasons.append("PAYOUT_PATH_UNPROVEN")
     mode=str(admission_mode or "ECONOMIC").upper()
     if mode=="SHADOW_BENCHMARK":
@@ -149,8 +197,12 @@ def install() -> None:
         min_base=int(min_reward_usd*Decimal(1_000_000)); query=urllib.parse.urlencode({"status":"open","minReward":str(min_base),"sort":"reward_desc","limit":50}); data=self.http.get(f"{self.base_url}/api/tasks?{query}"); result=[]
         from .security import PromptInjectionRisk,assert_external_task_safe
         for task in data.get("tasks",[]):
-            task_id=str(task.get("id") or task.get("taskId") or ""); mode=str(task.get("mode") or "bounty").lower()
-            if not task_id or task_id in self.skipped_task_ids or bool(task.get("stakeRequired")) or mode not in {"bounty","claim"}: continue
+            task_id=str(task.get("id") or task.get("taskId") or ""); mode=str(task.get("mode") or "").lower()
+            if not task_id or task_id in self.skipped_task_ids or bool(task.get("stakeRequired")): continue
+            # Unsupported modes remain visible to read-only radar elsewhere, but
+            # cannot enter the economic verification queue without a proven
+            # zero-cost current-action chain.
+            if mode not in {"bounty","claim"}: continue
             count=_explicit_count(task)
             if count is None: continue
             description=str(task.get("description") or "")
@@ -158,16 +210,16 @@ def install() -> None:
             except PromptInjectionRisk: continue
             reward=Decimal(str(task.get("reward") or "0"))/Decimal(1_000_000)
             if reward<min_reward_usd: continue
-            maker=TaskmarketZeroCostMaker.supported_task(description); p_accept=max(Decimal("0.05"),Decimal("1")/Decimal(count+2))
-            result.append(Opportunity(canonical_opportunity_id=f"taskmarket:{task_id}",source=self.name,authoritative_url=f"https://taskmarket.dev/tasks/{task_id}",upstream_status=str(task.get("status","unknown")),created_at=oppmod._dt(task.get("createdAt")),updated_at=oppmod._dt(task.get("updatedAt")),deadline=oppmod._dt(task.get("expiryTime") or task.get("deadline")),reward_gross=reward,expected_fees=reward*Decimal("0.075"),funding_proof={"escrow":task.get("escrowTxHash") or task.get("fundingTxHash") or task.get("createTxHash"),"reward_base_units":task.get("reward")},competition=count,claims=1 if task.get("claimedBy") else 0,open_prs=count,ai_policy="AGENT_NATIVE",eligibility="PUBLIC_AGENT_TRUSTED_SIGNER_LANE",claim_method="free first-party claim when exact pendingAction proves zero cost" if mode=="claim" else "not required for bounty",submission_method="first-party TaskMarket CLI after CHECK=PASS",payment_method="USDC Base award settlement",payout_latency="on settlement",payout_latency_hours=Decimal("48"),payment_proof_method="TaskDetailResponse.awards + settlementTxHash + Base receipt",expected_agent_hours=Decimal("1.5") if maker else Decimal("6"),expected_owner_minutes=Decimal("0"),p_eligible=Decimal("0.95"),p_claim=Decimal("1"),p_complete=Decimal("0.85") if maker else Decimal("0"),p_accept=p_accept,p_pay=Decimal("0.98"),p_withdrawable=Decimal("0.98"),external_state_hash=oppmod.external_state_hash(task),task_mode=mode,task_description=description,task_title=str(task.get("title") or description[:160]),maker_supported=maker))
+            maker=TaskmarketZeroCostMaker.supported_task(description)
+            result.append(Opportunity(canonical_opportunity_id=f"taskmarket:{task_id}",source=self.name,authoritative_url=f"https://taskmarket.dev/tasks/{task_id}",upstream_status=str(task.get("status","unknown")),created_at=oppmod._dt(task.get("createdAt")),updated_at=oppmod._dt(task.get("updatedAt")),deadline=oppmod._dt(task.get("expiryTime") or task.get("deadline")),reward_gross=reward,expected_fees=reward*Decimal("0.075"),funding_proof={"escrow":task.get("escrowTxHash") or task.get("fundingTxHash") or task.get("createTxHash"),"reward_base_units":task.get("reward")},competition=count,claims=1 if task.get("claimedBy") else 0,open_prs=count,ai_policy="AGENT_NATIVE",eligibility="PUBLIC_AGENT_TRUSTED_SIGNER_LANE",claim_method="fresh pendingAction proof required",submission_method="first-party TaskMarket CLI after CHECK=PASS",payment_method="USDC Base award settlement",payout_latency="on settlement",payout_latency_hours=Decimal("48"),payment_proof_method="TaskDetailResponse.awards + settlementTxHash + Base receipt",expected_agent_hours=Decimal("1.5") if maker else Decimal("6"),expected_owner_minutes=Decimal("0"),p_eligible=Decimal("0.95"),p_claim=Decimal("1"),p_complete=Decimal("0.85") if maker else Decimal("0"),p_accept=Decimal("0.50"),p_pay=Decimal("0.50"),p_withdrawable=Decimal("0.98"),external_state_hash=oppmod.external_state_hash(task),task_mode=mode,task_description=description,task_title=str(task.get("title") or description[:160]),maker_supported=maker,settlement_probability_authority="NONE_PREVERIFY"))
         return result
 
     def verify_eligibility(self,opportunity,snapshot):
         from .security import assert_external_task_safe
         assert_external_task_safe("\n".join([str(snapshot.get("title","")),str(snapshot.get("description",""))]))
         if bool(snapshot.get("stakeRequired")): raise oppmod.OpportunityValidationError("Taskmarket stakeRequired=true is prohibited")
-        mode=str(snapshot.get("mode") or getattr(opportunity,"task_mode","bounty")).lower()
-        if mode not in {"bounty","claim"}: raise oppmod.OpportunityValidationError(f"Taskmarket worker entry for {mode} is not proven zero-cost")
+        proof=action_cost_proof(snapshot,self.lane.canonical_wallet)
+        if not proof.zero_cost_ready: raise oppmod.OpportunityValidationError("Taskmarket current worker action chain is not proven zero-cost")
 
     def inspect_competition(self,opportunity,snapshot):
         try: submissions=self.lane.submissions(opportunity.canonical_opportunity_id.split(":",1)[1])
@@ -184,7 +236,7 @@ def install() -> None:
         except Exception: submissions=None
         comp=reconcile_competition(opportunity,fresh,submissions); proof=action_cost_proof(fresh,self.lane.canonical_wallet); settlement=derive_settlement_evidence(self,fresh)
         decision=order018_taskmarket_cash_decision(fresh,canonical_wallet=self.lane.canonical_wallet,existing_submission=self.lane.existing_submission(task_id) is not None,signer_ready=signer_ready,capability_runtime_ready=TaskmarketZeroCostMaker.supported_task(str(fresh.get("description") or getattr(opportunity,"task_description",""))),effective_competition=comp,action_proof=proof,settlement_evidence=settlement)
-        opportunity.competition=int(comp if comp is not None else opportunity.competition); setattr(opportunity,"settlement_tier",settlement.tier); setattr(opportunity,"settlement_evidence_digest",settlement.evidence_digest); setattr(opportunity,"action_cost_evidence_digest",proof.evidence_digest)
+        opportunity.competition=int(comp if comp is not None else opportunity.competition); setattr(opportunity,"settlement_tier",settlement.tier); setattr(opportunity,"settlement_capability",asdict(settlement)); setattr(opportunity,"settlement_evidence_digest",settlement.evidence_digest); setattr(opportunity,"action_cost_evidence_digest",proof.evidence_digest); setattr(opportunity,"entry_zero_cost_proven",proof.zero_cost_ready)
         if not decision.allocation_allowed: raise oppmod.OpportunityValidationError("TaskMarket Cash Canon rejected allocation: "+",".join(decision.reasons))
         return decision
 
@@ -212,7 +264,7 @@ def install() -> None:
         if proof.action!="submit": raise cli.TaskmarketCliError("TaskMarket submit gate requires exact submit pendingAction")
 
     def admission(task,*,canonical_wallet,existing_submission,signer_ready,now=None,capability_runtime_ready=None):
-        proof=action_cost_proof(task,canonical_wallet); comp=_explicit_count(task); settlement=SettlementEvidence("S1",str(task.get("requester") or ""),0,0,_objective_acceptance(str(task.get("description") or "")),bool(task.get("claimedBy")),False,"UNOBSERVED")
+        proof=action_cost_proof(task,canonical_wallet); comp=_explicit_count(task); settlement=_unknown_settlement(task)
         decision=order018_taskmarket_cash_decision(task,canonical_wallet=canonical_wallet,existing_submission=existing_submission,signer_ready=signer_ready,now=now,capability_runtime_ready=capability_runtime_ready,effective_competition=comp,action_proof=proof,settlement_evidence=settlement)
         mapping={"EXECUTABLE":radar.OperationalState.EXECUTABLE,"WATCH_ONLY":radar.OperationalState.WATCH_ONLY,"HUMAN_GATE":radar.OperationalState.HUMAN_GATE,"STALE":radar.OperationalState.STALE,"REJECTED":radar.OperationalState.WATCH_ONLY}; return mapping[decision.disposition],decision.reasons
 
