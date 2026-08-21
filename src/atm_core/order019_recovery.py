@@ -1,17 +1,28 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
+import json
 import re
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 _INSTALLED = False
 MAX_SAFE_MAKER_WORDS = 7000
+_TASKMARKET_ACTION_BY_MODE = {
+    "bounty": "submit",
+    "claim": "claim",
+    "pitch": "pitch",
+    "bid": "bid",
+    "proof": "proof",
+}
+_TASKMARKET_X402_MODES = {"pitch", "bid", "proof"}
 
 
 def _number(value: str) -> int:
@@ -150,6 +161,242 @@ def _check_words(path: Path, description: str) -> None:
         raise ValueError(f"generated artifact word-count above maximum: {count} > {maximum}")
 
 
+def _explicit_bool(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _payment_amount_state(action: dict[str, Any]) -> str:
+    if "paymentAmount" not in action or action.get("paymentAmount") in (None, ""):
+        return "MISSING"
+    try:
+        amount = Decimal(str(action.get("paymentAmount")))
+    except (InvalidOperation, TypeError, ValueError):
+        return "AMBIGUOUS"
+    if amount < 0:
+        return "AMBIGUOUS"
+    return "ZERO" if amount == 0 else "NONZERO"
+
+
+def _safe_pending_actions(task: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    pending = task.get("pendingActions")
+    if not isinstance(pending, list):
+        return rows
+    for raw in pending[:16]:
+        if not isinstance(raw, dict):
+            continue
+        requires = raw.get("requiresPayment") if isinstance(raw.get("requiresPayment"), bool) else None
+        amount = raw.get("paymentAmount")
+        rows.append({
+            "role": str(raw.get("role") or ""),
+            "action": str(raw.get("action") or ""),
+            "eligibleAddress": str(raw.get("eligibleAddress") or "") or None,
+            "requiresPayment": requires,
+            "paymentAmount": None if amount in (None, "") else str(amount),
+            "availableUntil": str(raw.get("availableUntil") or "") or None,
+        })
+    return rows
+
+
+def taskmarket_action_evidence(task: dict[str, Any], canonical_wallet: str, *, now: datetime | None = None) -> dict[str, Any]:
+    """Transport tri-state action facts from fresh TaskDetail without becoming Cash Canon."""
+    observed = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    mode = str(task.get("mode") or "").strip().lower()
+    expected_action = _TASKMARKET_ACTION_BY_MODE.get(mode, "")
+    pending = task.get("pendingActions")
+    matches: list[dict[str, Any]] = []
+    if expected_action and isinstance(pending, list):
+        matches = [
+            row for row in pending
+            if isinstance(row, dict)
+            and str(row.get("role") or "").strip().lower() == "worker"
+            and str(row.get("action") or "").strip().lower() == expected_action
+        ]
+    action = matches[0] if len(matches) == 1 else {}
+
+    if not expected_action or not isinstance(pending, list):
+        available: bool | None = None
+    elif len(matches) == 0:
+        available = False
+    elif len(matches) != 1:
+        available = None
+    else:
+        available = True
+        until = action.get("availableUntil")
+        if until not in (None, ""):
+            try:
+                deadline = datetime.fromisoformat(str(until).replace("Z", "+00:00"))
+                if deadline.tzinfo is None:
+                    available = None
+                elif deadline.astimezone(timezone.utc) <= observed:
+                    available = False
+            except ValueError:
+                available = None
+
+    eligible: bool | None = None
+    eligible_address = str(action.get("eligibleAddress") or "").strip() if action else ""
+    if action:
+        eligible = True if not eligible_address else eligible_address.lower() == canonical_wallet.lower()
+
+    requires_raw = action.get("requiresPayment") if action else None
+    if "requiresPayment" in action and not isinstance(requires_raw, bool) and requires_raw is not None:
+        requires_state: bool | None | str = "AMBIGUOUS"
+    else:
+        requires_state = requires_raw if isinstance(requires_raw, bool) else None
+    amount_state = _payment_amount_state(action) if action else "MISSING"
+
+    paid_required: bool | None = None
+    cost_authority = "UNKNOWN"
+    if mode in _TASKMARKET_X402_MODES:
+        paid_required = True
+        cost_authority = "TASKMARKET_ENDPOINT_CONTRACT_X402"
+    elif action and available is True:
+        if requires_state is True or amount_state == "NONZERO":
+            paid_required = True
+            cost_authority = "TASK_DETAIL_PENDING_ACTION_EXPLICIT"
+        elif requires_state is False and amount_state == "ZERO":
+            paid_required = False
+            cost_authority = "TASK_DETAIL_PENDING_ACTION_EXPLICIT"
+        elif (
+            mode == "bounty"
+            and expected_action == "submit"
+            and requires_state != "AMBIGUOUS"
+            and amount_state != "AMBIGUOUS"
+        ):
+            # TaskMarket's authoritative endpoint contract classifies bounty worker
+            # submit as non-X402. This fallback is allowed only after the exact fresh
+            # worker/submit action chain is proven and cost fields are absent/partial.
+            paid_required = False
+            cost_authority = "TASKMARKET_ENDPOINT_CONTRACT_BOUNTY_SUBMIT_NON_X402"
+
+    stake_required = _explicit_bool(task.get("stakeRequired"))
+    submission_window_open = _explicit_bool(task.get("submissionWindowOpen"))
+    safe_actions = _safe_pending_actions(task)
+    raw = {
+        "mode": mode or "UNKNOWN",
+        "expected_action": expected_action or "UNKNOWN",
+        "worker_action_count": len(matches),
+        "pending_actions": safe_actions,
+        "stakeRequired": stake_required,
+        "submissionWindowOpen": submission_window_open,
+        "paid_action_required": paid_required,
+        "cost_authority": cost_authority,
+        "canonical_wallet": canonical_wallet.lower(),
+    }
+    digest = hashlib.sha256(json.dumps(raw, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+    return {
+        "mode": mode or "UNKNOWN",
+        "expected_action": expected_action or "UNKNOWN",
+        "current_worker_action_available": available,
+        "canonical_identity_eligible": eligible,
+        "paid_action_required": paid_required,
+        "stake_required": stake_required,
+        "submission_window_open": submission_window_open,
+        "eligible_address": eligible_address or None,
+        "requires_payment": requires_state if isinstance(requires_state, bool) else None,
+        "payment_amount_state": amount_state,
+        "cost_authority": cost_authority,
+        "worker_action_count": len(matches),
+        "pending_actions": safe_actions,
+        "action_evidence_digest": digest,
+    }
+
+
+def taskmarket_action_cost_proof(task: dict[str, Any], canonical_wallet: str):
+    from .order018_taskmarket import ActionCostProof
+
+    evidence = taskmarket_action_evidence(task, canonical_wallet)
+    available = evidence["current_worker_action_available"] is True
+    eligible = evidence["canonical_identity_eligible"] is True
+    stake_zero = evidence["stake_required"] is False
+    zero_cost = evidence["paid_action_required"] is False
+    mandatory = "0" if available and eligible and stake_zero and zero_cost else "UNKNOWN_OR_NONZERO"
+    return ActionCostProof(
+        evidence["expected_action"] if evidence["expected_action"] != "UNKNOWN" else "UNPROVEN_ACTION_CHAIN",
+        available,
+        eligible,
+        stake_zero,
+        zero_cost,
+        zero_cost,
+        mandatory,
+        evidence["action_evidence_digest"],
+    )
+
+
+def _taskmarket_detail_object(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    candidates = [payload, payload.get("task"), payload.get("data")]
+    for row in candidates:
+        if isinstance(row, dict) and (row.get("id") or row.get("taskId")):
+            return row
+    return None
+
+
+def _taskmarket_submission_rows(payload: Any) -> list[dict[str, Any]] | None:
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if not isinstance(payload, dict):
+        return None
+    for key in ("submissions", "items"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [row for row in value if isinstance(row, dict)]
+    data = payload.get("data")
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
+    if isinstance(data, dict):
+        for key in ("submissions", "items"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [row for row in value if isinstance(row, dict)]
+    return None
+
+
+def _taskmarket_existing_submission_state(http: Any, task_id: str, canonical_wallet: str) -> bool | None:
+    try:
+        payload = http.get_json(
+            f"https://api.taskmarket.dev/api/tasks/{urllib.parse.quote(task_id)}/submissions",
+            timeout=4,
+        )
+    except Exception:
+        return None
+    rows = _taskmarket_submission_rows(payload)
+    if rows is None:
+        return None
+    return any(str(row.get("workerAddress") or "").strip().lower() == canonical_wallet.lower() for row in rows)
+
+
+def _taskmarket_signer_boundary_ready() -> bool | None:
+    from .taskmarket_cli import CANONICAL_TASKMARKET_WALLET, TaskmarketCliLane
+
+    lane = TaskmarketCliLane()
+    try:
+        path = lane.keystore_path
+        if not path.is_file():
+            return False
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    required = ("encryptedKey", "walletAddress", "deviceId", "apiToken")
+    if not isinstance(parsed, dict) or not all(isinstance(parsed.get(key), str) and parsed[key] for key in required):
+        return False
+    wallet = str(parsed.get("walletAddress") or "")
+    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", wallet):
+        return False
+    return wallet.lower() == CANONICAL_TASKMARKET_WALLET.lower()
+
+
+def _taskmarket_external_status(detail: dict[str, Any]) -> str:
+    status = str(detail.get("status") or "").strip().lower()
+    phase = str(detail.get("phase") or "").strip().lower()
+    if status in {"closed", "cancelled", "canceled", "deleted", "completed", "expired"}:
+        return status.upper()
+    if status == "open" and phase in {"active", "open"}:
+        return "OPEN"
+    return "UNKNOWN"
+
+
 def _taskmarket_from_detail(adapter: Any, task: dict[str, Any], floor: Decimal):
     from .models import Opportunity
     from .opportunities import _dt, external_state_hash
@@ -272,9 +519,16 @@ def install() -> None:
     from . import cash_canon as canon
     from . import money_velocity as mv
     from . import opportunities as oppmod
+    from . import order009_sources as order009
     from . import order018_taskmarket as order018
+    from . import taskmarket_cli as cli
     from . import taskmarket_maker as maker
     from . import universal_radar as radar
+
+    # Cash Canon keeps authority. ORDER-019 only replaces the evidence helper it
+    # already calls, adding the documented endpoint-contract fallback without
+    # allowing a mode label or missing action chain to imply zero cost.
+    order018.action_cost_proof = taskmarket_action_cost_proof
 
     original_qualify = radar.qualify
     def truthful_qualify(opportunity, *, floor_usd=Decimal("5"), now=None):
@@ -402,3 +656,72 @@ def install() -> None:
     oppmod.TaskmarketOpportunityAdapter.discover = taskmarket_discover
     oppmod.TaskmarketOpportunityAdapter.inspect_competition = inspect_competition
     oppmod.TaskmarketOpportunityAdapter.canonical_admission = canonical_admission
+
+    original_readonly_discover = order009.TaskMarketReadOnlySource.discover
+    def taskmarket_readonly_discover(self, floor_usd):
+        rows = original_readonly_discover(self, floor_usd)
+        if not rows:
+            return rows
+        signer_ready = _taskmarket_signer_boundary_ready()
+
+        def bridge(row):
+            task_id = str(row.external_id)
+            try:
+                payload = self.http.get_json(
+                    f"{cli.TASKMARKET_PRODUCTION_API}/api/tasks/{urllib.parse.quote(task_id)}",
+                    timeout=4,
+                )
+                detail = _taskmarket_detail_object(payload)
+            except Exception:
+                detail = None
+            observed_id = str((detail or {}).get("id") or (detail or {}).get("taskId") or "")
+            if detail is None or observed_id != task_id:
+                return row.model_copy(update={
+                    "paid_action_required": None,
+                    "current_worker_action_available": None,
+                    "canonical_identity_eligible": None,
+                    "credential_boundary_ready": signer_ready,
+                    "already_submitted_by_atm": None,
+                    "external_status": "UNKNOWN",
+                    "submission_window_open": None,
+                    "stake_required": None,
+                    "taskmarket_detail_authority": "UNAVAILABLE_OR_INVALID",
+                })
+
+            action = taskmarket_action_evidence(detail, cli.CANONICAL_TASKMARKET_WALLET)
+            existing_submission = _taskmarket_existing_submission_state(
+                self.http, task_id, cli.CANONICAL_TASKMARKET_WALLET
+            )
+            status = str(detail.get("status") or "")
+            phase = str(detail.get("phase") or "")
+            transport = {
+                **action,
+                "status": status or "UNKNOWN",
+                "phase": phase or "UNKNOWN",
+                "submissionWindowOpen": action["submission_window_open"],
+                "stakeRequired": action["stake_required"],
+                "existing_submission": existing_submission,
+                "signer_ready": signer_ready,
+            }
+            tags = list(dict.fromkeys([*list(row.provenance_tags or []), "TASKMARKET_AUTHORITATIVE_DETAIL"]))
+            return row.model_copy(update={
+                "paid_action_required": action["paid_action_required"],
+                "current_worker_action_available": action["current_worker_action_available"],
+                "canonical_identity_eligible": action["canonical_identity_eligible"],
+                "credential_boundary_ready": signer_ready,
+                "already_submitted_by_atm": existing_submission,
+                "external_status": _taskmarket_external_status(detail),
+                "submission_window_open": action["submission_window_open"],
+                "stake_required": action["stake_required"],
+                "source_state_hash": radar.source_hash(detail),
+                "taskmarket_detail_authority": "TASK_DETAIL_RESPONSE",
+                "taskmarket_mode": action["mode"],
+                "taskmarket_phase": phase or "UNKNOWN",
+                "taskmarket_action_evidence": transport,
+                "provenance_tags": tags,
+            })
+
+        with ThreadPoolExecutor(max_workers=min(8, len(rows))) as pool:
+            return list(pool.map(bridge, rows))
+
+    order009.TaskMarketReadOnlySource.discover = taskmarket_readonly_discover
