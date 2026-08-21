@@ -41,3 +41,10 @@ _install_order018_free_provider_directive()
 from .order019_recovery import install as _install_order019_recovery
 
 _install_order019_recovery()
+
+# ORDER-019-A1 changes first-cash ranking only. Atomicity and withdrawable-cash
+# velocity may order already-discovered candidates, but Canon and the universal
+# effect boundary remain the sole economic admission/mutation authorities.
+from .order019_atomic_cash import install as _install_order019_atomic_cash
+
+_install_order019_atomic_cash()
