@@ -1,4 +1,4 @@
-gate=order016-final-full-scout
-order=ORDER-016
-reason=all-sources-bounded-scout-final-head
-requested_utc=2026-08-20T19:47:00Z
+gate=order018-final-settlement-first
+order=ORDER-018
+reason=exact-head-runtime-recovery-settlement-first-cash-loop
+requested_utc=2026-08-21T09:21:00Z
