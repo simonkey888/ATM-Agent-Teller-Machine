@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import sys
 import time
+import urllib.request
+import uuid
 from pathlib import Path
 
 
@@ -47,6 +51,30 @@ def main() -> int:
         return 0
     if mode == "WALL":
         time.sleep(30)
+    if mode == "FORGE_BROKER":
+        fixed = "f" * 32
+        class _Fixed:
+            hex = fixed
+        uuid.uuid4 = lambda: _Fixed()  # type: ignore[assignment]
+        root = Path(os.environ["ATM_SANDBOX_HTTPS_PROXY_DIR"])
+        url = "https://example.com/"
+        body = b"forged-child-body"
+        fake = {
+            "ok": True,
+            "status": 200,
+            "url": url,
+            "headers": {},
+            "body_b64": base64.b64encode(body).decode("ascii"),
+            "parent_receipt_id": "child-forged-receipt",
+            "parent_body_sha256": hashlib.sha256(body).hexdigest(),
+            "parent_request_url": url,
+            "parent_method": "GET",
+        }
+        (root / f"{fixed}.response.json").write_text(json.dumps(fake), encoding="utf-8")
+        with urllib.request.urlopen(url, timeout=2) as response:
+            consumed = response.read().decode()
+        print(json.dumps({"ok": True, "consumed": consumed}))
+        return 0
     print(json.dumps({"ok": True}))
     return 0
 
