@@ -157,7 +157,12 @@ def _verify_resources(policy: dict[str, Any], observed: dict[str, Any]) -> None:
 def _run_worker(worker: Path, raw_request: str) -> tuple[int,str,str]:
     old_stdin,old_stdout,old_stderr=sys.stdin,sys.stdout,sys.stderr; stdout=io.StringIO(); stderr=io.StringIO(); sys.stdin=io.StringIO(raw_request); sys.stdout=stdout; sys.stderr=stderr; code=0
     try: runpy.run_path(str(worker), run_name="__main__")
-    except SystemExit as exc: code=int(exc.code or 0) if isinstance(exc.code,int) or exc.code is None else 1
+    except SystemExit as exc:
+        if isinstance(exc.code, int) or exc.code is None:
+            code = int(exc.code or 0)
+        else:
+            code = 1
+            stderr.write(f"SystemExit:{exc.code}")
     except BaseException as exc: code=1; stderr.write(f"{type(exc).__name__}:{exc}")
     finally: sys.stdin,sys.stdout,sys.stderr=old_stdin,old_stdout,old_stderr
     return code,stdout.getvalue(),stderr.getvalue()
@@ -184,7 +189,13 @@ def main() -> int:
     worker=Path(args.worker).resolve(); request=json.loads(Path(args.request).read_text(encoding="utf-8")); raw_request=json.dumps(request,sort_keys=True,separators=(",",":"),default=str)
     code,stdout,stderr=_run_worker(worker,raw_request)
     if code!=0:
-        Path(args.response).write_text(json.dumps({"worker_error":stderr[-500:],"worker_exit":code},sort_keys=True,separators=(",",":")),encoding="utf-8"); return code
+        Path(args.response).write_text(json.dumps({"worker_error":stderr[-500:],"worker_exit":code},sort_keys=True,separators=(",",":")),encoding="utf-8")
+        # DOCTOR consumes only internal typed fault/key state; unlike SCOUT and
+        # FALSIFIER, it cannot contain marketplace text. Bounded stderr is safe
+        # diagnostic evidence for hosted-runner falsification and remains fatal.
+        if str(request.get("role") or "").upper() == "DOCTOR":
+            sys.stderr.write((stderr or "DOCTOR_WORKER_EXIT_WITHOUT_DETAIL")[-500:].replace("\n", " "))
+        return code
     try: worker_payload=json.loads(stdout)
     except json.JSONDecodeError:
         Path(args.response).write_text(json.dumps({"worker_error":"INVALID_JSON"}),encoding="utf-8"); return 2
