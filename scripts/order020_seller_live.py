@@ -13,7 +13,7 @@ RESOURCE = BASE + "/x402/falsify"
 CANONICAL = "0xd89Ef03bC3105C538529AC2657Bc4488c94ff4E4"
 BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 HOST = "atm.simondalmasso44.workers.dev"
-UA = "ATM-ORDER020-Seller-Live/1.0"
+UA = "ATM-ORDER020-Seller-Live/1.1"
 
 
 def request(url: str, *, method: str = "GET", payload: dict[str, Any] | None = None, timeout: int = 25):
@@ -40,7 +40,7 @@ def wait_for_exact_head(expected_sha: str, seconds: int) -> dict[str, Any]:
     last: Any = None
     while time.time() < deadline:
         try:
-            status, _, raw = request(BASE + "/health?order020=" + urllib.parse.quote(expected_sha))
+            status, _, raw = request(BASE + "/health?order020=" + urllib.parse.quote(expected_sha) + "&t=" + str(time.time_ns()))
             if status == 200:
                 body = as_json(raw)
                 last = body
@@ -54,7 +54,7 @@ def wait_for_exact_head(expected_sha: str, seconds: int) -> dict[str, Any]:
 
 def verify_live_discovery(expected_sha: str) -> dict[str, Any]:
     health = wait_for_exact_head(expected_sha, int(os.getenv("ATM_ORDER020_WAIT_SECONDS", "540")))
-    status, _, raw = request(BASE + "/openapi.json")
+    status, _, raw = request(BASE + "/openapi.json?t=" + str(time.time_ns()))
     if status != 200:
         raise RuntimeError(f"openapi_http_{status}")
     openapi = as_json(raw)
@@ -66,7 +66,7 @@ def verify_live_discovery(expected_sha: str) -> dict[str, Any]:
     if str(price.get("amount")) not in {"0.01", "0.010000"} or price.get("currency") != "USD":
         raise RuntimeError("openapi_price_mismatch")
 
-    status, _, raw = request(BASE + "/.well-known/x402")
+    status, _, raw = request(BASE + "/.well-known/x402?t=" + str(time.time_ns()))
     if status != 200:
         raise RuntimeError(f"well_known_http_{status}")
     well_known = as_json(raw)
@@ -96,7 +96,7 @@ def verify_live_discovery(expected_sha: str) -> dict[str, Any]:
     if not payment_required:
         raise RuntimeError("payment_required_header_missing")
 
-    status, _, raw = request(BASE + "/api/seller-funnel")
+    status, _, raw = request(BASE + "/api/seller-funnel?t=" + str(time.time_ns()))
     if status != 200:
         raise RuntimeError(f"seller_funnel_http_{status}")
     funnel = as_json(raw)
@@ -115,7 +115,24 @@ def refetch_registration_contracts() -> dict[str, str]:
     return {"402index": "REFETCHED", "agent402": "REFETCHED"}
 
 
-def register_402index() -> dict[str, Any]:
+def _contains_host(raw: str) -> bool:
+    text = raw.lower()
+    return HOST.lower() in text or RESOURCE.lower() in text
+
+
+def current_index_readback() -> dict[str, Any]:
+    q = urllib.parse.quote(HOST)
+    s402, _, r402 = request(f"https://402index.io/api/v1/services?q={q}&protocol=x402&limit=100&t={time.time_ns()}")
+    sa, _, ra = request(f"https://agent402.tools/api/index?t={time.time_ns()}")
+    return {
+        "402index": {"status": s402, "resolvable": s402 == 200 and _contains_host(r402)},
+        "agent402": {"status": sa, "resolvable": sa == 200 and _contains_host(ra)},
+    }
+
+
+def register_402index(already: bool = False) -> dict[str, Any]:
+    if already:
+        return {"status": "ALREADY_RESOLVABLE", "body": {"readback": True}}
     payload = {
         "url": RESOURCE,
         "name": "ATM Base USDC Falsifier",
@@ -129,42 +146,34 @@ def register_402index() -> dict[str, Any]:
         "provider": "ATM",
     }
     status, _, raw = request("https://402index.io/api/v1/register", method="POST", payload=payload)
-    if status not in {200, 201, 202, 409}:
+    if status not in {200, 201, 202, 409, 429}:
         raise RuntimeError(f"402index_register_http_{status}:{raw[:500]}")
     try:
         body = as_json(raw)
     except Exception:
         body = {"raw": raw[:500]}
-    return {"status": status, "body": body}
+    return {"status": status, "body": body, "rate_limited_retry_via_cloudflare": status == 429}
 
 
-def register_agent402() -> dict[str, Any]:
+def register_agent402(already: bool = False) -> dict[str, Any]:
+    if already:
+        return {"status": "ALREADY_RESOLVABLE", "body": {"readback": True}}
     status, _, raw = request("https://agent402.tools/api/index/register", method="POST", payload={"origin": BASE})
-    if status not in {200, 201, 202, 409}:
+    if status not in {200, 201, 202, 409, 429}:
         raise RuntimeError(f"agent402_register_http_{status}:{raw[:500]}")
     try:
         body = as_json(raw)
     except Exception:
         body = {"raw": raw[:500]}
-    return {"status": status, "body": body}
-
-
-def _contains_host(raw: str) -> bool:
-    text = raw.lower()
-    return HOST.lower() in text or RESOURCE.lower() in text
+    return {"status": status, "body": body, "rate_limited_retry_via_cloudflare": status == 429}
 
 
 def verify_index_readback(seconds: int) -> dict[str, Any]:
     deadline = time.time() + seconds
     last = {"402index": None, "agent402": None}
     while time.time() < deadline:
-        q = urllib.parse.quote(HOST)
-        s402, _, r402 = request(f"https://402index.io/api/v1/services?q={q}&protocol=x402&limit=100")
-        sa, _, ra = request("https://agent402.tools/api/index")
-        ok402 = s402 == 200 and _contains_host(r402)
-        oka = sa == 200 and _contains_host(ra)
-        last = {"402index": {"status": s402, "resolvable": ok402}, "agent402": {"status": sa, "resolvable": oka}}
-        if ok402 and oka:
+        last = current_index_readback()
+        if last["402index"]["resolvable"] and last["agent402"]["resolvable"]:
             return last
         time.sleep(10)
     raise RuntimeError("index_readback_not_resolvable:" + json.dumps(last, sort_keys=True))
@@ -176,10 +185,11 @@ def main() -> int:
         raise SystemExit("ORDER020_EXPECTED_SHA_MISSING")
     live = verify_live_discovery(expected_sha)
     contracts = refetch_registration_contracts()
-    r402 = register_402index()
-    ra = register_agent402()
+    before = current_index_readback()
+    r402 = register_402index(bool(before["402index"]["resolvable"]))
+    ra = register_agent402(bool(before["agent402"]["resolvable"]))
     readback = verify_index_readback(int(os.getenv("ATM_ORDER020_INDEX_WAIT_SECONDS", "420")))
-    status, _, raw = request(BASE + "/api/seller-funnel")
+    status, _, raw = request(BASE + "/api/seller-funnel?t=" + str(time.time_ns()))
     funnel = as_json(raw) if status == 200 else {"error": f"http_{status}"}
     receipt = {
         "schema": "ATM_ORDER020_SELLER_DISTRIBUTION_V1",
