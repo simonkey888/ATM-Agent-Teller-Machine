@@ -23,7 +23,7 @@ class Order019X402SellerLaneTests(unittest.TestCase):
         self.assertIn('export const X402_NETWORK = "eip155:8453"', self.src)
         self.assertIn('export const X402_AMOUNT_ATOMIC = "10000"', self.src)
         self.assertEqual(self.src.count('export const X402_PATH = "/x402/falsify"'), 1)
-        self.assertEqual(self.src.count("X402_PATH"), 2)
+        self.assertEqual(self.src.count('if (url.pathname === X402_PATH) return x402Falsify(request, env, ctx);'), 1)
         self.assertNotIn("PRIVATE_KEY", self.src)
         self.assertNotIn("mnemonic", self.src.lower())
         self.assertNotIn("wallet.create", self.src.lower())
