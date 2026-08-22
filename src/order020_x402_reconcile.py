@@ -12,7 +12,6 @@ from decimal import Decimal
 from typing import Any
 
 import atm_cloud
-import atm_cloud_fabric  # noqa: F401  # registers the canonical extended cloud-state allowlist
 import atm_v2
 from atm_core.models import PaymentStatus
 from atm_core.payments import (
@@ -285,6 +284,7 @@ def main() -> int:
         raise SystemExit("ORDER020_RECONCILE_REQUIRES_GITHUB_ACTIONS")
     if not os.getenv("ATM_ORDER020_EVENT_SECRET"):
         raise SystemExit("ORDER020_EVENT_AUTH_SECRET_MISSING")
+    import atm_cloud_fabric  # noqa: F401  # registers the canonical extended cloud-state allowlist only for live reconciliation
     source_sha = atm_cloud.safe_source_sha()
     config_file = os.getenv("OCI_CLI_CONFIG_FILE") or str(atm_cloud.Path.home() / ".oci" / "config")
     profile = os.getenv("OCI_CLI_PROFILE") or "ATM_REMOTE"
