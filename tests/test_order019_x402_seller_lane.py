@@ -62,7 +62,11 @@ class Order019X402SellerLaneTests(unittest.TestCase):
         self.assertIn("return legacy.fetch(request, env, ctx)", self.src)
         self.assertIn("return legacy.scheduled(controller, env, ctx)", self.src)
         wrangler = WRANGLER.read_text(encoding="utf-8")
-        self.assertIn('main = "worker/src/x402-entry.js"', wrangler)
+        self.assertIn('main = "worker/src/human-gate-entry.js"', wrangler)
+        human_gate = (ROOT / "worker/src/human-gate-entry.js").read_text(encoding="utf-8")
+        self.assertIn('import x402 from "./x402-entry.js"', human_gate)
+        self.assertIn("return x402.fetch(request,env,ctx)", human_gate)
+        self.assertIn("return x402.scheduled(controller,env,ctx)", human_gate)
 
 
 if __name__ == "__main__":
