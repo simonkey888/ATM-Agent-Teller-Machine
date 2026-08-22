@@ -22,14 +22,15 @@ class Order019X402SellerLaneTests(unittest.TestCase):
         self.assertIn(f'export const X402_USDC = "{BASE_USDC}"', self.src)
         self.assertIn('export const X402_NETWORK = "eip155:8453"', self.src)
         self.assertIn('export const X402_AMOUNT_ATOMIC = "10000"', self.src)
-        self.assertEqual(self.src.count('"/x402/falsify"'), 2)
+        self.assertEqual(self.src.count('export const X402_PATH = "/x402/falsify"'), 1)
+        self.assertEqual(self.src.count("X402_PATH"), 2)
         self.assertNotIn("PRIVATE_KEY", self.src)
         self.assertNotIn("mnemonic", self.src.lower())
         self.assertNotIn("wallet.create", self.src.lower())
 
     def test_zero_spend_facilitator_is_fail_closed_and_no_paid_api_key(self):
         self.assertIn('export const X402_FACILITATOR = "https://facilitator.xpay.sh"', self.src)
-        self.assertIn('"/supported"', self.src)
+        self.assertIn('`${X402_FACILITATOR}/supported`', self.src)
         self.assertIn('"SELLER_LANE_KILLED_FACILITATOR_UNAVAILABLE"', self.src)
         self.assertNotRegex(self.src, re.compile(r"CDP[_A-Z]*KEY|COINBASE[_A-Z]*KEY"))
         self.assertNotIn("Authorization: Bearer", self.src)
