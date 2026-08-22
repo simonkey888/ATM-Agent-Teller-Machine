@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: order019-x402-seller-proof
@@ -145,4 +146,48 @@ jobs:
           print("PRICE_USDC=0.01")
           print("OUTGOING_SPEND_USD=0")
           print("OWNER_FUNDED_PAYMENT=NO")
+          PY
+      - name: Publish durable seller-lane proof receipt
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROOF_STATUS: ${{ job.status }}
+          PROOF_SHA: ${{ github.sha }}
+          PROOF_RUN_ID: ${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          status = os.environ["PROOF_STATUS"].upper()
+          receipt = {
+              "schema": "ATM_ORDER019_X402_SELLER_LIVE_PROOF_V1",
+              "status": status,
+              "sha": os.environ["PROOF_SHA"],
+              "run_id": os.environ["PROOF_RUN_ID"],
+              "run_url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['PROOF_RUN_ID']}",
+              "endpoint": "https://atm.simondalmasso44.workers.dev/x402/falsify",
+              "network": "eip155:8453",
+              "asset": "USDC",
+              "canonical_pay_to": "0xd89Ef03bC3105C538529AC2657Bc4488c94ff4E4",
+              "price_usdc": "0.01",
+              "facilitator": "https://facilitator.xpay.sh",
+              "outgoing_spend_usd": "0",
+              "owner_funded_payment": False,
+              "merge": "NO",
+          }
+          body = "ATM ORDER019 X402 SELLER LIVE PROOF\n```json\n" + json.dumps(receipt, sort_keys=True) + "\n```"
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/issues/7/comments",
+              data=json.dumps({"body": body}).encode(),
+              method="POST",
+              headers={
+                  "Accept":"application/vnd.github+json",
+                  "Authorization":f"Bearer {os.environ['GITHUB_TOKEN']}",
+                  "Content-Type":"application/json",
+                  "User-Agent":"ATM-ORDER019-X402-Proof/1.0",
+                  "X-GitHub-Api-Version":"2022-11-28",
+              },
+          )
+          with urllib.request.urlopen(req, timeout=20) as response:
+              data = json.load(response)
+          print("ATM_ORDER019_X402_PROOF_RECEIPT=" + str(data.get("html_url")))
           PY
