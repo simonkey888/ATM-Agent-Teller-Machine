@@ -1,0 +1,148 @@
+name: ORDER-019 x402 Seller Live Proof
+
+on:
+  push:
+    branches: [pivot/universal-money-radar-r1]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: order019-x402-seller-proof
+  cancel-in-progress: true
+
+jobs:
+  live-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Exact-head and zero-spend live seller proof
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(git ls-remote origin refs/heads/pivot/universal-money-radar-r1 | awk '{print $1}')" = "$EXPECTED_SHA"
+          python - <<'PY'
+          import base64, json, os, time, urllib.error, urllib.request
+
+          expected = os.environ["EXPECTED_SHA"]
+          seller = "https://atm.simondalmasso44.workers.dev"
+          facilitator = "https://facilitator.xpay.sh"
+          pay_to = "0xd89Ef03bC3105C538529AC2657Bc4488c94ff4E4"
+          usdc = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+          network = "eip155:8453"
+          amount = "10000"
+
+          def get_json(url):
+              req = urllib.request.Request(url, headers={"User-Agent":"ATM-ORDER019-X402-Proof/1.0","Accept":"application/json"})
+              with urllib.request.urlopen(req, timeout=20) as response:
+                  return json.load(response)
+
+          health = get_json(facilitator + "/health")
+          if str(health.get("status") or "").lower() not in {"ok", "healthy"}:
+              raise SystemExit(f"SELLER_LANE_KILL=FACILITATOR_HEALTH_{health}")
+
+          supported = get_json(facilitator + "/supported")
+          rows = supported.get("supportedNetworks") or supported.get("kinds") or []
+          base_v2 = False
+          for row in rows:
+              if isinstance(row, str):
+                  base_v2 = base_v2 or row == network
+                  continue
+              row_network = row.get("networkId") or row.get("network")
+              row_version = str(row.get("version") or row.get("x402Version") or "").lower()
+              row_scheme = row.get("scheme")
+              if row_network == network and row_version in {"2", "v2"} and row_scheme in {None, "exact"}:
+                  base_v2 = True
+          if not base_v2:
+              raise SystemExit(f"SELLER_LANE_KILL=FACILITATOR_BASE_V2_UNAVAILABLE supported={supported}")
+
+          rpc_req = urllib.request.Request(
+              "https://mainnet.base.org",
+              data=json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}).encode(),
+              headers={"Content-Type":"application/json","User-Agent":"ATM-ORDER019-X402-Proof/1.0"},
+              method="POST",
+          )
+          with urllib.request.urlopen(rpc_req, timeout=20) as response:
+              rpc = json.load(response)
+          if str(rpc.get("result") or "").lower() != "0x2105":
+              raise SystemExit(f"SELLER_LANE_KILL=BASE_RPC_CHAIN_MISMATCH result={rpc}")
+
+          # Wait only for this exact commit to be deployed. No payment is sent.
+          deadline = time.time() + 300
+          last_health = None
+          while time.time() < deadline:
+              try:
+                  last_health = get_json(seller + "/health")
+                  if last_health.get("git_sha") == expected:
+                      break
+              except Exception as exc:
+                  last_health = {"error": type(exc).__name__}
+              time.sleep(10)
+          if not isinstance(last_health, dict) or last_health.get("git_sha") != expected:
+              raise SystemExit(f"SELLER_LANE_PROOF=DEPLOY_SHA_NOT_READY expected={expected} last={last_health}")
+
+          body = json.dumps({
+              "txHash": "0x" + "00" * 32,
+              "expectedRecipient": pay_to,
+              "claimType": "transfer",
+              "minAmountAtomic": "1",
+          }).encode()
+          req = urllib.request.Request(
+              seller + "/x402/falsify",
+              data=body,
+              headers={"Content-Type":"application/json","Accept":"application/json","User-Agent":"ATM-ORDER019-X402-Proof/1.0"},
+              method="POST",
+          )
+          try:
+              urllib.request.urlopen(req, timeout=30)
+              raise SystemExit("SELLER_LANE_KILL=UNPAID_REQUEST_NOT_BLOCKED")
+          except urllib.error.HTTPError as exc:
+              status = exc.code
+              raw = exc.read().decode()
+              payment_required = exc.headers.get("PAYMENT-REQUIRED")
+          if status != 402:
+              raise SystemExit(f"SELLER_LANE_KILL=UNPAID_STATUS_{status} body={raw[:500]}")
+          if not payment_required:
+              raise SystemExit("SELLER_LANE_KILL=PAYMENT_REQUIRED_HEADER_MISSING")
+          challenge = json.loads(raw)
+          header_challenge = json.loads(base64.b64decode(payment_required).decode())
+          if challenge != header_challenge:
+              raise SystemExit("SELLER_LANE_KILL=HEADER_BODY_CHALLENGE_MISMATCH")
+          if challenge.get("x402Version") != 2:
+              raise SystemExit("SELLER_LANE_KILL=X402_VERSION_MISMATCH")
+          if (challenge.get("resource") or {}).get("url") != seller + "/x402/falsify":
+              raise SystemExit("SELLER_LANE_KILL=RESOURCE_URL_MISMATCH")
+          accepts = challenge.get("accepts") or []
+          if len(accepts) != 1:
+              raise SystemExit("SELLER_LANE_KILL=ACCEPTS_NOT_SINGLETON")
+          exact = accepts[0]
+          checks = {
+              "scheme": exact.get("scheme") == "exact",
+              "network": exact.get("network") == network,
+              "amount": str(exact.get("amount")) == amount,
+              "asset": str(exact.get("asset") or "").lower() == usdc.lower(),
+              "payTo": str(exact.get("payTo") or "").lower() == pay_to.lower(),
+              "timeout": exact.get("maxTimeoutSeconds") == 60,
+          }
+          if not all(checks.values()):
+              raise SystemExit(f"SELLER_LANE_KILL=CHALLENGE_MISMATCH checks={checks}")
+
+          print("SELLER_LANE_X402_LIVE_PROOF=PASS")
+          print("EXACT_HEAD=" + expected)
+          print("FACILITATOR_HEALTH=PASS")
+          print("FACILITATOR_BASE_MAINNET_V2=PASS")
+          print("BASE_RPC_CHAIN_8453=PASS")
+          print("UNPAID_402_CHALLENGE=PASS")
+          print("CANONICAL_PAY_TO=" + pay_to)
+          print("PRICE_USDC=0.01")
+          print("OUTGOING_SPEND_USD=0")
+          print("OWNER_FUNDED_PAYMENT=NO")
+          PY
