@@ -16,6 +16,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "atm-cloud-cycle.yml"
 CANONICAL = reconcile.CANONICAL_WALLET.lower()
 PAYER = "0x1111111111111111111111111111111111111111"
 TX = "0x" + "ab" * 32
+EVENT_SECRET = "order020-unit-test-event-secret"
 
 
 def topic(address: str) -> str:
@@ -72,6 +73,12 @@ def good_event(**overrides):
     return base
 
 
+def signed_event(**overrides):
+    event = good_event(**overrides)
+    event[reconcile.EVENT_AUTH_FIELD] = reconcile._event_auth_tag(EVENT_SECRET, event)
+    return event
+
+
 class Order020SellerLaneContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -82,6 +89,7 @@ class Order020SellerLaneContractTests(unittest.TestCase):
     def test_discovery_openapi_bazaar_and_live_routes_are_wired(self):
         self.assertIn('openapi: "3.1.0"', self.discovery)
         self.assertIn('"x-payment-info"', self.discovery)
+        self.assertIn('protocols: ["x402"]', self.discovery)
         self.assertIn('"https://json-schema.org/draft/2020-12/schema"', self.discovery)
         self.assertIn('extensions: { bazaar: bazaar() }', self.entry)
         self.assertIn('url.pathname === "/openapi.json"', self.entry)
@@ -116,11 +124,13 @@ class Order020SellerLaneContractTests(unittest.TestCase):
         self.assertIn("return legacy.fetch(request, env, ctx)", self.entry)
         self.assertIn("return legacy.scheduled(controller, env, ctx)", self.entry)
 
-    def test_existing_recurring_cloud_cycle_reconciles_before_status_cycle(self):
+    def test_existing_recurring_cloud_cycle_reconciles_before_status_cycle_with_secret_boundary(self):
         reconcile_pos = self.workflow.index("python src/order020_x402_reconcile.py")
         cloud_pos = self.workflow.index("python src/atm_cloud_fabric.py")
         self.assertLess(reconcile_pos, cloud_pos)
         self.assertEqual(self.workflow.count("python src/order020_x402_reconcile.py"), 1)
+        self.assertIn('export ATM_ORDER020_EVENT_SECRET="$_BUNDLE_GH_PAT"', self.workflow)
+        self.assertIn("unset PAYOUT _BUNDLE_GH_PAT _LEGACY_MODEL_KEY ATM_BASE_WALLET_ADDRESS ATM_ORDER020_EVENT_SECRET", self.workflow)
 
 
 class Order020ReconcileSecurityTests(unittest.TestCase):
@@ -129,22 +139,30 @@ class Order020ReconcileSecurityTests(unittest.TestCase):
             "id": 1,
             "author_association": "NONE",
             "user": {"login": "attacker"},
-            "body": reconcile.EVENT_MARKER + "\n```json\n" + json.dumps(good_event()) + "\n```",
+            "body": reconcile.EVENT_MARKER + "\n```json\n" + json.dumps(signed_event()) + "\n```",
         }
         self.assertIsNone(reconcile._parse_event(row))
 
     def test_static_event_rejects_wrong_chain_token_recipient_amount_and_self_payment(self):
         cases = [
-            (good_event(network="eip155:1"), "chain_mismatch"),
-            (good_event(token="0x" + "22" * 20), "token_mismatch"),
-            (good_event(recipient="0x" + "33" * 20), "recipient_mismatch"),
-            (good_event(amount_atomic="9999"), "amount_mismatch"),
-            (good_event(payer=CANONICAL), "owner_self_payment_rejected"),
+            (signed_event(network="eip155:1"), "chain_mismatch"),
+            (signed_event(token="0x" + "22" * 20), "token_mismatch"),
+            (signed_event(recipient="0x" + "33" * 20), "recipient_mismatch"),
+            (signed_event(amount_atomic="9999"), "amount_mismatch"),
+            (signed_event(payer=CANONICAL), "owner_self_payment_rejected"),
         ]
         for event, expected in cases:
             with self.subTest(expected=expected):
                 with self.assertRaisesRegex(ValueError, expected):
-                    reconcile._validate_static_event(event)
+                    reconcile._validate_static_event(event, event_secret=EVENT_SECRET)
+
+    def test_event_authentication_rejects_missing_and_tampered_event(self):
+        with self.assertRaisesRegex(ValueError, "event_auth_missing"):
+            reconcile._validate_static_event(good_event(), event_secret=EVENT_SECRET)
+        event = signed_event()
+        event[reconcile.EVENT_AUTH_FIELD] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "event_auth_invalid"):
+            reconcile._validate_static_event(event, event_secret=EVENT_SECRET)
 
     def test_receipt_rejects_missing_reverted_wrong_recipient_and_short_amount(self):
         cases = [
@@ -159,13 +177,13 @@ class Order020ReconcileSecurityTests(unittest.TestCase):
                     reconcile._matching_transfer(TX, PAYER, FakeHttp(receipt))
 
     def test_valid_external_payment_appends_once_and_duplicate_counts_once(self):
-        event = good_event()
+        event = signed_event()
         http = FakeHttp(good_receipt())
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PaymentLedger(Path(tmp) / "validated-payment-proofs.jsonl")
             with patch.object(reconcile, "_events_since", return_value=[event]):
-                first = reconcile.reconcile_local_ledger(ledger, http=http)
-                second = reconcile.reconcile_local_ledger(ledger, http=http)
+                first = reconcile.reconcile_local_ledger(ledger, http=http, event_secret=EVENT_SECRET)
+                second = reconcile.reconcile_local_ledger(ledger, http=http, event_secret=EVENT_SECRET)
             self.assertEqual(first["appended"], 1)
             self.assertEqual(first["withdrawable_usdc"], "0.01")
             self.assertEqual(second["appended"], 0)
