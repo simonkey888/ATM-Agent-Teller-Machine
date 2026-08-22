@@ -179,6 +179,18 @@ function transferTo(log, recipient, minAmount) {
   try { amount = BigInt(String(log.data || "0x0")); } catch { return null; }
   return amount >= minAmount ? amount : null;
 }
+function addressTopic(address) {
+  if (!ADDRESS_RE.test(String(address || ""))) return null;
+  return `0x${"0".repeat(24)}${String(address).slice(2).toLowerCase()}`;
+}
+export function paymentTransferFromTo(log, payer, recipient, minAmount) {
+  const amount = transferTo(log, recipient, minAmount);
+  if (amount === null) return null;
+  const expectedFrom = addressTopic(payer);
+  const actualFrom = String(log?.topics?.[1] || "").toLowerCase();
+  if (!expectedFrom || actualFrom !== expectedFrom) return null;
+  return amount;
+}
 async function receipt(txHash) {
   if (!TX_RE.test(String(txHash || ""))) throw new Error("tx_hash_invalid");
   return rpc("eth_getTransactionReceipt", [txHash]);
@@ -208,6 +220,36 @@ async function proveUsdcTransfer(txHash, recipient, minAmountAtomic) {
     reason: "EXPECTED_USDC_TRANSFER_ABSENT",
     tx_hash: txHash,
     block_number: r.blockNumber || null,
+    recipient,
+  };
+}
+async function proveUsdcTransferForPayment(txHash, payer, recipient, minAmountAtomic) {
+  const r = await receipt(txHash);
+  if (!r) return { proven: false, reason: "TX_NOT_FOUND", tx_hash: txHash, payer };
+  if (String(r.status || "").toLowerCase() !== "0x1") {
+    return { proven: false, reason: "TX_REVERTED", tx_hash: txHash, block_number: r.blockNumber || null, payer };
+  }
+  const minimum = BigInt(String(minAmountAtomic));
+  for (const log of Array.isArray(r.logs) ? r.logs : []) {
+    const amount = paymentTransferFromTo(log, payer, recipient, minimum);
+    if (amount !== null) {
+      return {
+        proven: true,
+        reason: "BASE_USDC_TRANSFER_FROM_AUTHORIZED_PAYER_CONFIRMED",
+        tx_hash: txHash,
+        block_number: r.blockNumber || null,
+        payer,
+        recipient,
+        amount_atomic: amount.toString(),
+      };
+    }
+  }
+  return {
+    proven: false,
+    reason: "EXPECTED_PAYER_BOUND_USDC_TRANSFER_ABSENT",
+    tx_hash: txHash,
+    block_number: r.blockNumber || null,
+    payer,
     recipient,
   };
 }
@@ -298,7 +340,7 @@ async function x402Falsify(request, env, ctx) {
   }
 
   // Finality first. No capability work occurs until the facilitator settles and
-  // Base independently proves the USDC transfer to the canonical wallet.
+  // Base independently proves the USDC transfer from the authorized payer to the canonical wallet.
   let settlement;
   try {
     settlement = await facilitatorCall("/settle", paymentPayload);
@@ -316,7 +358,7 @@ async function x402Falsify(request, env, ctx) {
 
   let paymentEvidence;
   try {
-    paymentEvidence = await proveUsdcTransfer(settlementTx, X402_PAY_TO, X402_AMOUNT_ATOMIC);
+    paymentEvidence = await proveUsdcTransferForPayment(settlementTx, payer, X402_PAY_TO, X402_AMOUNT_ATOMIC);
   } catch (error) {
     return json({ ok: false, error: "payment_onchain_proof_unavailable", detail: String(error?.message || error) }, 503);
   }
