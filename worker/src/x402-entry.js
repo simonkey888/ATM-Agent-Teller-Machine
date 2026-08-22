@@ -1,4 +1,12 @@
 import legacy from "./index.js";
+import {
+  bazaarExtension,
+  openApiDocument,
+  publishSellerPaymentEvent,
+  sellerFunnel,
+  sha256Hex,
+  wellKnownDocument,
+} from "./order020-discovery.js";
 
 export const X402_PATH = "/x402/falsify";
 export const X402_VERSION = 2;
@@ -8,8 +16,10 @@ export const X402_PAY_TO = "0xd89Ef03bC3105C538529AC2657Bc4488c94ff4E4";
 export const X402_AMOUNT_ATOMIC = "10000";
 export const X402_FACILITATOR = "https://facilitator.xpay.sh";
 export const BASE_RPC = "https://mainnet.base.org";
+export const X402_SELLER_FUNNEL_PATH = "/api/seller-funnel";
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-const RESOURCE_URL = "https://atm.simondalmasso44.workers.dev/x402/falsify";
+const RESOURCE_ORIGIN = "https://atm.simondalmasso44.workers.dev";
+const RESOURCE_URL = RESOURCE_ORIGIN + X402_PATH;
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 const TX_RE = /^0x[0-9a-fA-F]{64}$/;
 const SIG_RE = /^0x[0-9a-fA-F]{130}$/;
@@ -52,6 +62,15 @@ function requirements() {
     extra: { name: "USDC", version: "2" },
   };
 }
+function bazaar() {
+  return bazaarExtension({
+    resourceUrl: RESOURCE_URL,
+    network: X402_NETWORK,
+    asset: X402_USDC,
+    payTo: X402_PAY_TO,
+    amountAtomic: X402_AMOUNT_ATOMIC,
+  });
+}
 function paymentRequired(error = "PAYMENT-SIGNATURE header is required") {
   return {
     x402Version: X402_VERSION,
@@ -64,7 +83,7 @@ function paymentRequired(error = "PAYMENT-SIGNATURE header is required") {
       tags: ["falsifier", "base", "usdc"],
     },
     accepts: [requirements()],
-    extensions: {},
+    extensions: { bazaar: bazaar() },
   };
 }
 function payment402(error) {
@@ -76,7 +95,7 @@ async function fetchJson(url, init = {}) {
     ...init,
     headers: {
       "accept": "application/json",
-      "user-agent": "ATM-X402-Seller/1.0",
+      "user-agent": "ATM-X402-Seller/2.0",
       ...(init.headers || {}),
     },
   });
@@ -222,16 +241,32 @@ async function runFalsifier(input) {
     outgoing_spend_usd: "0",
   };
 }
-async function x402Falsify(request) {
+async function publishPaymentEventAfterResponse(env, ctx, event) {
+  const publish = async () => {
+    let result = await publishSellerPaymentEvent(env, event);
+    if (!result.published) result = await publishSellerPaymentEvent(env, event);
+    return result;
+  };
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(publish());
+    return { scheduled: true };
+  }
+  const result = await publish();
+  return { scheduled: false, ...result };
+}
+async function x402Falsify(request, env, ctx) {
   if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405, { allow: "POST" });
+
+  // Discovery and unpaid probes must always reach a parseable 402 before body
+  // validation or any external facilitator dependency.
+  const paymentHeader = request.headers.get("PAYMENT-SIGNATURE");
+  if (!paymentHeader) return payment402();
+
   try {
     await requireFacilitator();
   } catch (error) {
     return json({ ok: false, error: "SELLER_LANE_KILLED_FACILITATOR_UNAVAILABLE", detail: String(error?.message || error) }, 503);
   }
-
-  const paymentHeader = request.headers.get("PAYMENT-SIGNATURE");
-  if (!paymentHeader) return payment402();
 
   let paymentPayload;
   let payer;
@@ -240,6 +275,9 @@ async function x402Falsify(request) {
     payer = validatePaymentPayload(paymentPayload);
   } catch (error) {
     return payment402(String(error?.message || "payment_payload_invalid"));
+  }
+  if (sameAddress(payer, X402_PAY_TO)) {
+    return json({ ok: false, error: "owner_self_payment_rejected", outgoing_spend_usd: "0" }, 403);
   }
 
   let input;
@@ -259,8 +297,8 @@ async function x402Falsify(request) {
     return payment402(String(verification?.invalidReason || verification?.reason || "payment_invalid"));
   }
 
-  // ORDER-019 seller-lane invariant: finality first. No capability work occurs
-  // until the facilitator settles and Base independently proves the USDC transfer.
+  // Finality first. No capability work occurs until the facilitator settles and
+  // Base independently proves the USDC transfer to the canonical wallet.
   let settlement;
   try {
     settlement = await facilitatorCall("/settle", paymentPayload);
@@ -287,6 +325,33 @@ async function x402Falsify(request) {
   }
 
   const result = await runFalsifier(input);
+  const inputSha256 = await sha256Hex(JSON.stringify({
+    txHash: input.txHash,
+    expectedRecipient: input.expectedRecipient,
+    claimType: input.claimType,
+    minAmountAtomic: input.minAmountAtomic,
+  }));
+  const observedAt = new Date().toISOString();
+  const paymentEventId = await sha256Hex(`${settlementTx.toLowerCase()}:${String(payer).toLowerCase()}:${paymentEvidence.amount_atomic}`);
+  const event = {
+    schema: "ATM_ORDER020_X402_PAYMENT_EVENT_V1",
+    payment_event_id: paymentEventId,
+    resource: RESOURCE_URL,
+    settlement_tx: settlementTx,
+    payer: String(payer).toLowerCase(),
+    recipient: X402_PAY_TO.toLowerCase(),
+    network: X402_NETWORK,
+    chain_id: 8453,
+    token: X402_USDC.toLowerCase(),
+    amount_atomic: X402_AMOUNT_ATOMIC,
+    input_sha256: inputSha256,
+    source_sha: String(env?.ATM_GIT_SHA || "").toLowerCase(),
+    observed_at: observedAt,
+    onchain_proven: true,
+    external_buyer: true,
+    outgoing_spend_usd: "0",
+  };
+  const accountingEvent = await publishPaymentEventAfterResponse(env, ctx, event);
   const normalizedSettlement = {
     success: true,
     payer: String(settlement?.payer || verification?.payer || payer),
@@ -305,7 +370,9 @@ async function x402Falsify(request) {
         amount_atomic: X402_AMOUNT_ATOMIC,
         settlement_tx: settlementTx,
         onchain_proven: true,
+        external_buyer: true,
       },
+      accounting_event: accountingEvent,
       result,
     },
     200,
@@ -316,7 +383,23 @@ async function x402Falsify(request) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    if (url.pathname === X402_PATH) return x402Falsify(request);
+    if (url.pathname === "/openapi.json" && request.method === "GET") {
+      return json(openApiDocument({
+        origin: RESOURCE_ORIGIN,
+        path: X402_PATH,
+        network: X402_NETWORK,
+        asset: X402_USDC,
+        payTo: X402_PAY_TO,
+        amountAtomic: X402_AMOUNT_ATOMIC,
+      }));
+    }
+    if (url.pathname === "/.well-known/x402" && request.method === "GET") {
+      return json(wellKnownDocument(RESOURCE_URL));
+    }
+    if (url.pathname === X402_SELLER_FUNNEL_PATH && request.method === "GET") {
+      return json(await sellerFunnel({ legacy, request, env, ctx, canonicalPayTo: X402_PAY_TO }));
+    }
+    if (url.pathname === X402_PATH) return x402Falsify(request, env, ctx);
     return legacy.fetch(request, env, ctx);
   },
   async scheduled(controller, env, ctx) {
