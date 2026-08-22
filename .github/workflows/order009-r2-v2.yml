@@ -1,0 +1,59 @@
+name: ORDER-009-R2 Corrected Gate
+
+on:
+  push:
+    branches: [pivot/universal-money-radar-r1]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: order009-r2-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  corrected-read-only-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - name: Corrected TaskMarket on-chain falsifier
+        env:
+          SUPERTEAM_AGENT_API_KEY: ${{ secrets.SUPERTEAM_AGENT_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI_API_KEY }}
+        run: python scripts/order009-r2-gate-v2.py
+      - name: Publish sanitized corrected gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          from pathlib import Path
+          raw=json.loads(Path('order009-r2-gate-v2-evidence.json').read_text())
+          def safe(x):
+              if not isinstance(x,dict): return None
+              return {k:x.get(k) for k in ('source','id','url','title','reward_usdc','competition','mode','deadline','escrow_tx','base_receipt','signature_required','gates','economic_score','passes')}
+          payload={
+              'schema':raw['schema'],'head':raw['head'],'generated_at':raw['generated_at'],'mode':'READ_ONLY','external_mutation':0,
+              'outgoing_spend_usd':'0','merge':False,'workprotocol_targets_forbidden':True,'superteam_secret_present':raw['superteam_secret_present'],
+              'executor':raw['executor'],'taskmarket_open_total':raw['taskmarket_open_total'],'rpc_states':raw['rpc_states'],
+              'passing_count':raw['passing_count'],'selected':safe(raw.get('selected')),'candidates':[safe(x) for x in raw.get('candidates',[])],
+              'terminal':raw['terminal'],'run_id':os.environ['GITHUB_RUN_ID'],
+              'run_url':f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          }
+          body='ORDER-009-R2 CORRECTED MUTATION GATE\n```json\n'+json.dumps(payload,sort_keys=True)+'\n```'
+          req=urllib.request.Request(f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/issues/38/comments",data=json.dumps({'body':body}).encode(),method='POST',headers={'Authorization':f"Bearer {os.environ['GITHUB_TOKEN']}",'Accept':'application/vnd.github+json','Content-Type':'application/json','User-Agent':'ATM-Order009-R2/2.0'})
+          with urllib.request.urlopen(req,timeout=20) as r: posted=json.loads(r.read().decode())
+          print('ORDER009_R2_V2_COMMENT='+str(posted.get('html_url')))
+          print('ORDER009_R2_V2_TERMINAL='+raw['terminal'])
+          PY

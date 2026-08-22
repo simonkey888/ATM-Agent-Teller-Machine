@@ -1,14 +1,16 @@
 name: ATM Cloud Cycle Scheduled
 
 on:
-  schedule:
-    - cron: '3,8,13,18,23,28,33,38,43,48,53,58 * * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
-  issues: write
+  issues: read
 
 jobs:
-  scheduled-cloud-cycle:
-    uses: ./.github/workflows/atm-cloud-cycle.yml
-    secrets: inherit
+  legacy-scheduler-disabled:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "ATM_LEGACY_GITHUB_CRON=DISABLED"
+          echo "AUTHORITY=CLOUDFLARE_CRON_V1"

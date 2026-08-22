@@ -1,0 +1,94 @@
+{
+  "schema": "ATM_ORDER015_R2_DECISION_V1",
+  "authority": "ISSUE_42_CURRENT_BODY_R2",
+  "verified_at": "2026-08-20",
+  "base_head": "a3e59af6ccae566c873740bd2ab5c9c2cd22e905",
+  "control_plane": {
+    "winner": "SURGICAL_PIVOT_SCHEDULING_ONLY",
+    "single_controller": true,
+    "second_controller_created": false,
+    "a": {
+      "name": "GitHub Actions cron as recurrent exact-head controller",
+      "score": 35,
+      "decision": "REJECT_AFTER_LIVE_LIVENESS_FAILURE",
+      "reasons": [
+        "scheduled workflows execute only the default branch and cannot preserve an unmerged PR head",
+        "observed scheduled cadence was 24 to 60 minutes despite a nominal five-minute cron",
+        "default-branch cycles rejected the R2 state archive"
+      ]
+    },
+    "b": {
+      "name": "Cloudflare Cron Trigger scheduling exact-head GitHub Actions ephemeral workers",
+      "score": 91,
+      "decision": "ADOPT_SCHEDULING_ONLY",
+      "reasons": [
+        "one zero-cost durable cron can dispatch the exact deployed PR SHA",
+        "GitHub Actions retains the existing CAS lease and economic authority fence",
+        "no Durable Object, Workflow, Queue, wallet, Canon or second controller is introduced"
+      ]
+    },
+    "heartbeat_slo_seconds": 900,
+    "heartbeat_slo_changed": false,
+    "scheduler": "CLOUDFLARE_CRON_V1",
+    "scheduler_cadence": "*/5 * * * *",
+    "ephemeral_worker": "GITHUB_ACTIONS"
+  },
+  "economic_invariants": {
+    "outgoing_spend_usd": "0",
+    "new_wallet": false,
+    "paid_model": false,
+    "paid_api": false,
+    "subscription": false,
+    "gas": false,
+    "merge": false,
+    "cash_mode_continues": true,
+    "settlement_watch_continues": true
+  },
+  "research_dispositions": [
+    {"repo": "h4ckf0r0day/obscura", "license": "Apache-2.0", "disposition": "SURGICAL_ADOPT_PINNED_BINARY", "use": "public read-only dynamic browser worker", "pin": "v0.2.0", "archive_sha256": "d601f4f542319c3b9fa8dca9f5ccfc134a2ca001648da528db5f03c9e6c2599b"},
+    {"repo": "harry0703/MoneyPrinterTurbo", "license": "MIT", "disposition": "PATTERN_ONLY_MINIMAL_REIMPLEMENTATION", "use": "local-rights FFmpeg short-form assembly; no WebUI, provider APIs or social publishing"},
+    {"repo": "diegosouzapw/OmniRoute", "license": "MIT", "disposition": "DISCOVERY_PATTERN_ONLY", "use": "provider routing taxonomy; ToolCheck concern 38/100, no connection or install"},
+    {"repo": "mnfst/awesome-free-llm-apis", "license": "CC0-1.0", "disposition": "DISCOVERY_INDEX_ONLY", "use": "candidate discovery; never economic or terms authority"},
+    {"repo": "santifer/career-ops", "license": "MIT", "disposition": "PATTERN_EXTRACTED", "use": "listing legitimacy, work authorization and concrete human-gate evidence"},
+    {"repo": "1jehuang/jcode", "license": "MIT", "disposition": "KEEP_OUT_NO_MEASURED_BOTTLENECK", "use": "candidate coding worker only"},
+    {"repo": "earendil-works/pi", "license": "MIT", "disposition": "KEEP_OUT_NO_MEASURED_BOTTLENECK", "use": "candidate coding worker only"},
+    {"repo": "mattpocock/skills", "license": "MIT", "disposition": "PATTERN_ONLY", "use": "small capability contract packaging"},
+    {"repo": "obra/superpowers", "license": "MIT", "disposition": "PATTERN_ONLY", "use": "verification-before-claim and bounded workflow discipline"},
+    {"repo": "akitaonrails/ai-memory", "license": "MIT", "disposition": "DEV_CONTINUITY_ONLY", "use": "never economic truth"},
+    {"repo": "agent-substrate/substrate", "license": "Apache-2.0", "disposition": "PATTERN_ONLY_NO_KUBERNETES", "use": "durable run/effect concepts"},
+    {"repo": "zhaoxuya520/reverse-skill", "license": "MIT", "disposition": "ROUTING_EVIDENCE_PATTERN_ONLY", "use": "automatic offensive/security work class remains prohibited"},
+    {"repo": "citrolabs/ego-lite", "license": "MIT", "disposition": "PATTERN_ONLY", "use": "self-audit framing; no runtime authority"},
+    {"repo": "lyogavin/airllm", "license": "Apache-2.0", "disposition": "REJECT_NO_MEASURED_MEMORY_BOTTLENECK", "use": "none"}
+  ],
+  "benchmarks": {
+    "browser": {"winner": "OBSCURA_V0_2_0_READONLY", "fixture": "browser-dynamic-local-v1", "raw_http_renders_javascript": false, "stealth": false, "network": "HTTPS_ALLOWLIST_PUBLIC_ONLY"},
+    "video": {"winner": "FFMPEG_LOCAL_ASSEMBLER_V1", "upstream": "MoneyPrinterTurbo v1.3.4 pattern", "full_upstream_installed": false, "fixture": "video-short-local-rights-v1", "paid_fallback": false, "social_publish": false}
+  },
+  "free_model_fabric": {
+    "gemini-api-free": "CONDITIONAL_PUBLIC_NONCONFIDENTIAL_ONLY_LIVE_PROBE_AND_UNBILLED_PROJECT",
+    "opencode-zen-free-catalog": "DISCOVERY_ONLY_COMMERCIAL_AND_NO_OVERAGE_UNPROVEN",
+    "omniroute": "NOT_CONNECTED",
+    "paid_fallback": false
+  },
+  "chaos_and_security": {
+    "unit_contract_tests": 347,
+    "skipped_fail_closed": 1,
+    "open_findings": 0,
+    "tested": [
+      "crash after COMMITTING",
+      "authoritative receipt recovery",
+      "ambiguous TaskMarket response without duplicate retry",
+      "current object drift before mutation",
+      "effect key external object hash separation",
+      "Telegram durable precommit lock",
+      "private DNS and credentialed browser rejection",
+      "video provenance mismatch and staging escape rejection",
+      "paid video dependency and social posting rejection",
+      "competition and nondeterministic acceptance rejection"
+    ],
+    "static_checks": ["python compile and AST", "workflow YAML", "worker JavaScript syntax", "shell syntax", "diff whitespace", "no new pipe-to-shell, shell=True, @latest, Kubernetes or paid fallback"],
+    "result": "PASS"
+  },
+  "one_canon": "atm_core.cash_canon.taskmarket_cash_decision",
+  "effect_boundary": "ATM_UNIVERSAL_EFFECT_BOUNDARY_V1"
+}

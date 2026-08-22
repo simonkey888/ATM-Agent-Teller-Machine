@@ -2,11 +2,12 @@ name: ATM Cloudflare Deploy
 
 on:
   push:
-    branches: [main, agent/atm-v1]
+    branches: [pivot/universal-money-radar-r1]
   workflow_dispatch:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: atm-cloudflare-production
@@ -15,10 +16,12 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.11'
@@ -30,16 +33,42 @@ jobs:
         env:
           PYTHONPATH: src
         run: python -m unittest discover -s tests -v
+      - name: Pinned browser and local video benchmarks
+        env:
+          PYTHONPATH: src
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ffmpeg
+          ffmpeg -version | head -1
+          python scripts/install_obscura_pinned.py --target /tmp/atm-obscura-v0.2.0
+          test "$(/tmp/atm-obscura-v0.2.0/obscura --version)" = "obscura 0.2.0"
+          python scripts/order015_browser_benchmark.py --obscura /tmp/atm-obscura-v0.2.0/obscura
+          python scripts/order015_video_benchmark.py
+      - name: Worker syntax
+        run: node --check worker/src/index.js
 
   deploy:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/pivot/universal-money-radar-r1'
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 12
     environment: atm-production
+    permissions:
+      actions: write
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
+      - name: Reject stale deployment run
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_sha="$(git ls-remote origin "refs/heads/${GITHUB_REF_NAME}" | awk '{print $1}')"
+          test -n "$remote_sha"
+          test "$remote_sha" = "$GITHUB_SHA"
+          echo "ATM_CLOUDFLARE_STALE_RUN_GUARD=PASS sha=$GITHUB_SHA"
       - name: Require Cloudflare deployment credentials
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -47,37 +76,212 @@ jobs:
         run: |
           test -n "$CLOUDFLARE_API_TOKEN"
           test -n "$CLOUDFLARE_ACCOUNT_ID"
-      - name: Deploy exact SHA
+      - name: Disable legacy default-branch recurring authority
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, urllib.request
+
+          base = "https://api.github.com/repos/simonkey888/ATM-Agent-Teller-Machine/actions/workflows/atm-cloud-schedule.yml"
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+              "User-Agent": "ATM-Order015-Scheduler-Cutover/1.0",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+          with urllib.request.urlopen(urllib.request.Request(base, headers=headers), timeout=30) as response:
+              state = __import__("json").load(response).get("state")
+          if state != "disabled_manually":
+              req = urllib.request.Request(base + "/disable", data=b"", method="PUT", headers=headers)
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  if response.status != 204:
+                      raise SystemExit("ATM_LEGACY_SCHEDULER_DISABLE_FAILED")
+          print("ATM_LEGACY_GITHUB_CRON=DISABLED_REMOTE state=disabled_manually")
+          PY
+      - name: Deploy exact SHA to canonical Worker
         uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: deploy --var ATM_GIT_SHA:${{ github.sha }}
-      - name: Exact-SHA smoke test
+      - name: Install scheduler dispatch credential as Worker secret
+        shell: bash
+        env:
+          ATM_REMOTE_BUNDLE: ${{ secrets.ATM_AGENT_TELLER_MACHINE }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          set +x
+          python - <<'PY'
+          import json, os, urllib.request
+
+          parts = os.environ.get("ATM_REMOTE_BUNDLE", "").replace("\r", "").strip().split("|")
+          if len(parts) != 3 or not parts[1].strip():
+              raise SystemExit("ATM_SCHEDULER_SECRET_SOURCE_INVALID")
+          dispatch_token = parts[1].strip()
+          account = os.environ["CLOUDFLARE_ACCOUNT_ID"]
+          api_token = os.environ["CLOUDFLARE_API_TOKEN"]
+          body = json.dumps({
+              "name": "ATM_GITHUB_DISPATCH_TOKEN",
+              "text": dispatch_token,
+              "type": "secret_text",
+          }).encode()
+          req = urllib.request.Request(
+              f"https://api.cloudflare.com/client/v4/accounts/{account}/workers/scripts/atm/secrets",
+              data=body,
+              method="PUT",
+              headers={
+                  "Authorization": f"Bearer {api_token}",
+                  "Content-Type": "application/json",
+                  "User-Agent": "ATM-Order015-Scheduler/1.0",
+              },
+          )
+          with urllib.request.urlopen(req, timeout=30) as response:
+              result = json.load(response)
+          if result.get("success") is not True:
+              raise SystemExit("ATM_SCHEDULER_SECRET_INSTALL_FAILED")
+          print("ATM_SCHEDULER_SECRET=INSTALLED_NO_DISCLOSURE")
+          PY
+      - name: Canonical exact-SHA E2E smoke
         env:
           EXPECTED_SHA: ${{ github.sha }}
+          REQUIRE_LIVE_RADAR: ${{ github.ref == 'refs/heads/pivot/universal-money-radar-r1' && '1' || '0' }}
         run: |
           python - <<'PY'
           import json, os, subprocess, time, urllib.parse
-          base = "https://atm.simondalmasso44.workers.dev/health"
+          base = "https://atm.simondalmasso44.workers.dev"
+          health_endpoint = "https://atm.simondalmasso44.workers.dev/health"
+          assert health_endpoint == base + "/health"
           expected = os.environ["EXPECTED_SHA"]
-          last = None
-          # Use curl with a normal explicit UA: workers.dev can reject the default
-          # Python urllib user-agent even while the public endpoint is healthy.
-          for attempt in range(60):
-              url = base + "?" + urllib.parse.urlencode({"sha": expected, "attempt": attempt})
+          require_radar = os.environ.get("REQUIRE_LIVE_RADAR") == "1"
+          ua = "ATM-Order009-Exact-SHA/1.0"
+
+          def get(path, attempt):
+              sep = "&" if "?" in path else "?"
+              url = base + path + sep + urllib.parse.urlencode({"sha": expected, "attempt": attempt})
+              return subprocess.check_output(
+                  ["curl", "-fsS", "--max-time", "15", "-A", ua, "-H", "Cache-Control: no-cache", url],
+                  text=True, timeout=20,
+              )
+
+          last = {}
+          for attempt in range(80):
               try:
-                  raw = subprocess.check_output(
-                      ["curl", "-fsS", "--max-time", "15", "-A", "ATM-CI-Exact-SHA/1.0", "-H", "Cache-Control: no-cache", url],
-                      text=True,
-                      timeout=20,
-                  )
-                  last = json.loads(raw)
-                  if last.get("ok") is True and last.get("git_sha") == expected:
-                      print(json.dumps(last, sort_keys=True))
+                  health = json.loads(get("/health", attempt))
+                  if health.get("ok") is not True or health.get("git_sha") != expected:
+                      raise RuntimeError(f"health_sha={health.get('git_sha')}")
+                  if not require_radar:
+                      print(json.dumps({"health": health, "e2e": "NON_PIVOT_EXACT_SHA_PASS"}, sort_keys=True))
                       raise SystemExit(0)
+
+                  status = json.loads(get("/api/status", attempt))
+                  opps = json.loads(get("/api/opportunities", attempt))
+                  platforms = json.loads(get("/api/platform-health", attempt))
+                  money = json.loads(get("/api/money-board", attempt))
+                  capabilities = json.loads(get("/api/capabilities", attempt))
+                  providers = json.loads(get("/api/providers", attempt))
+                  page = get("/", attempt)
+                  radar = status.get("radar") or {}
+                  operational = status.get("operational_status") or {}
+                  if radar.get("source_sha") != expected or opps.get("source_sha") != expected or platforms.get("source_sha") != expected:
+                      raise RuntimeError(f"radar_sha={radar.get('source_sha')} opp_sha={opps.get('source_sha')}")
+                  if operational.get("code") not in {"ACTIVE", "SEARCH"} or operational.get("checks", {}).get("heartbeat_fresh") is not True:
+                      raise RuntimeError(f"operational_status={operational}")
+                  if not isinstance(platforms.get("platforms"), list) or len(platforms["platforms"]) < 7:
+                      raise RuntimeError("platform_health_not_material")
+                  stages = money.get("stages") or {}
+                  expected_stages = {"opportunity_value", "submitted_net", "accepted_net", "settled_usdc", "withdrawable_usdc", "realized_24h", "realized_30d"}
+                  if set(stages) != expected_stages:
+                      raise RuntimeError(f"money_stages_missing:{sorted(stages)}")
+                  if stages.get("submitted_net") in (None,"UNKNOWN","0",0):
+                      raise RuntimeError("order012_submitted_net_missing")
+                  if capabilities.get("schema") != "ATM_CAPABILITY_REGISTRY_V2":
+                      raise RuntimeError(f"capability_registry_missing:{capabilities.get('schema')}")
+                  enabled = {row.get("capability_id") for row in capabilities.get("capabilities",[]) if row.get("enabled") is True}
+                  if not {"BROWSER_PUBLIC_DYNAMIC_EXTRACTION","VIDEO_SHORT_FORM_ASSEMBLY"}.issubset(enabled):
+                      raise RuntimeError(f"order015_capabilities_missing:{sorted(enabled)}")
+                  if providers.get("schema") != "ATM_FREE_MODEL_PROVIDER_REGISTRY_V2":
+                      raise RuntimeError(f"provider_registry_missing:{providers.get('schema')}")
+                  opencode = next((row for row in providers.get("providers",[]) if row.get("provider_id")=="opencode-zen-free-catalog"),{})
+                  if not str(opencode.get("admission") or "").startswith("DISCOVERY_ONLY_"):
+                      raise RuntimeError("unproven_free_provider_not_fail_closed")
+                  destinations = status.get("payout_destinations") or []
+                  by_label = {str(row.get("display_label")): row for row in destinations if isinstance(row, dict)}
+                  if "MetaMask / Base USDC" not in by_label or by_label.get("Santander", {}).get("verification_state") != "NOT_CONNECTED":
+                      raise RuntimeError(f"payout_destination_truth_missing:{destinations}")
+                  if by_label["Santander"].get("lifetime_usd") not in {"UNKNOWN", "NO_VERIFIED_DATA"}:
+                      raise RuntimeError("santander_unverified_value_fabricated")
+                  rows = opps.get("opportunities") or []
+                  ids = [str(row.get("id")) for row in rows]
+                  if len(ids) != len(set(ids)):
+                      raise RuntimeError("canonical_duplicate_in_active_api")
+                  forbidden = {"FIXTURE", "MOCK", "SIGNAL_ONLY", "UNVERIFIED", "DEMO_ONLY", "SYNTHETIC", "STALE", "REJECTED_SLOP"}
+                  for row in rows:
+                      if row.get("operational_state") != "EXECUTABLE" or forbidden & {str(v).upper() for v in row.values() if isinstance(v, str)}:
+                          raise RuntimeError(f"non_executable_active_row:{row.get('id')}")
+                  for marker in ("ATM Universal Money Radar", "status-pill", "CURRENT WORK", "PAYOUT DESTINATIONS / EARNINGS", "MetaMask / Base USDC", "Santander", "NOT_CONNECTED", "EXECUTABLE OPPORTUNITIES", "SUBMITTED NET", "WITHDRAWABLE", "SLOP REJECTED"):
+                      if marker not in page:
+                          raise RuntimeError(f"ui_marker_missing:{marker}")
+                  if page.count('class="status-pill"') != 1 or "overflow-wrap:anywhere" not in page or "min-width:0" not in page:
+                      raise RuntimeError("dashboard_dom_responsive_contract_failed")
+                  last = {
+                      "health_sha": health.get("git_sha"), "radar_sha": radar.get("source_sha"),
+                      "source_count": radar.get("source_count"), "opportunity_count": radar.get("opportunity_count"),
+                      "platform_count": len(platforms["platforms"]), "money": stages,
+                  }
+                  print(json.dumps({"ATM_ORDER009_LIVE_E2E": "PASS", **last}, sort_keys=True))
+                  raise SystemExit(0)
+              except SystemExit:
+                  raise
               except Exception as exc:
                   last = {"error": str(exc)}
               time.sleep(3)
-          raise SystemExit(f"Cloudflare exact-SHA smoke failed: {last}")
+          raise SystemExit(f"Canonical exact-SHA E2E smoke failed: {last}")
+          PY
+      - name: Publish durable ORDER-009 Cloudflare receipt
+        if: github.ref == 'refs/heads/pivot/universal-money-radar-r1'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DEPLOY_SHA: ${{ github.sha }}
+          DEPLOY_RUN_ID: ${{ github.run_id }}
+          DEPLOY_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          repo = os.environ["GITHUB_REPOSITORY"]
+          sha = os.environ["DEPLOY_SHA"]
+          run_id = os.environ["DEPLOY_RUN_ID"]
+          receipt = {
+              "schema": "ATM_ORDER009_CLOUDFLARE_DEPLOY_V1",
+              "sha": sha,
+              "run_id": run_id,
+              "run_attempt": os.environ["DEPLOY_RUN_ATTEMPT"],
+              "run_url": f"https://github.com/{repo}/actions/runs/{run_id}",
+              "canonical_url": "https://atm.simondalmasso44.workers.dev/",
+              "health_url": "https://atm.simondalmasso44.workers.dev/health",
+              "e2e": "PASS",
+              "radar_snapshot_exact_sha": True,
+              "outgoing_spend_usd": "0",
+              "merge": "NO",
+          }
+          body = "ATM ORDER009 CLOUDFLARE DEPLOY\n```json\n" + json.dumps(receipt, sort_keys=True) + "\n```"
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/{repo}/issues/7/comments",
+              data=json.dumps({"body": body}).encode(),
+              method="POST",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+                  "Content-Type": "application/json",
+                  "User-Agent": "ATM-Order009-Deploy-Receipt/1.0",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+          with urllib.request.urlopen(req, timeout=20) as response:
+              data = json.loads(response.read().decode())
+          print("ATM_ORDER009_DEPLOY_RECEIPT=" + str(data.get("html_url")))
           PY

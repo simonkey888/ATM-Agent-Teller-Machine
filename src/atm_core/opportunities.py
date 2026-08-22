@@ -19,6 +19,8 @@ from .payments import (
     WorkProtocolPaymentAdapter,
 )
 from .security import PromptInjectionRisk, assert_external_task_safe
+from .taskmarket_cli import TaskmarketCliLane, TaskmarketDuplicateSubmission
+from .taskmarket_maker import TaskmarketZeroCostMaker
 
 
 class OpportunityValidationError(ValueError):
@@ -225,6 +227,9 @@ class WorkProtocolOpportunityAdapter(OpportunityAdapter):
         )
         if not has_explicit_lock:
             raise OpportunityValidationError("WorkProtocol job lacks explicit per-job escrow evidence")
+        from .funding_gate import verify_base_escrow_receipt
+
+        verify_base_escrow_receipt(self, snapshot)
 
     def verify_eligibility(self, opportunity: Opportunity, snapshot: dict[str, Any]) -> None:
         job = snapshot.get("job") or snapshot
@@ -289,6 +294,12 @@ class WorkProtocolOpportunityAdapter(OpportunityAdapter):
         api_key, agent_id = self._auth()
         job_id = opportunity.canonical_opportunity_id.split(":", 1)[1]
         snapshot = self.http.get(f"{self.base_url}/api/jobs/{urllib.parse.quote(job_id)}")
+        self.verify_freshness(opportunity, snapshot)
+        self.verify_funding(opportunity, snapshot)
+        self.verify_eligibility(opportunity, snapshot)
+        current_hash = external_state_hash(snapshot)
+        if opportunity.external_state_hash and current_hash != opportunity.external_state_hash:
+            raise OpportunityValidationError("WorkProtocol state changed after VERIFY; re-verification cycle required")
         for claim in snapshot.get("claims") or []:
             if str(claim.get("agentId") or claim.get("agent_id") or "") == agent_id and claim.get("id"):
                 return {"claim": claim, "reused": True}
@@ -303,11 +314,32 @@ class WorkProtocolOpportunityAdapter(OpportunityAdapter):
         job_id = opportunity.canonical_opportunity_id.split(":", 1)[1]
         if not opportunity.claim_id:
             raise OpportunityValidationError("WorkProtocol submission requires claim_id")
-        return self.http.post_json(
-            f"{self.base_url}/api/jobs/{urllib.parse.quote(job_id)}/deliver",
-            {"claimId": opportunity.claim_id, "deliverable": {"type": "url", "url": deliverable_url}},
-            {"Authorization": f"Bearer {api_key}"},
-        )
+        def reconcile(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+            job = snapshot.get("job") if isinstance(snapshot.get("job"), dict) else {}
+            rows = [*(snapshot.get("deliveries") or []), *(job.get("deliveries") or [])]
+            for row in rows:
+                if not isinstance(row, dict) or str(row.get("claimId") or row.get("claim_id") or "") != opportunity.claim_id:
+                    continue
+                delivered = row.get("deliverable") if isinstance(row.get("deliverable"), dict) else {}
+                if str(delivered.get("url") or row.get("deliverableUrl") or "") == deliverable_url and row.get("id"):
+                    return {"delivery": row, "reused": True}
+            return None
+
+        existing = reconcile(self.fetch_authoritative(opportunity))
+        if existing:
+            return existing
+        key = hashlib.sha256(f"{job_id}|{opportunity.claim_id}|{deliverable_url}".encode()).hexdigest()
+        try:
+            return self.http.post_json(
+                f"{self.base_url}/api/jobs/{urllib.parse.quote(job_id)}/deliver",
+                {"claimId": opportunity.claim_id, "deliverable": {"type": "url", "url": deliverable_url}},
+                {"Authorization": f"Bearer {api_key}", "Idempotency-Key": key},
+            )
+        except Exception:
+            recovered = reconcile(self.fetch_authoritative(opportunity))
+            if recovered:
+                return recovered
+            raise
 
     def monitor(self, opportunity: Opportunity) -> dict[str, Any]:
         return self.fetch_authoritative(opportunity)
@@ -321,10 +353,17 @@ class TaskmarketOpportunityAdapter(OpportunityAdapter):
     name = "taskmarket"
     PAID_UPFRONT_MODES = {"pitch", "auction", "benchmark"}
 
-    def __init__(self, base_url: str = "https://api.taskmarket.dev", http: HttpJsonClient | None = None):
+    def __init__(
+        self,
+        base_url: str = "https://api.taskmarket.dev",
+        http: HttpJsonClient | None = None,
+        lane: TaskmarketCliLane | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.http = http or HttpJsonClient()
+        self.lane = lane or TaskmarketCliLane(http=self.http)
         self.payment_adapter: PaymentAdapter = TaskmarketPaymentAdapter(base_url=self.base_url, http=self.http)
+        self.skipped_task_ids: set[str] = set()
 
     def discover(self, min_reward_usd: Decimal) -> list[Opportunity]:
         min_base = int(min_reward_usd * Decimal(1_000_000))
@@ -332,11 +371,15 @@ class TaskmarketOpportunityAdapter(OpportunityAdapter):
         data = self.http.get(f"{self.base_url}/api/tasks?{query}")
         result: list[Opportunity] = []
         for task in data.get("tasks", []):
+            task_id = str(task.get("id") or task.get("taskId") or "")
+            if not task_id or task_id in self.skipped_task_ids:
+                continue
             mode = str(task.get("mode") or "bounty").lower()
             if bool(task.get("stakeRequired")) or mode in self.PAID_UPFRONT_MODES:
                 continue
+            description = str(task.get("description", ""))
             try:
-                assert_external_task_safe(str(task.get("description", "")))
+                assert_external_task_safe(description)
             except PromptInjectionRisk:
                 continue
             reward = Decimal(str(task.get("reward") or "0")) / Decimal(1_000_000)
@@ -349,7 +392,7 @@ class TaskmarketOpportunityAdapter(OpportunityAdapter):
                 else int(task.get("submissionCount") or task.get("submissionsCount") or 0)
             )
             p_accept = max(Decimal("0.05"), Decimal("1") / Decimal(submissions + 2))
-            task_id = task["id"] if "id" in task else task.get("taskId")
+            maker_supported = TaskmarketZeroCostMaker.supported_task(description)
             result.append(
                 Opportunity(
                     canonical_opportunity_id=f"taskmarket:{task_id}",
@@ -368,24 +411,27 @@ class TaskmarketOpportunityAdapter(OpportunityAdapter):
                     competition=submissions,
                     claims=1 if task.get("claimedBy") else 0,
                     open_prs=submissions,
-                    ai_policy="UNKNOWN",
-                    eligibility="PUBLIC_WITH_WALLET_SIGNATURE",
-                    claim_method="not required for bounty" if mode == "bounty" else "EIP-191 signature",
-                    submission_method="POST /api/tasks/:id/submissions with EIP-191 signature",
+                    ai_policy="AGENT_NATIVE",
+                    eligibility="PUBLIC_AGENT_TRUSTED_SIGNER_LANE",
+                    claim_method="not required for bounty",
+                    submission_method="first-party TaskMarket CLI after CHECK=PASS",
                     payment_method="USDC Base award settlement",
                     payout_latency="on settlement",
                     payout_latency_hours=Decimal("48"),
                     payment_proof_method="TaskDetailResponse.awards + settlementTxHash + Base receipt",
-                    expected_agent_hours=Decimal("6"),
-                    expected_owner_minutes=Decimal("2"),
-                    p_eligible=Decimal("0.70"),
-                    p_claim=Decimal("1") if mode == "bounty" else Decimal("0.80"),
-                    p_complete=Decimal("0.80"),
+                    expected_agent_hours=Decimal("1.5") if maker_supported else Decimal("6"),
+                    expected_owner_minutes=Decimal("0"),
+                    p_eligible=Decimal("0.95"),
+                    p_claim=Decimal("1"),
+                    p_complete=Decimal("0.85") if maker_supported else Decimal("0"),
                     p_accept=p_accept,
                     p_pay=Decimal("0.98"),
                     p_withdrawable=Decimal("0.98"),
                     external_state_hash=external_state_hash(task),
                     task_mode=mode,
+                    task_description=description,
+                    task_title=str(task.get("title") or description[:160]),
+                    maker_supported=maker_supported,
                 )
             )
         return result
@@ -400,6 +446,8 @@ class TaskmarketOpportunityAdapter(OpportunityAdapter):
         deadline = _dt(snapshot.get("expiryTime") or snapshot.get("deadline"))
         if deadline and deadline <= datetime.now(timezone.utc):
             raise OpportunityValidationError("Taskmarket task expired")
+        if snapshot.get("submissionWindowOpen") is not True:
+            raise OpportunityValidationError("Taskmarket submission window is not open")
 
     def verify_funding(self, opportunity: Opportunity, snapshot: dict[str, Any]) -> None:
         reward = Decimal(str(snapshot.get("reward") or "0"))
@@ -413,8 +461,10 @@ class TaskmarketOpportunityAdapter(OpportunityAdapter):
         if bool(snapshot.get("stakeRequired")):
             raise OpportunityValidationError("Taskmarket stakeRequired=true is prohibited")
         mode = str(snapshot.get("mode") or getattr(opportunity, "task_mode", "bounty")).lower()
-        if mode in self.PAID_UPFRONT_MODES:
-            raise OpportunityValidationError(f"Taskmarket mode {mode} requires prohibited upfront paid interaction")
+        if mode != "bounty" or mode in self.PAID_UPFRONT_MODES:
+            raise OpportunityValidationError(f"Taskmarket mode {mode} is outside zero-spend autonomous lane")
+        # Work class, runtime executor availability and duplicate truth are owned by
+        # the single Cash Canon invoked immediately after this untrusted-text gate.
 
     def inspect_competition(self, opportunity: Opportunity, snapshot: dict[str, Any]) -> dict[str, int]:
         submissions = snapshot.get("submissions") or []
@@ -423,30 +473,68 @@ class TaskmarketOpportunityAdapter(OpportunityAdapter):
             "open_prs": len(submissions) if isinstance(submissions, list) else int(snapshot.get("submissionCount") or 0),
         }
 
+    def canonical_admission(self, opportunity: Opportunity, snapshot: dict[str, Any]):
+        """Resolve signer, duplicate, capability and attack thresholds before allocation."""
+        from .cash_canon import taskmarket_cash_decision
+
+        task_id = opportunity.canonical_opportunity_id.split(":", 1)[1]
+        signer_ready = False
+        try:
+            signer_ready = bool(self.lane.preflight_signer().get("signer_present"))
+        except Exception:
+            signer_ready = False
+        decision = taskmarket_cash_decision(
+            snapshot,
+            canonical_wallet=self.lane.canonical_wallet,
+            existing_submission=self.lane.existing_submission(task_id) is not None,
+            signer_ready=signer_ready,
+            capability_runtime_ready=TaskmarketZeroCostMaker.supported_task(
+                str(snapshot.get("description") or getattr(opportunity, "task_description", ""))
+            ),
+        )
+        if not decision.allocation_allowed:
+            raise OpportunityValidationError("TaskMarket Cash Canon rejected allocation: " + ",".join(decision.reasons))
+        return decision
+
     def claim(self, opportunity: Opportunity) -> dict[str, Any]:
         mode = str(getattr(opportunity, "task_mode", "bounty")).lower()
         if mode == "bounty":
             return {"claim_required": False, "mode": "bounty"}
-        raise HumanGateRequired(
-            HumanGate(
-                kind="SIGNATURE",
-                reason="Taskmarket claim mode requires EIP-191 wallet signature; ATM never stores private keys",
-                exact_human_action="Use a separately controlled signer to authorize the Taskmarket claim without exposing the private key to ATM",
-                resume_phase=Phase.CLAIM,
-                opportunity_id=opportunity.canonical_opportunity_id,
-            )
-        )
+        raise OpportunityValidationError("Taskmarket non-bounty claim is outside zero-spend autonomous lane")
 
     def submit(self, opportunity: Opportunity, deliverable_url: str) -> dict[str, Any]:
-        raise HumanGateRequired(
-            HumanGate(
-                kind="SIGNATURE",
-                reason="Taskmarket submission requires an EIP-191 signature",
-                exact_human_action=f"Authorize the Taskmarket submission for {deliverable_url} with a separately controlled signer",
-                resume_phase=Phase.SUBMIT,
-                opportunity_id=opportunity.canonical_opportunity_id,
+        task_id = opportunity.canonical_opportunity_id.split(":", 1)[1]
+        try:
+            receipt = self.lane.submit_checked(
+                task_id,
+                deliverable_url,
+                checker_passed=bool(getattr(opportunity, "checker_passed", False)),
             )
-        )
+        except TaskmarketDuplicateSubmission as exc:
+            self.skipped_task_ids.add(task_id)
+            artifact_sha256 = str(getattr(opportunity, "artifact_sha256", ""))
+            manifest_verified = bool(
+                artifact_sha256 and self.lane._verify_manifest(task_id, exc.submission_id, artifact_sha256)
+            )
+            return {
+                "ok": True,
+                "submissionId": exc.submission_id,
+                "duplicate": True,
+                "idempotencyKey": "EXISTING_AUTHORITATIVE_SUBMISSION",
+                "artifactSha256": artifact_sha256,
+                "manifestVerified": manifest_verified,
+                "workerAddress": self.lane.canonical_wallet,
+                "outgoingSpendUsd": "0",
+            }
+        return {
+            "ok": True,
+            "submissionId": receipt.submission_id,
+            "idempotencyKey": receipt.idempotency_key,
+            "artifactSha256": receipt.artifact_sha256,
+            "manifestVerified": receipt.manifest_verified,
+            "workerAddress": receipt.wallet,
+            "outgoingSpendUsd": receipt.outgoing_spend_usd,
+        }
 
     def monitor(self, opportunity: Opportunity) -> dict[str, Any]:
         return self.fetch_authoritative(opportunity)

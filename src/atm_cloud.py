@@ -449,7 +449,7 @@ def sanitize_status(status: dict[str, Any]) -> dict[str, Any]:
                "realized_withdrawable_usd", "monthly_target_usd", "monthly_gap_usd", "required_daily_run_rate_usd",
                "payouts_count", "human_gate_count", "human_gate_categories", "active_task", "oci_capacity", "swarm",
                "money_board", "last_result_status", "cycle", "owner_pc_in_production_graph", "windows_authority",
-               "zero_spend", "cloud_run_id"}
+               "zero_spend", "cloud_run_id", "payout_destinations"}
     out = {k: v for k, v in status.items() if k in allowed}
     raw = json.dumps(out, default=str).lower()
     if any(x in raw for x in ["private_key", "seed", "mnemonic", "github_token", "google_api_key", "authorization", "bearer "]):
@@ -539,6 +539,7 @@ def build_status(core: Any, state: Any, ledger: Any, targets: Any, board: MoneyB
             "monthly_target_usd":base.get("MONTHLY_TARGET_USD","500"), "monthly_gap_usd":base.get("MONTHLY_GAP_USD","500"),
             "required_daily_run_rate_usd":base.get("REQUIRED_DAILY_RUN_RATE_USD","0"), "payouts_count":base.get("PAYOUTS_COUNT",0),
             "human_gate_count":0, "human_gate_categories":[], "active_task":active, "oci_capacity":capacity,
+            "payout_destinations":base.get("payout_destinations", []),
             "swarm":{"enabled":True,"active":True,"scouts":stats["scout_count"],"falsifiers":stats["falsified_count"],"workers":1,"watchers":1},
             "money_board":{"states":stats["candidate_counts"],"active_leases":stats["active_leases"]},
             "last_result_status":(state.last_result or {}).get("status") if isinstance(state.last_result,dict) else None,

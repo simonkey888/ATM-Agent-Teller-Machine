@@ -5,3 +5,6 @@ config/atm.json
 .atm/
 .env
 *.local
+*.egg-info/
+order015-*-benchmark.json
+order014-cash-mode-receipt.json

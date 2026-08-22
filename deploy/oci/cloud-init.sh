@@ -4,7 +4,7 @@ SHA="${ATM_SOURCE_SHA:?}"
 REPO="https://github.com/simonkey888/ATM-Agent-Teller-Machine.git"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y git curl jq ca-certificates python3 python3-venv python3-pip build-essential ripgrep ffmpeg
+apt-get install -y git curl jq ca-certificates python3 python3-venv python3-pip build-essential ripgrep ffmpeg bubblewrap
 id atm >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/atm --shell /bin/bash atm
 mkdir -p /var/lib/atm/state /var/lib/atm/.hermes /etc/atm /opt/atm
 chown -R atm:atm /var/lib/atm; chmod 700 /var/lib/atm/state

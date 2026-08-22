@@ -9,9 +9,24 @@ on:
         required: true
       ATM_AGENT_TELLER_MACHINE:
         required: true
+      TASKMARKET_KEYSTORE_B64:
+        required: false
   workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact PR head deployed by the durable scheduler
+        required: true
+        type: string
+      scheduler_source:
+        description: Auditable scheduler identity
+        required: true
+        type: string
+      scheduled_time:
+        description: Cloudflare scheduled-event timestamp
+        required: true
+        type: string
   push:
-    branches: [main, agent/atm-v1]
+    branches: [main, agent/atm-v1, pivot/universal-money-radar-r1]
     paths: [.github/atm-cloud-cycle-trigger.txt]
 
 permissions:
@@ -28,6 +43,7 @@ concurrency:
 jobs:
   cloud-cycle:
     runs-on: ubuntu-latest
+    environment: atm-production
     timeout-minutes: 5
     env:
       OCI_CONFIG_SECRET: ${{ secrets.OCI_CONFIG }}
@@ -35,17 +51,40 @@ jobs:
       ATM_REMOTE_BUNDLE: ${{ secrets.ATM_AGENT_TELLER_MACHINE }}
       OCI_CLI_CONFIG_FILE: ${{ github.workspace }}/.oci-cloud/config
       OCI_CLI_PROFILE: ATM_REMOTE
-      ATM_SOURCE_SHA: ${{ github.sha }}
+      ATM_SOURCE_SHA: ${{ inputs.expected_sha || github.sha }}
       ATM_GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.expected_sha || github.sha }}
           persist-credentials: false
+
+      - name: Durable scheduler exact-head fence
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          SCHEDULER_SOURCE: ${{ inputs.scheduler_source }}
+          SCHEDULED_TIME: ${{ inputs.scheduled_time }}
+        run: |
+          set -euo pipefail
+          test "$SCHEDULER_SOURCE" = "CLOUDFLARE_CRON_V1"
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          remote_sha="$(git ls-remote origin refs/heads/pivot/universal-money-radar-r1 | awk '{print $1}')"
+          test "$remote_sha" = "$EXPECTED_SHA"
+          [[ "$SCHEDULED_TIME" =~ ^[0-9]{10,16}$ ]]
+          echo "ATM_DURABLE_SCHEDULER=CLOUDFLARE_CRON_V1"
+          echo "ATM_RECURRING_EXACT_HEAD=$EXPECTED_SHA"
+          echo "ATM_SCHEDULED_TIME=$SCHEDULED_TIME"
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.11'
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
 
       - name: Zero-spend runner and repository guard
         shell: bash
@@ -73,6 +112,33 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --disable-pip-version-check -e . 'oci>=2.180,<3'
+
+      - name: Materialize existing TaskMarket signer boundary
+        shell: bash
+        env:
+          PYTHONPATH: src
+          TASKMARKET_API_URL: https://api.taskmarket.dev
+          TASKMARKET_KEYSTORE_B64: ${{ secrets.TASKMARKET_KEYSTORE_B64 }}
+          ATM_TASKMARKET_SIGNER_HOME: ${{ runner.temp }}/atm-taskmarket-signer
+        run: |
+          set -Eeuo pipefail
+          if [ -z "${TASKMARKET_KEYSTORE_B64:-}" ]; then
+            echo "TASKMARKET_SIGNER_SECRET_ABSENT"
+            exit 78
+          fi
+          python - <<'PY'
+          from atm_core.taskmarket_cli import CANONICAL_TASKMARKET_WALLET, materialize_supervisor_keystore
+          result = materialize_supervisor_keystore()
+          if not result.get('ready'):
+              raise SystemExit('TASKMARKET_SIGNER_SECRET_ABSENT')
+          if not result.get('transport_secret_removed'):
+              raise SystemExit('TASKMARKET_SIGNER_TRANSPORT_NOT_REMOVED')
+          if str(result.get('wallet') or '').lower() != CANONICAL_TASKMARKET_WALLET.lower():
+              raise SystemExit('TASKMARKET_SIGNER_WALLET_MISMATCH')
+          print('TASKMARKET_SIGNER_READY=true')
+          print('TASKMARKET_SIGNER_CANONICAL_WALLET_MATCH=true')
+          print('TASKMARKET_SIGNER_TRANSPORT_REMOVED=true')
+          PY
 
       - name: Materialize temporary OCI API profile
         shell: bash
@@ -108,6 +174,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           ATM_CLOUD_SLICE_SECONDS: '150'
           ATM_CLOUD_MAX_PHASES: '4'
+          ATM_TASKMARKET_SIGNER_HOME: ${{ runner.temp }}/atm-taskmarket-signer
         run: |
           set -euo pipefail
           set +x
@@ -115,6 +182,10 @@ jobs:
           IFS='|' read -r PAYOUT _BUNDLE_GH_PAT _LEGACY_MODEL_KEY REST <<< "$ATM_REMOTE_BUNDLE"
           test -z "${REST:-}" || { echo 'ATM_REMOTE_BUNDLE_FORMAT_INVALID'; exit 2; }
           [[ "$PAYOUT" =~ ^0x[0-9a-fA-F]{40}$ ]] || { echo 'ATM_REMOTE_BUNDLE_WALLET_INVALID'; exit 2; }
+          test -n "$_BUNDLE_GH_PAT" || { echo 'ORDER020_EVENT_SECRET_MISSING'; exit 2; }
+          export ATM_ORDER020_EVENT_SECRET="$_BUNDLE_GH_PAT"
           export ATM_BASE_WALLET_ADDRESS="$PAYOUT"
+          python src/order020_x402_reconcile.py
           python src/atm_cloud_fabric.py
-          unset PAYOUT _BUNDLE_GH_PAT _LEGACY_MODEL_KEY ATM_BASE_WALLET_ADDRESS
+          python src/order018_funnel_report.py
+          unset PAYOUT _BUNDLE_GH_PAT _LEGACY_MODEL_KEY ATM_BASE_WALLET_ADDRESS ATM_ORDER020_EVENT_SECRET

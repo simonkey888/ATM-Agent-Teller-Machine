@@ -1,4 +1,4 @@
-gate=worker-fabric-r1-current-pass-live-proof
-order=OWNER_MASTER_ORDER_ATM_WORKER_FABRIC_R1
-swarm_runtime_merge=e570630e3f939295b8fc0835f6e365eb3417ae28
-requested_utc=2026-08-17T10:48:00Z
+gate=order020-seller-finish
+order=ORDER-020
+reason=exact-head-seller-runtime-ledger-reconciliation
+requested_utc=2026-08-22T13:45:00Z
