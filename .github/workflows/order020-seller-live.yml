@@ -1,0 +1,36 @@
+name: ORDER-020 Seller Live
+
+on:
+  push:
+    branches: [pivot/universal-money-radar-r1]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: order020-seller-live
+  cancel-in-progress: true
+
+jobs:
+  seller-live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+
+      - name: Exact-head live discovery registration and readback
+        env:
+          ATM_ORDER020_WAIT_SECONDS: '540'
+          ATM_ORDER020_INDEX_WAIT_SECONDS: '420'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python scripts/order020_seller_live.py
