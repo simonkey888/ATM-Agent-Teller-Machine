@@ -1,7 +1,11 @@
+import { ensurePublicIndexes } from "./order020-register.js";
+
 const REPO = "simonkey888/ATM-Agent-Teller-Machine";
 const ORDER_ISSUE = 48;
 const EVENT_MARKER = "ATM ORDER020 X402 PAYMENT EVENT";
 const EVENT_AUTH_CONTEXT = "ATM-ORDER020-EVENT-V1:";
+const SELLER_ORIGIN = "https://atm.simondalmasso44.workers.dev";
+const SELLER_RESOURCE = SELLER_ORIGIN + "/x402/falsify";
 
 function base64Json(value) {
   return btoa(JSON.stringify(value));
@@ -271,6 +275,13 @@ export async function publishSellerPaymentEvent(env, event, fetchImpl = fetch) {
 }
 
 export async function sellerFunnel({ legacy, request, env, ctx, canonicalPayTo, fetchImpl = fetch }) {
+  // Every canonical funnel read is also an idempotent zero-spend public-index
+  // reconcile from Cloudflare egress. This avoids shared GitHub-runner IP quotas
+  // while preserving readback as the only authority for discoverability.
+  try {
+    await ensurePublicIndexes({ origin: SELLER_ORIGIN, resource: SELLER_RESOURCE });
+  } catch {}
+
   let events = [];
   const secret = String(env?.ATM_GITHUB_DISPATCH_TOKEN || "");
   try {
