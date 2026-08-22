@@ -12,6 +12,7 @@ from decimal import Decimal
 from typing import Any
 
 import atm_cloud
+import atm_cloud_fabric  # noqa: F401  # registers the canonical extended cloud-state allowlist
 import atm_v2
 from atm_core.models import PaymentStatus
 from atm_core.payments import (
