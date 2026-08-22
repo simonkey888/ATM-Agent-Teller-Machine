@@ -1,16 +1,57 @@
 const REPO = "simonkey888/ATM-Agent-Teller-Machine";
 const ORDER_ISSUE = 48;
 const EVENT_MARKER = "ATM ORDER020 X402 PAYMENT EVENT";
-const TRUSTED_AUTHORS = new Set(["simonkey888", "github-actions[bot]"]);
+const EVENT_AUTH_CONTEXT = "ATM-ORDER020-EVENT-V1:";
 
 function base64Json(value) {
   return btoa(JSON.stringify(value));
 }
 
+function hex(bytes) {
+  return [...new Uint8Array(bytes)].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
 export async function sha256Hex(value) {
   const bytes = new TextEncoder().encode(String(value));
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)].map((x) => x.toString(16).padStart(2, "0")).join("");
+  return hex(await crypto.subtle.digest("SHA-256", bytes));
+}
+
+function eventAuthPayload(event) {
+  return [
+    String(event?.schema || ""),
+    String(event?.payment_event_id || ""),
+    String(event?.resource || ""),
+    String(event?.settlement_tx || "").toLowerCase(),
+    String(event?.payer || "").toLowerCase(),
+    String(event?.recipient || "").toLowerCase(),
+    String(event?.network || ""),
+    String(event?.chain_id ?? ""),
+    String(event?.token || "").toLowerCase(),
+    String(event?.amount_atomic || ""),
+    String(event?.input_sha256 || "").toLowerCase(),
+    String(event?.source_sha || "").toLowerCase(),
+    String(event?.observed_at || ""),
+    event?.onchain_proven === true ? "1" : "0",
+    event?.external_buyer === true ? "1" : "0",
+    String(event?.outgoing_spend_usd || ""),
+  ].join("\n");
+}
+
+async function eventAuthTag(secret, event) {
+  const encoder = new TextEncoder();
+  const derived = await crypto.subtle.digest("SHA-256", encoder.encode(EVENT_AUTH_CONTEXT + String(secret)));
+  const key = await crypto.subtle.importKey("raw", derived, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return hex(await crypto.subtle.sign("HMAC", key, encoder.encode(eventAuthPayload(event))));
+}
+
+async function verifyEventAuth(secret, event) {
+  const actual = String(event?.event_auth_hmac_sha256 || "").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(actual) || !secret) return false;
+  const expected = await eventAuthTag(secret, event);
+  if (actual.length !== expected.length) return false;
+  let diff = 0;
+  for (let i = 0; i < actual.length; i += 1) diff |= actual.charCodeAt(i) ^ expected.charCodeAt(i);
+  return diff === 0;
 }
 
 export function bazaarExtension({ resourceUrl, network, asset, payTo, amountAtomic }) {
@@ -82,7 +123,6 @@ export function bazaarExtension({ resourceUrl, network, asset, payTo, amountAtom
 }
 
 export function openApiDocument({ origin, path, network, asset, payTo, amountAtomic }) {
-  const resourceUrl = origin + path;
   const inputSchema = {
     type: "object",
     additionalProperties: false,
@@ -115,7 +155,7 @@ export function openApiDocument({ origin, path, network, asset, payTo, amountAto
           security: [{ x402Payment: [] }],
           "x-payment-info": {
             price: { mode: "fixed", currency: "USD", amount: "0.010000" },
-            protocols: [{ x402: {} }],
+            protocols: ["x402"],
           },
           requestBody: {
             required: true,
@@ -209,7 +249,8 @@ async function latestIssueComments(fetchImpl = fetch) {
 export async function publishSellerPaymentEvent(env, event, fetchImpl = fetch) {
   const token = String(env?.ATM_GITHUB_DISPATCH_TOKEN || "");
   if (!token) return { published: false, reason: "ACCOUNTING_TRANSPORT_CREDENTIAL_MISSING" };
-  const body = EVENT_MARKER + "\n```json\n" + JSON.stringify(event, null, 2) + "\n```";
+  const signedEvent = { ...event, event_auth_hmac_sha256: await eventAuthTag(token, event) };
+  const body = EVENT_MARKER + "\n```json\n" + JSON.stringify(signedEvent, null, 2) + "\n```";
   const response = await fetchImpl(`https://api.github.com/repos/${REPO}/issues/${ORDER_ISSUE}/comments`, {
     method: "POST",
     headers: {
@@ -231,9 +272,13 @@ export async function publishSellerPaymentEvent(env, event, fetchImpl = fetch) {
 
 export async function sellerFunnel({ legacy, request, env, ctx, canonicalPayTo, fetchImpl = fetch }) {
   let events = [];
+  const secret = String(env?.ATM_GITHUB_DISPATCH_TOKEN || "");
   try {
     const comments = await latestIssueComments(fetchImpl);
-    events = (Array.isArray(comments) ? comments : []).map(parseEvent).filter(Boolean);
+    const parsed = (Array.isArray(comments) ? comments : []).map(parseEvent).filter(Boolean);
+    for (const event of parsed) {
+      if (await verifyEventAuth(secret, event)) events.push(event);
+    }
   } catch {}
   const external = events.filter((row) =>
     String(row.recipient || "").toLowerCase() === canonicalPayTo.toLowerCase() &&
