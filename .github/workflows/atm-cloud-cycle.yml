@@ -183,6 +183,7 @@ jobs:
           test -z "${REST:-}" || { echo 'ATM_REMOTE_BUNDLE_FORMAT_INVALID'; exit 2; }
           [[ "$PAYOUT" =~ ^0x[0-9a-fA-F]{40}$ ]] || { echo 'ATM_REMOTE_BUNDLE_WALLET_INVALID'; exit 2; }
           export ATM_BASE_WALLET_ADDRESS="$PAYOUT"
+          python src/order020_x402_reconcile.py
           python src/atm_cloud_fabric.py
           python src/order018_funnel_report.py
           unset PAYOUT _BUNDLE_GH_PAT _LEGACY_MODEL_KEY ATM_BASE_WALLET_ADDRESS
